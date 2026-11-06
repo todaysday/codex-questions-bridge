@@ -791,6 +791,7 @@ PicoClaw-specific configuration after verifying the installed schema:
     "mcp": {"enabled": true, "servers": {"cqb": {"enabled": true, "type": "stdio", "command": "python3", "args": ["-u", "..."]}}}
   },
   "agents": {
+    "defaults": {"context_window": 1000000, "summarize_token_percent": 80, "summarize_message_threshold": 100000},
     "list": [
       {"id": "main", "default": true, "workspace": "<home>/ws-main", "model": "<main model_name>",
        "subagents": {"allow_agents": ["codex-status"]}},
@@ -801,7 +802,7 @@ PicoClaw-specific configuration after verifying the installed schema:
 }
 ```
 
-This is only a **configuration fragment**. The keys shown (`allow_origins`, `tools.<name>.enabled`, `agents.list[].subagents.allow_agents`, `agents.list[].workspace/model`) were verified on PicoClaw v0.3.1 with a mock model (S0-B follow-ups, S0-D) and **must be re-checked against any other installed version**; the `session.dimensions` fragment was not part of those checks. No secrets appear in it. Real PicoClaw config also requires working `model_list`, `agents.defaults.model_name` and per-agent `AGENT.md`; there is no `channel_list.telegram` entry, because Bridge owns Telegram. Notes:
+This is only a **configuration fragment**. The keys shown (`allow_origins`, `tools.<name>.enabled`, `agents.list[].subagents.allow_agents`, `agents.list[].workspace/model`) were verified on PicoClaw v0.3.1 with a mock model (S0-B follow-ups, S0-D; the `agents.defaults.context_window` and `summarize_*` keys come from the v0.3.1 source and example config and are not yet tested at runtime) and **must be re-checked against any other installed version**; the `session.dimensions` fragment was not part of those checks. No secrets appear in it. Real PicoClaw config also requires working `model_list`, `agents.defaults.model_name` and per-agent `AGENT.md`; there is no `channel_list.telegram` entry, because Bridge owns Telegram. Notes:
 
 - The pico token is a secret: it goes into PicoClaw's `.security.yml` (`channel_list.pico.settings.token`, mode `0600`) and Bridge's own secret store, never into this JSON or Git. The channel does not start without a token.
 - `allow_from` must contain `"pico-user"` or `"*"`; a non-matching value silently drops all messages. Bind the gateway to loopback. Verified on v0.3.1: `allow_origins` unset, `[]` and `["*"]` accept every connection including one without `Origin`; a specific origin list rejects clients without an `Origin` (403); `[""]` accepts only clients with no or empty `Origin`, which blocks every browser while the Bridge connects. Use `"allow_origins": [""]` together with token auth and host `127.0.0.1` (this relies on source behaviour for the empty-string entry, which is undocumented; fallback `["*"]` with token plus loopback).
@@ -935,7 +936,7 @@ Cost factors:
 - **Polling:** local read I/O only; no LLM and no heartbeat prompting agents.
 - **Questions:** capture/notification zero LLM; discussion is on-demand. No LLM on button selection/copy.
 
-Initial runtime defaults: single SQLite database, one Bridge process, 30-second inventory polling, on-demand status, PicoClaw session compaction enabled, per-call log byte caps, inexpensive user-configured status model. No automatic daily status cron or idle monitor.
+Initial runtime defaults: single SQLite database, one Bridge process, 30-second inventory polling, on-demand status, rare PicoClaw session compaction (the consultant runs on OmniRoute `Beam` 1.0 with a 1M-token context; in PicoClaw v0.3.1 source, summarization starts when the session has more than `summarize_message_threshold` messages (default 20) OR its estimated tokens exceed `summarize_token_percent` of `context_window` (defaults 75% of `4 x max_tokens`, i.e. about 32k), so `agents.defaults` sets `context_window` 1000000, `summarize_token_percent` 80 (about 800k tokens) and a very large `summarize_message_threshold`; read from source, not yet tested at runtime; heavy log reading still goes through the Status Agent so the consultant's own context stays small), per-call log byte caps, inexpensive user-configured status model. No automatic daily status cron or idle monitor.
 
 ## 14. Known compatibility constraints / decisions requiring a real test
 
