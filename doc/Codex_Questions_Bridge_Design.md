@@ -1,6 +1,6 @@
 # Codex Questions Bridge — Technical Design
 
-**Version:** 0.1  
+**Version:** 0.2  
 **Date:** 2026-11-06  
 **Status:** Design / implementation-ready with explicitly identified integration spikes  
 **Runtime:** Codex Desktop / Codex App Server + PicoClaw + Telegram Forum Topics + one lightweight Bridge service
@@ -16,8 +16,8 @@
 5. **PicoClaw owns dialogs and model calls.** Each consultant has a persistent conversation scoped to its Telegram topic; it loads Codex context lazily through Bridge's read-only tools.
 6. **`/status` invokes an ephemeral PicoClaw Status Agent.** It scans actual Codex log entries for the root thread and its descendants. Worker Codex agents are not asked to produce summaries and need no prompt changes.
 7. **Status is on demand, not periodic.** A no-change result should avoid LLM calls where possible; otherwise keep calls and retrieved bytes bounded.
-8. **Read-only is a hard boundary, not merely an instruction.** PicoClaw and Status Agent cannot edit repositories or Codex history through Bridge.
-9. **Original `request_user_input` remains controlled by Codex Desktop in V1.** Telegram can capture, explain and stage a decision, but may not claim to complete the pending RPC. Automated completion is an explicit later integration slice.
+8. **Read-only is a hard boundary, not merely an instruction.** PicoClaw and Status Agent cannot edit repositories or Codex history through Bridge. Bridge's own app-server connection is limited to a method whitelist (list/read/resume/unsubscribe, plus answering a captured question request); every other method is refused client-side.
+9. **Bridge is a client of the existing shared Codex app-server daemon and receives live `request_user_input` requests.** Verified 2026-11-06 on Codex 0.164: every connection subscribed to the thread (including one that joins while the question is pending) gets the same request, and any of them can answer it. Telegram may capture, explain and answer, but shows an answer as delivered only after `serverRequest/resolved`; the first answer wins.
 10. **Archive/unarchive mirrors thread state.** Close/reopen existing consultant topics; preserve PicoClaw session and Telegram messages. Do not delete data when a thread is archived.
 11. **No cloud dependency beyond Telegram and chosen LLM provider.** Bridge, SQLite, Codex history and PicoClaw run on a host with access to the same Codex profile. Remote agents are explicitly configured as separate sources.
 12. **Implementation priorities:** Pragmatic DDD (DAO/DTO) → SRP → KISS/YAGNI → DRY. No microservices, message broker, vector database, separate dashboard or complex orchestration.
@@ -27,8 +27,8 @@
 ```mermaid
 flowchart TD
     CD[Codex Desktop / CLI] -->|Writes durable thread history| STORE[(Codex session store)]
-    CD -.->|Optional local App Server access| AS[Codex App Server]
-    AS -->|Read-only thread APIs| BR
+    CD -->|Same shared daemon| AS[Codex App Server daemon]
+    AS <-->|Whitelisted thread APIs, question requests and answers| BR
     STORE -->|Read-only fallback| BR[Codex Questions Bridge]
     BR <--> DB[(SQLite)]
     BR <-->|Topic CRUD, control UI, Inbox| TB[Telegram Bot: bridge]
@@ -41,7 +41,7 @@ flowchart TD
     SA -->|Read-only, bounded tools| BR
 ```
 
-**Physical deployment:** normally one process `bridge` + one PicoClaw gateway + SQLite. Codex remains unchanged. Bridge and PicoClaw may be on a Linux VDS while Codex runs elsewhere **only if** the remote Codex home can be securely read or a remote read-only adapter is deployed. Local filesystem access is the simplest default, not something to assume across machines.
+**Physical deployment:** normally one process `bridge` + one PicoClaw gateway + SQLite. Codex remains unchanged. The primary deployment is on the same host as the Codex daemon, connecting to its existing control socket (no second app-server). A Mac gets its own separately launched Bridge instance with its own `source_id`. Bridge and PicoClaw may be on a Linux VDS while Codex runs elsewhere **only if** the remote Codex home can be securely read or a remote read-only adapter is deployed. Local filesystem access is the simplest default, not something to assume across machines.
 
 **Two Telegram bots, one group:** Bridge Bot manages service topics, buttons and registry messages. PicoClaw Bot handles consultant conversations. They have distinct bot tokens and distinct update streams. **Never assume one bot automatically receives messages from the other.** Consultant context comes from Bridge tools/registry, not from reading Bridge Bot messages in Telegram. Telegram has opt-in bot-to-bot communication modes, but this design does not depend on them.
 
@@ -52,7 +52,7 @@ flowchart TD
 | `codex_reader` | Thread inventory, descendants, persisted events and archive state | Starting turns, prompting Codex, modifying thread history |
 | `thread_registry` | Durable identity, aliases, root/child relationships, status | PicoClaw histories |
 | `consultant_registry` | `Codex root ↔ Telegram topic ↔ PicoClaw session key` | Agent reasoning, session summarization |
-| `question_inbox` | Captured questions, options, resolution states, Inbox messages | Arbitrary user input into Codex Desktop's pending RPC |
+| `question_inbox` | Captured questions, options, resolution states, Inbox messages, answers to the exact captured request | Free-form input into Codex |
 | `context_api` | Scoped read-only search/read/events tools, caps and redaction | Semantic reasoning and autonomous agent decisions |
 | `telegram_control` | `/threads`, callbacks, buttons, topic create/close/open, Inbox UI | Consultant replies |
 | `status_cursors` | Last successfully covered event per root and child | LLM progress interpretation |
@@ -135,24 +135,24 @@ Captures questions even when **no consultant exists** for that Codex root. Examp
 
 ```text
 ❓ FoxProfile — User Access · 12:19
-request_user_input · q_17 · waiting/unverified
+request_user_input · q_17 · pending_confirmed
 
 Where store profile settings?
 A. Existing table
 B. Separate table
 
-[💬 Open consultant / ➕ Create] [📋 Copy answer] [🔎 Source]
+[A] [B] [✍️ Другое] [💬 Open consultant / ➕ Create] [🔎 Source]
 ```
 
 Question states (do not conflate):
 
 - `captured` — question observed; no proof that the original request remains open.
-- `pending_confirmed` — only if a reliable connected requester/host confirms an outstanding RPC.
+- `pending_confirmed` — the live request was received on a subscribed Bridge connection (or the thread reports `waitingOnUserInput`) and `serverRequest/resolved` has not been seen.
 - `decision_staged` — user chose an option in Telegram; **not yet delivered to Codex**.
-- `resolved_observed` — Codex continuation/request lifecycle confirms resolution, or the user explicitly marks it answered; preserve resolution provenance.
+- `resolved_observed` — `serverRequest/resolved` or the request lifecycle confirms resolution, whoever answered; or the user explicitly marks it answered; preserve resolution provenance.
 - `expired_or_stale` — request is no longer actionable or could not be confirmed.
 
-On V1, button `Copy answer` stages/copies the selection and tells the user to answer in Codex Desktop; do not deceptively label it `Send answer`. The consultant is optional: a question may be handled without creating one.
+An option button stages the choice (`decision_staged`) and asks for confirmation; confirming sends the answer through the shared daemon. Questions with `isSecret: true` are never relayed to Telegram or an LLM (the Inbox only says that secret input is requested and must be given in Codex). The consultant is optional: a question may be handled without creating one.
 
 ### 2.4 Consultant commands
 
@@ -173,7 +173,7 @@ On V1, button `Copy answer` stages/copies the selection and tells the user to an
 
 ### 3.1 Codex read model: primary path
 
-Preferred: separate **read-only** `codex app-server` connection with access to the same local account's persisted thread store (if deployment/version supports it). Use:
+Preferred: a whitelisted connection to the existing shared `codex app-server` daemon (if deployment/version supports it). Use:
 
 - `thread/list` with `archived: false`, pagination, `sortKey: "updated_at"`, `sourceKinds`, `currentAccountOnly` where appropriate.
 - `thread/read` for thread metadata **without resuming**.
@@ -184,7 +184,7 @@ Preferred: separate **read-only** `codex app-server` connection with access to t
 
 The listed App Server methods and relationship filters are documented. The experimental `ancestorThreadId` filter requires the experimental capability; implement a feature probe. `thread/items/list` requires a compatible backing store, so provide an alternative.
 
-**Important operational constraint:** our read-only App Server is **not automatically the same JSON-RPC connection that Codex Desktop uses**. It can inspect persisted history, but it must not be assumed to receive Desktop's live server→client `item/tool/requestUserInput` requests or be allowed to answer them. This matters even if both processes share the filesystem.
+**Operational constraint (verified 2026-11-06):** Bridge does not start its own app-server; it connects as an additional client to the existing shared daemon's control socket (`<CODEX_HOME>/app-server-control/app-server-control.sock`, WebSocket over a unix socket, root-only). A client that calls `thread/resume` on a thread receives that thread's live `item/tool/requestUserInput` requests, including a replay if it joins while the question is pending, and can answer them. Without resume it still sees `thread/status/changed` with `waitingOnUserInput`. `thread/resume` fails on ephemeral threads and before the first user message (`no rollout found`). The connection has full rights, so the method whitelist (decision 8) is the only read-only boundary.
 
 ### 3.2 Fallback: Codex JSONL read-only parser
 
@@ -229,9 +229,9 @@ Do not infer "active", "waiting" or "finished" from last-update time alone. Reco
 
 ### 3.4 Question capture: capability gate, not an assumption
 
-The built-in question is an App Server server→client request `item/tool/requestUserInput`, with later `serverRequest/resolved`. **These live requests are normally delivered to the client that owns the Codex session (e.g. Desktop)**. Observing another App Server process's stored history is not equivalent to intercepting that live request.
+The built-in question is an App Server server→client request `item/tool/requestUserInput`, with later `serverRequest/resolved`. **The shared daemon delivers them to every connection subscribed to the thread** (verified, see §3.1), so a Bridge client on that daemon sees live questions. Reading the stored history of a separate App Server process would not.
 
-**Candidate A — Codex `PreToolUse` hook:** Codex hook documentation confirms coverage for many local function tools and MCP calls. **Whether a particular installed Codex version invokes `PreToolUse` on the built-in `request_user_input` must be tested**. Do not ship an untested hook matcher as though guaranteed. The stable inputs, when supported, include `session_id`, `turn_id`, `tool_name`, `tool_use_id`, `tool_input`.
+**Candidate A (optional, unverified, not needed while C works) — Codex `PreToolUse` hook:** Codex hook documentation confirms coverage for many local function tools and MCP calls. **Whether a particular installed Codex version invokes `PreToolUse` on the built-in `request_user_input` must be tested**. Do not ship an untested hook matcher as though guaranteed. The stable inputs, when supported, include `session_id`, `turn_id`, `tool_name`, `tool_use_id`, `tool_input`.
 
 Illustrative hook after a successful on-device trace (not a guaranteed supported matcher):
 
@@ -250,9 +250,9 @@ The hook should quickly write/spool an event and exit; it must not block the Cod
 
 **Candidate B — persisted event journal:** inspect thread history for request/question records and completion records. This is best-effort and might not see a live pending prompt until it is resolved. If uncertain show `captured`, never `pending_confirmed`.
 
-**Candidate C — own Codex host/client:** a future mode can own the App Server connection and all server→client requests; full answer-in-Telegram is possible there, but moving ownership away from Codex Desktop is not in MVP scope.
+**Candidate C (primary, verified 2026-11-06) — additional client on the shared daemon:** Bridge subscribes with `thread/resume` and receives the request; it does not take ownership from Desktop. In our test the tool was available in `plan` collaboration mode (`turn/start.collaborationMode`); default mode is gated by the feature `default_mode_request_user_input` (off in 0.164). Remaining tests: simultaneous answers from two clients, Desktop/mobile as co-subscribers.
 
-**Decision gate:** If neither A nor B can observe live questions reliably, ship thread/consultant/status stages independently and mark the Inbox as `unavailable` until a supported source is installed. Do not invent questions or pollute the user's workflow.
+**Decision gate:** If C fails and neither A nor B can observe live questions reliably, ship thread/consultant/status stages independently and mark the Inbox as `unavailable` until a supported source is installed. Do not invent questions or pollute the user's workflow.
 
 ## 4. Consultant context model: lazy, scoped and reusable
 
@@ -380,13 +380,13 @@ async def build_status_scope(source_id, root_id, mode, now):
 async def finish_status(report, scope):
     if report.delivery_confirmed:
         await dao.save_status_report(report)
-        await dao.advance_status_cursors(scope.highwaters)  # atomic transaction
+        await dao.advance_status_cursors(report.read_until)  # only what was actually read; atomic transaction
     # else: retry-safe; do not lose unread events
 ```
 
 **New child case:** if a previously unknown agent appears, start its cursor at its creation event (bounded by request limits), not at its newest item. If there are many children, report coverage (`8/11 agents scanned`) and offer focused `/status <agent>`.
 
-**High-water discipline:** do not advance to events written *during* the LLM's analysis; those belong to the next report. A crash after Telegram delivery but before cursor commit can duplicate a report; suppress with a report ID/idempotency key, not by skipping evidence.
+**High-water discipline:** do not advance to events written *during* the LLM's analysis; those belong to the next report. If caps truncated the read, advance only to the last event actually covered (`read_until`), never to the high-water mark. A crash after Telegram delivery but before cursor commit can duplicate a report; suppress with a report ID/idempotency key, not by skipping evidence.
 
 ### 5.3 What the Status Agent analyzes
 
@@ -489,21 +489,21 @@ type Question = {
 5. In consultant's topic, user asks why option A vs B.
 6. PicoClaw calls get_questions + read_history/search_history, if needed.
 7. User discusses alternatives; Codex execution is not touched.
-8. User selects/copies final answer in Inbox; V1 marks decision_staged.
-9. User answers in the original Codex Desktop prompt.
-10. Observer/polling reconciles question as resolved if evidence exists.
+8. User selects an option in Inbox; Bridge marks decision_staged and asks for confirmation.
+9. On confirmation Bridge answers the captured request through the shared daemon (or the user answers in Codex Desktop instead).
+10. `serverRequest/resolved` marks the question resolved_observed, whoever answered.
 ```
 
 An Inbox-created consultant is still **manual creation by a user clicking the explicit button**; no automatic consultant creation is permitted.
 
-### 6.3 Future answer delivery (separate slice)
+### 6.3 Answer delivery
 
 Two different protocols are not interchangeable:
 
-- **Built-in `item/tool/requestUserInput` (server→host):** the owning Codex Desktop connection has to provide the response. A Telegram/Bridge decision cannot simply be appended as an ordinary `turn/start` or `turn/steer` message. Connecting another independent app-server instance does not grant ownership of Desktop's pending request.
+- **Built-in `item/tool/requestUserInput` (server→client):** answered with a JSON-RPC response to the request id, `{answers: {<question_id>: {answers: [...]}}}`, by any connection subscribed to the thread (verified). It cannot be sent as an ordinary `turn/start` or `turn/steer` message. A separate independent app-server instance would not see the request; a connection to the shared daemon does.
 - **Custom MCP `questions.ask`:** Codex can be instructed to use a tool owned by Bridge, whose execution may be paired with a Telegram response. This changes the question entry point, requires opt-in agent instructions, durable request state, cancellation and bounded waiting; it is **not** a transparent replacement for built-in questions.
 
-Do not implement either until the source and lifecycle of live questions are tested. Design the answer repository interface for later extension:
+Build the built-in path first; the custom MCP `questions.ask` is only needed if that proves insufficient. Answer repository interface:
 
 ```python
 class AnswerSink(Protocol):
@@ -512,10 +512,13 @@ class AnswerSink(Protocol):
 class ManualDesktopAnswerSink:
     async def deliver(...): return DeliveryResult("staged_only")
 
-# Future: HostOwnedRpcAnswerSink or CustomMcpAskSink
+class AppServerAnswerSink:
+    async def deliver(...): ...   # JSON-RPC response on the daemon connection; first answer wins
+
+# Optional later: CustomMcpAskSink
 ```
 
-Never display `Answered in Codex` until delivery is acknowledged by the actual controlling mechanism.
+Never display `Answered in Codex` until `serverRequest/resolved` is observed.
 
 ## 7. Archive and lifecycle synchronization
 
@@ -720,10 +723,11 @@ recency_days = 30
 experimental_relation_filters = true
 
 [[codex.sources]]
-id = "mac-work"
-label = "Mac · work"
+id = "hetzner"
+label = "Hetzner · root"
 backend = "app_server"       # fallback: jsonl
-codex_home = "/Users/me/.codex"
+codex_home = "/root/.codex"
+socket = "/root/.codex/app-server-control/app-server-control.sock"
 account_label = "work"
 
 [status]
@@ -788,6 +792,8 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 - Redact likely secrets/token headers, private keys, credential files and long binary outputs before sending to LLM/Telegram. Clearly label redacted/truncated evidence; avoid turning redaction into a misleading summary.
 - Resolve filesystem symlinks and normalize project paths; only read allowlisted paths, with byte caps. Never allow `../../`, arbitrary `$HOME` or secrets in project file tools.
 - All mutations via Telegram callbacks require verified `from.id`, configured group/chat/topic and unexpired one-time action; audit decision events and failures.
+- The daemon control socket is root-only and grants full app-server rights. Bridge reaches it only through the method whitelist; it is never exposed to the consultant or Status Agent.
+- Answering a captured question is a mutation: verified `from.id`, one-time unexpired action and explicit confirmation are required; `isSecret` questions are never forwarded.
 - Protect local MCP or context endpoint (Unix socket preferred, mode 0600, localhost only if unavoidable); don't expose it to Internet.
 - Telegram group/chat history and remote LLM calls are data egress. The user must explicitly approve sending potentially sensitive development logs to these external services; provide per-source redaction/deny rules.
 
@@ -807,18 +813,19 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 | New events during status processing | Keep original high-water; next run picks up | No lost delta |
 | No new events | Prefer deterministic no-change response | No new logged activity |
 | Question captured but actual RPC unknown | Keep `captured`, not pending confirmed | Unverified prompt state |
-| Telegram answer selected in V1 | Stage/copy only | Explicit instruction to answer in Codex |
+| Telegram answer selected | Stage, confirm, answer via shared daemon | `Sent`; `Answered` only after `serverRequest/resolved` |
+| Another client answers first | Close card on `serverRequest/resolved` | Answered elsewhere |
 | Different Codex accounts or hosts | Keep separate `source_id` namespaces | Never combine source data |
 
 ## 12. Acceptance, test plan and implementation slices
 
 ### 12.1 Blocking feasibility spikes (before feature coding)
 
-**S0-A — Codex reader (must pass):** on the installed Codex Desktop/CLI version, list two existing root threads, a child/subagent, read recent events, identify archived status, and confirm what is available from an independent reader. Verify `ancestorThreadId` support; test JSONL fallback if needed. Capture sample fixtures.
+**S0-A — Codex reader (must pass):** on the installed Codex Desktop/CLI version, list two existing root threads, a child/subagent, read recent events, identify archived status, and confirm what is available from an independent reader. Verify `ancestorThreadId` support; test JSONL fallback if needed. Capture sample fixtures. Use the existing daemon socket; do not start a second app-server.
 
 **S0-B — Telegram/PicoClaw integration (must pass):** create two topics manually via Bridge; send messages; verify PicoClaw contexts remain isolated on reopen/restart; verify it ignores `📋 Треды` and `📥 Inbox`; verify secure topic→root binding without trusting LLM-provided ID. Determine native gateway/hook vs single-bot CLI fallback.
 
-**S0-C — Real question capture (feature gate):** trigger a real `request_user_input` in Codex Desktop, inspect `PreToolUse` trace and persisted journal; verify whether options are observable before user responds. Then trigger another after interrupt/restart. If not feasible, ship other features but mark native Inbox capture unavailable.
+**S0-C — Real question capture (passed 2026-11-06 for the daemon client path):** on a throwaway thread a second client received the live request with full options, answered it, and a late-joining client received a replay. Still to test: simultaneous answers from two clients, Desktop/mobile as co-subscribers, Bridge reconnect mid-question. Hook and journal paths are optional fallbacks.
 
 **S0-D — Agent delegation (must pass for `/status`):** prove `delegate(agent_id="codex-status")` with actual configured model, read-only tools and bounded result to the parent; verify it uses a fresh temporary context per invocation.
 
@@ -830,8 +837,8 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 | S2 Consultant | Explicit create/open, topic binding, persistent PicoClaw session, archive/reopen | +300–550 LOC | One consultant per root, survives restart/archive |
 | S3 Context | Scoped lazy read/search and child discovery | +250–450 LOC | Read only bound root and descendants, pagination/truncation |
 | S4 Status | Delegated temporary status agent, coverage, cursors, `/status` variants | +300–550 LOC | Accurate evidence-backed delta; no Codex worker prompts |
-| S5 Questions | Capture, Inbox states, consultant cross-reference, stage/copy answer | +200–450 LOC | Pending accuracy matches observed capability; no false delivery claim |
-| S6 Optional answer delivery | Owner-host RPC integration or opt-in MCP ask | **TBD** | Exactly-once acknowledged answer and cancellation handling |
+| S5 Questions | Capture, Inbox states, consultant cross-reference, answer via shared daemon | +250–500 LOC | Pending state matches observed requests; delivery claimed only after `serverRequest/resolved` |
+| S6 Optional hardening | Concurrent-answer race handling; opt-in MCP ask only if needed | **TBD** | Exactly-once acknowledged answer and cancellation handling |
 
 Estimates are **rough incremental LOC**, with reuse from PicoClaw/Telegram/Codex. Actual S1–S5 range is approximately **1,350–2,400 LOC including tests**; earlier narrower estimates did not include robust status inspection, account isolation, failure recovery and question-capture uncertainty. Don't treat lines of code as a delivery-time guarantee.
 
@@ -850,7 +857,7 @@ Estimates are **rough incremental LOC**, with reuse from PicoClaw/Telegram/Codex
 11. A subagent archives while root remains active → consultant topic stays open.
 12. A source temporarily disappears → no false "archived" label.
 13. Inbox receives an actual observed question with exact options; if capture is unsupported, show capability warning rather than fictitious question.
-14. Staged Telegram decision is clearly **not** presented as delivered to a live Codex Desktop request.
+14. An answer from Telegram is presented as delivered only after `serverRequest/resolved`; if Desktop answers first, the Inbox card closes as answered elsewhere.
 15. Unauthorized Telegram user cannot list threads, create consultants, read logs or trigger status.
 16. Security test inserts prompt-injection strings and secrets into a Codex log; consultant neither executes commands nor exposes secrets.
 
@@ -881,11 +888,11 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 
 | Issue | Current design treatment |
 |---|---|
-| Separate Bridge reading same Codex Desktop store | Test local read API and JSONL; **no assumption of shared live RPC ownership** |
+| Bridge as a client of the shared daemon | Verified 2026-11-06: live requests reach subscribed clients; JSONL remains the fallback |
 | `ancestorThreadId` | Experimental; capability probe and fallback |
 | `thread/items/list` | Backing-store dependent; fallback JSONL |
-| Codex hook on `request_user_input` | **Unverified per build**; block S5 until S0-C passes |
-| Direct reply to Codex Desktop pending RPC | **Not available by simple read-only adapter**; opt-in later slice |
+| Codex hook on `request_user_input` | Not documented, unverified; not needed while the daemon path works |
+| Reply to a pending `request_user_input` from Bridge | Verified for a second client; simultaneous-answer behavior untested |
 | PicoClaw native gateway dynamic topic→root binding | **Must validate process-hook metadata and scope enforcement** |
 | Two Telegram bots exchanging messages | **Not required**; pass via Bridge's persistent state/tools |
 | Telegram topic isolation | Documented in PicoClaw; test installed version |
@@ -913,3 +920,4 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 **Changelog**
 
 - **v0.1 (2026-11-06):** Initial consolidated design: manual topic-bound consultants, Telegram registry/Inbox, read-only Codex integration, ephemeral status delegation, archive mirroring, phased answer delivery and explicit compatibility gates.
+- **v0.2 (2026-11-06):** Bridge is an additional client of the shared Codex app-server daemon (verified live question delivery, answering and late-join replay); answer delivery moved into V1; `isSecret` handling; status cursors advance to `read_until`.
