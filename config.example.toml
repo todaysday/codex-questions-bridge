@@ -1,0 +1,18 @@
+[codex]
+# Control socket of the shared Codex app-server daemon (usually root-only).
+socket = "/root/.codex/app-server-control/app-server-control.sock"
+source_id = "local"            # namespace for everything stored from this daemon
+poll_interval_seconds = 30     # 5..3600
+recency_days = 30              # inventory ignores threads not updated within this window
+
+[db]
+path = "/var/lib/cqb/cqb.db"
+
+[telegram]
+# Private forum supergroup (numeric id, starts with -100). The bot token is NOT here:
+# it is read from the environment variable CQB_TELEGRAM_TOKEN.
+chat_id = -1001234567890
+allowed_user_ids = [123456789]            # only these users may press buttons or write
+control_topic_name = "📋 Треды Codex"
+inbox_topic_name = "📥 Inbox"
+registry_refresh_seconds = 30             # 5..3600; the registry message is edited only if it changed

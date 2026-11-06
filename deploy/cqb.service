@@ -1,0 +1,48 @@
+# Codex Questions Bridge: ONE process (asyncio, no workers). Install as /etc/systemd/system/cqb.service.
+[Unit]
+Description=Codex Questions Bridge
+After=network-online.target codex-remote.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+# The daemon control socket is root-only; use root or a user that can open it.
+User=CHANGE_ME
+EnvironmentFile=-/etc/cqb/cqb.env
+Environment=CQB_CONFIG=/etc/cqb/config.toml
+ExecStart=/opt/cqb/.venv/bin/python -m cqb
+Restart=always
+RestartSec=3
+StateDirectory=cqb
+
+# Priority. CPUWeight default is 100 (max 10000).
+CPUWeight=800
+# Nice=-10 is a strong bump; lower it to -20 for the highest priority.
+#Nice=-10
+# Real-time I/O starves other services if the process ever loops; enable only if needed.
+#IOSchedulingClass=realtime
+#IOSchedulingPriority=4
+
+# The bot should stay far below 100 MiB; the cap turns a leak into a restart, not an OOM elsewhere.
+MemoryMax=192M
+MemorySwapMax=0
+
+# Hardening (the process only needs the unix socket, its state dir, and outbound HTTPS to api.telegram.org).
+# The bot token goes into /etc/cqb/cqb.env as CQB_TELEGRAM_TOKEN=... (mode 0600), never into config.toml.
+NoNewPrivileges=true
+ProtectSystem=strict
+# read-only, not true: the socket may live under /root/.codex. PrivateTmp must stay off: it may be in /tmp.
+ProtectHome=read-only
+PrivateTmp=false
+ReadWritePaths=/var/lib/cqb
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictRealtime=false
+# Uncomment once verified for your User (empty set drops CAP_DAC_OVERRIDE; owner access still works):
+#CapabilityBoundingSet=
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target
