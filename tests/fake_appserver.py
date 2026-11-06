@@ -32,6 +32,7 @@ class FakeAppServer:
         self.answers: list[dict[str, Any]] = []
         self.turns: dict[str, list[dict[str, Any]]] = {}  # thread id -> turns, newest first
         self.goals: dict[str, dict[str, Any]] = {}
+        self.items: dict[str, list[dict[str, Any]]] = {}  # thread id -> thread/items/list entries, oldest first
         self.rate_limits: dict[str, Any] | None = {
             "ordinaryUsageAllowed": True,
             "rateLimits": {"primary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": 1_800_100_000},
@@ -153,6 +154,8 @@ class FakeAppServer:
             await self._reply(conn, m, {"thread": {**self.threads[tid], "turns": []}})
         elif method == "thread/turns/list":
             await self._reply(conn, m, {"data": self.turns.get(params["threadId"], [])[: params.get("limit") or 25]})
+        elif method == "thread/items/list":
+            await self._reply(conn, m, self._items(params))
         elif method == "thread/goal/get":
             await self._reply(conn, m, {"goal": self.goals.get(params["threadId"])})
         elif method == "account/rateLimits/read":
@@ -176,6 +179,15 @@ class FakeAppServer:
 
     async def _reply(self, conn: FakeConn, m: dict[str, Any], result: dict[str, Any]) -> None:
         await conn.ws.send_json({"id": m["id"], "result": result})
+
+    def _items(self, p: dict[str, Any]) -> dict[str, Any]:
+        rows = [e for e in self.items.get(p["threadId"], []) if not p.get("turnId") or e["turnId"] == p["turnId"]]
+        if p.get("sortDirection") == "desc":
+            rows = rows[::-1]
+        start = int(p.get("cursor") or 0)
+        limit = p.get("limit") or 25
+        nxt = str(start + limit) if start + limit < len(rows) else None
+        return {"data": rows[start:start + limit], "nextCursor": nxt}
 
     def _descends(self, t: dict[str, Any], ancestor: str) -> bool:
         parent = t.get("parentThreadId")

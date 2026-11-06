@@ -1,0 +1,42 @@
+# PicoClaw gateway for the Codex Questions Bridge consultant. Install as /etc/systemd/system/picoclaw-gateway.service.
+# One long-running gateway serves every consultant session (pico channel); it is a separate process with its own limits.
+[Unit]
+Description=PicoClaw gateway (Codex Questions Bridge consultant)
+# The Bridge's MCP server must listen first: PicoClaw connects to it while it starts.
+After=network-online.target cqb.service
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=picoclaw
+Environment=PICOCLAW_HOME=/var/lib/picoclaw
+Environment=HOME=/var/lib/picoclaw
+# CQB_MCP_TOKEN=<same value as in /etc/cqb/cqb.env>   and   CQB_MCP_URL=http://127.0.0.1:18791   (mode 0600).
+# The scope hook is a child of the gateway and inherits this environment: that is how it reaches the Bridge.
+EnvironmentFile=/etc/picoclaw/picoclaw.env
+ExecStart=/opt/picoclaw/picoclaw gateway
+Restart=always
+RestartSec=3
+StateDirectory=picoclaw
+
+# Own limits. PicoClaw is a Go process plus the small hook; it must never starve the bot or the Codex daemon.
+CPUWeight=100
+MemoryMax=512M
+MemorySwapMax=0
+TasksMax=128
+
+# Hardening: it needs loopback sockets (Bridge, model endpoint) and its home directory, nothing else.
+NoNewPrivileges=true
+ProtectSystem=strict
+ProtectHome=true
+PrivateTmp=true
+ReadWritePaths=/var/lib/picoclaw
+ProtectKernelTunables=true
+ProtectControlGroups=true
+RestrictSUIDSGID=true
+LockPersonality=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

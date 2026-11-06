@@ -1,0 +1,82 @@
+{
+  "version": 3,
+  "session": {"dimensions": ["chat"]},
+  "gateway": {"host": "127.0.0.1", "port": 18790, "hot_reload": false, "log_level": "info"},
+  "agents": {
+    "defaults": {
+      "workspace": "/var/lib/picoclaw/ws-main",
+      "restrict_to_workspace": true,
+      "model_name": "cqb-main",
+      "context_window": 1000000,
+      "summarize_token_percent": 80,
+      "summarize_message_threshold": 100000,
+      "max_tool_iterations": 8,
+      "tool_feedback": {"enabled": false}
+    },
+    "list": [
+      {
+        "id": "main", "default": true, "name": "Codex Consultant",
+        "workspace": "/var/lib/picoclaw/ws-main", "model": "cqb-main",
+        "subagents": {"allow_agents": ["codex-status"]}
+      },
+      {
+        "id": "codex-status", "name": "Codex Status",
+        "workspace": "/var/lib/picoclaw/ws-status", "model": "cqb-status"
+      }
+    ]
+  },
+  "channel_list": {
+    "pico": {
+      "enabled": true, "type": "pico", "allow_from": ["pico-user"],
+      "settings": {
+        "max_connections": 100, "allow_origins": [""], "allow_token_query": false,
+        "streaming": {"enabled": false}
+      },
+      "placeholder": {"enabled": false}
+    }
+  },
+  "model_list": [
+    {"model_name": "cqb-main", "provider": "openai", "model": "Beam", "api_base": "http://127.0.0.1:20129/v1", "enabled": true},
+    {"model_name": "cqb-status", "provider": "openai", "model": "Beam", "api_base": "http://127.0.0.1:20129/v1", "enabled": true}
+  ],
+  "hooks": {
+    "enabled": true,
+    "defaults": {"observer_timeout_ms": 500, "interceptor_timeout_ms": 3000, "approval_timeout_ms": 5000},
+    "processes": {
+      "scope": {
+        "enabled": true, "priority": 100, "transport": "stdio",
+        "command": ["python3", "-u", "/opt/cqb/integrations/picoclaw_scope_hook.py"],
+        "intercept": ["before_tool", "approve_tool"]
+      }
+    }
+  },
+  "tools": {
+    "exec": {"enabled": false},
+    "write_file": {"enabled": false},
+    "edit_file": {"enabled": false},
+    "append_file": {"enabled": false},
+    "read_file": {"enabled": false},
+    "list_dir": {"enabled": false},
+    "load_image": {"enabled": false},
+    "send_file": {"enabled": false},
+    "message": {"enabled": false},
+    "spawn": {"enabled": false},
+    "spawn_status": {"enabled": false},
+    "subagent": {"enabled": false},
+    "cron": {"enabled": false},
+    "install_skill": {"enabled": false},
+    "find_skills": {"enabled": false},
+    "web_fetch": {"enabled": false},
+    "web": {"enabled": false},
+    "skills": {"enabled": false},
+    "mcp": {
+      "enabled": true,
+      "servers": {
+        "cqb": {
+          "enabled": true, "type": "http", "url": "http://127.0.0.1:18791/mcp",
+          "headers": {"Authorization": "Bearer __CQB_MCP_TOKEN__"}
+        }
+      }
+    }
+  }
+}

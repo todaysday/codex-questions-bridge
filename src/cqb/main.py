@@ -5,13 +5,16 @@ import logging
 import os
 import signal
 import sys
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
+
+import aiohttp
 
 from cqb.codex.appserver import AppServerClient
+from cqb.codex.history import HistoryReader
 from cqb.codex.rollout_tail import read_usage
 from cqb.codex.status_reader import DaemonStatusReader
 from cqb.codex.stream import dispatch
-from cqb.config import Config, ConfigError, load_config, read_token
+from cqb.config import Config, ConfigError, ConsultantTokens, load_config, read_consultant_tokens, read_token
 from cqb.dao import db
 from cqb.dao.actions import ActionDao
 from cqb.dao.bot_state import BotStateDao
@@ -19,12 +22,17 @@ from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import SourceDao, ThreadDao
 from cqb.domain.models import Question, Source
+from cqb.mcp.server import McpServer
+from cqb.mcp.tools import build_tools
+from cqb.pico.gateway import PicoGateway
+from cqb.pico.health import PicoHealth, health_url
 from cqb.services.consultants import ConsultantService
+from cqb.services.context import ContextService
 from cqb.services.inventory import InventoryService
 from cqb.services.live_state import LiveState
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
-from cqb.services.relay import CountingRelay
+from cqb.services.relay import ConsultantRelay
 from cqb.services.status import StatusService
 from cqb.telegram.api import API_BASE, BotApi
 from cqb.telegram.control import ControlTopics, RegistryPublisher
@@ -71,7 +79,11 @@ async def run(
     token: str,
     telegram_base_url: str = API_BASE,
     rss_interval: float = RSS_LOG_SECONDS,
+    consultant_tokens: ConsultantTokens | None = None,
 ) -> None:
+    """Without a [pico] section (or its tokens) the bot runs and consultant topics say they are not configured."""
+    if config.pico is not None and consultant_tokens is None:
+        raise ConfigError("[pico] is configured but CQB_PICO_TOKEN / CQB_MCP_TOKEN were not provided")
     conn = db.connect(config.db.path)
     db.migrate(conn)
     source_id = config.codex.source_id
@@ -91,6 +103,8 @@ async def run(
         on_waiting=questions.watch_thread,
     )
     api = BotApi(token, base_url=telegram_base_url)
+    closers: list[Callable[[], Awaitable[None]]] = [api.close]
+    gateway: PicoGateway | None = None
     await api.start()
     try:
         me = await api.get_me()  # fails fast on a bad token
@@ -105,19 +119,36 @@ async def run(
         inbox = InboxCards(api, topics, keys, questions, registry, tg.chat_id, publisher.request_refresh)
         live = LiveState()
         home = config.codex.codex_home
+        reader = DaemonStatusReader(client)
         status = StatusCards(
             api, state,
-            StatusService(DaemonStatusReader(client), live, lambda path: read_usage(path, home), source_id),
+            StatusService(reader, live, lambda path: read_usage(path, home), source_id),
             tg.chat_id, source_id,
         )
+        mcp: McpServer | None = None
+        if config.pico is not None and consultant_tokens is not None:
+            http = aiohttp.ClientSession()
+            closers.append(http.close)
+            health = PicoHealth(health_url(config.pico.url), http)
+            gateway = PicoGateway(config.pico, consultant_tokens.pico, http, health)
+            context = ContextService(consultant_dao, threads, question_dao, reader, HistoryReader(client), source_id)
+            mcp = McpServer(
+                consultant_tokens.mcp, build_tools(context), consultants.scope_for_session, health.beat,
+                port=config.mcp.port,
+            )
+        else:
+            log.info("consultant chat is not configured: no [pico] section")
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
             api, keys, topics, publisher, inbox, consultants, tg_topics, registry, questions,
-            CountingRelay(), status, source_id, inventory.poke,
+            ConsultantRelay(gateway, tg_topics), status, source_id, inventory.poke,
         )
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
         questions.subscribe(on_question=inbox.on_question, on_resolved=inbox.on_resolved)
 
+        if mcp is not None:
+            await mcp.start()
+            closers.append(mcp.stop)
         await topics.ensure()
         consultants.recover()
         keys.purge_expired()
@@ -133,6 +164,7 @@ async def run(
             asyncio.create_task(poller.run(), name="telegram-poll"),
             asyncio.create_task(publisher.run(before=consultants.reconcile), name="registry"),
             asyncio.create_task(inbox.run(), name="inbox"),
+            *([asyncio.create_task(gateway.run(), name="pico-gateway")] if gateway else []),
             asyncio.create_task(
                 _log_rss(rss_interval, lambda: (consultants.open_count(), questions.open_count())), name="rss"
             ),
@@ -147,16 +179,19 @@ async def run(
                 t.cancel()
             await asyncio.gather(*tasks, watch_stop, return_exceptions=True)
     finally:
-        await api.close()
+        if gateway is not None:
+            await gateway.close()
+        for close in reversed(closers):
+            await close()
         conn.close()
 
 
-async def _amain(config: Config, token: str) -> None:
+async def _amain(config: Config, token: str, consultant_tokens: ConsultantTokens | None) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    await run(config, stop, token=token)
+    await run(config, stop, token=token, consultant_tokens=consultant_tokens)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -169,9 +204,10 @@ def main(argv: list[str] | None = None) -> int:
     try:
         config = load_config(args.config)
         token = read_token(os.environ)
+        consultant_tokens = read_consultant_tokens(os.environ) if config.pico is not None else None
     except ConfigError as exc:
         print(f"cqb: config error: {exc}", file=sys.stderr)
         return 2
-    asyncio.run(_amain(config, token))
+    asyncio.run(_amain(config, token, consultant_tokens))
     log.info("stopped")
     return 0

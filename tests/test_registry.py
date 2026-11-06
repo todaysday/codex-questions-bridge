@@ -1,11 +1,8 @@
-import asyncio
-
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import ThreadDao
 from cqb.domain.enums import ArchiveState, ConsultantState
 from cqb.services.registry import RegistryQuery
-from cqb.services.relay import CountingRelay
 from tg_stack import NOW, thread
 from test_db_dao import question
 
@@ -43,11 +40,3 @@ def test_registry_rows_carry_consultant_state_and_pending_questions(conn):
     assert (rows["r1"].consultant_state, rows["r1"].topic_id, rows["r1"].pending_questions) == (ConsultantState.OPEN, 9, 2)
     assert (rows["r2"].consultant_state, rows["r2"].topic_id, rows["r2"].pending_questions) == (None, None, 0)
     assert q.describe("r1").pending_questions == 2 and q.describe("zz") is None
-
-
-def test_counting_relay_logs_only_a_counter(caplog):
-    caplog.set_level("INFO")
-    relay = CountingRelay()
-    asyncio.run(relay.relay(type("C", (), {"consultant_id": 3})(), "secret message text"))
-    asyncio.run(relay.relay(type("C", (), {"consultant_id": 3})(), "more"))
-    assert relay.count == 2 and "secret message text" not in caplog.text and "total=2" in caplog.text

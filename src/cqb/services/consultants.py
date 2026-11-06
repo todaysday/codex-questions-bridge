@@ -86,6 +86,13 @@ class ConsultantService:
     def by_topic(self, topic_id: int) -> Consultant | None:
         return self._dao.get_by_topic(self._chat_id, topic_id)
 
+    def scope_for_session(self, session_key: str) -> tuple[str, str] | None:
+        """(source_id, root_thread_id) a pico session may read, only while its consultant is open."""
+        c = self._dao.get_by_session_key(session_key)
+        if c is None or c.source_id != self._source or c.state is not ConsultantState.OPEN:
+            return None
+        return c.source_id, c.root_thread_id
+
     async def create(self, root_thread_id: str) -> Consultant:
         async with self._lock(root_thread_id):
             thread = self._threads.get(self._source, root_thread_id)

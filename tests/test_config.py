@@ -88,3 +88,55 @@ def test_example_config_is_valid():
     import pathlib
     example = pathlib.Path(__file__).parent.parent / "config.example.toml"
     assert load_config(str(example)).telegram.allowed_user_ids == (123456789,)
+
+
+# --- consultant chat: [pico], [mcp], tokens ------------------------------------------------
+
+from cqb.config import McpConfig, PicoConfig, read_consultant_tokens  # noqa: E402
+
+
+def test_consultants_are_off_without_a_pico_section():
+    c = parse_config(OK)
+    assert c.pico is None and c.mcp == McpConfig(18791)
+
+
+def test_pico_and_mcp_defaults_and_overrides():
+    c = parse_config({**OK, "pico": {}, "mcp": {"port": 19000}})
+    assert c.pico == PicoConfig("ws://127.0.0.1:18790/pico/ws", "cqb-", 120, 50, 0)  # turn timeout 0 = no limit
+    assert c.mcp.port == 19000
+    c = parse_config({**OK, "pico": {"url": "ws://localhost:1/x", "idle_seconds": 10, "max_connections": 90,
+                                     "turn_timeout_seconds": 600, "session_prefix": "abc-"}})
+    assert (c.pico.idle_seconds, c.pico.max_connections, c.pico.turn_timeout_seconds, c.pico.session_prefix) == (10, 90, 600, "abc-")
+
+
+@pytest.mark.parametrize("pico, msg", [
+    ({"url": "ws://example.com:18790/pico/ws"}, "loopback"),
+    ({"url": "wss://127.0.0.1:18790/pico/ws"}, "loopback"),
+    ({"url": "ws://127.0.0.1/pico/ws"}, "loopback"),
+    ({"url": 5}, "loopback"),
+    ({"idle_seconds": 1}, "idle_seconds"),
+    ({"max_connections": 100}, "max_connections"),  # must stay below PicoClaw's own limit of 100
+    ({"turn_timeout_seconds": -1}, "turn_timeout_seconds"),
+    ({"session_prefix": "Bad_"}, "session_prefix"),
+    ({"token": "x"}, "environment"),
+    ({"typo": 1}, "unknown key"),
+])
+def test_invalid_pico(pico, msg):
+    with pytest.raises(ConfigError, match=msg):
+        parse_config({**OK, "pico": pico})
+
+
+def test_invalid_mcp():
+    for mcp in ({"port": 80}, {"port": "x"}, {"host": "0.0.0.0"}, {"token": "x"}):
+        with pytest.raises(ConfigError):
+            parse_config({**OK, "mcp": mcp})
+
+
+def test_consultant_tokens_come_from_the_environment_and_must_differ():
+    t = read_consultant_tokens({"CQB_PICO_TOKEN": " pico-secret ", "CQB_MCP_TOKEN": "mcp-secret"})
+    assert (t.pico, t.mcp) == ("pico-secret", "mcp-secret") and "secret" not in repr(t)
+    for env, name in (({"CQB_MCP_TOKEN": "b"}, "CQB_PICO_TOKEN"), ({"CQB_PICO_TOKEN": "a"}, "CQB_MCP_TOKEN"), ({}, "CQB_PICO_TOKEN")):
+        with pytest.raises(ConfigError, match=name):
+            read_consultant_tokens(env)
+    with pytest.raises(ConfigError, match="different"):
+        read_consultant_tokens({"CQB_PICO_TOKEN": "same", "CQB_MCP_TOKEN": "same"})

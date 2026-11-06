@@ -1,6 +1,7 @@
 import re
 import tomllib
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from urllib.parse import urlsplit
 from collections.abc import Mapping
 from typing import Any
 
@@ -32,14 +33,45 @@ class TelegramConfig:
     registry_refresh_seconds: int
 
 
+DEFAULT_PICO_URL = "ws://127.0.0.1:18790/pico/ws"
+DEFAULT_SESSION_PREFIX = "cqb-"
+
+
+@dataclass(frozen=True, slots=True)
+class PicoConfig:
+    """Bridge side of PicoClaw's pico channel. Present in the file = consultants are enabled."""
+
+    url: str = DEFAULT_PICO_URL
+    session_prefix: str = DEFAULT_SESSION_PREFIX  # must match ConsultantService.session_key; the gateway refuses other ids
+    idle_seconds: int = 120  # an idle session's WebSocket is closed after this long
+    max_connections: int = 50  # hard cap, below PicoClaw's channel limit of 100
+    turn_timeout_seconds: int = 0  # 0 = no limit: only the end-of-turn rule or a dropped socket ends a turn
+
+
+@dataclass(frozen=True, slots=True)
+class McpConfig:
+    port: int = 18791  # always bound to 127.0.0.1
+
+
+@dataclass(frozen=True, slots=True)
+class ConsultantTokens:
+    pico: str = field(repr=False)
+    mcp: str = field(repr=False)
+
+
 @dataclass(frozen=True, slots=True)
 class Config:
     codex: CodexConfig
     db: DbConfig
     telegram: TelegramConfig
+    pico: PicoConfig | None = None
+    mcp: McpConfig = McpConfig()
 
 
 TOKEN_ENV = "CQB_TELEGRAM_TOKEN"
+PICO_TOKEN_ENV = "CQB_PICO_TOKEN"
+MCP_TOKEN_ENV = "CQB_MCP_TOKEN"
+_LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 _SOURCE_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
 
@@ -56,7 +88,7 @@ def load_config(path: str) -> Config:
 
 
 def parse_config(raw: dict[str, Any]) -> Config:
-    unknown = set(raw) - {"codex", "db", "telegram"}
+    unknown = set(raw) - {"codex", "db", "telegram", "pico", "mcp"}
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(sorted(unknown))}")
     codex = _section(raw, "codex", {"socket", "source_id", "poll_interval_seconds", "recency_days", "codex_home"})
@@ -66,6 +98,9 @@ def parse_config(raw: dict[str, Any]) -> Config:
         "registry_refresh_seconds",
     })
     return Config(
+        pico=_pico(raw["pico"]) if "pico" in raw else None,
+        mcp=McpConfig(port=_int(_section(raw, "mcp", {"port"}), "mcp", "port", 18791, 1024, 65535)) if "mcp" in raw
+        else McpConfig(),
         codex=CodexConfig(
             socket=_text(codex, "codex", "socket"),
             source_id=_source_id(codex.get("source_id", "local")),
@@ -84,11 +119,40 @@ def parse_config(raw: dict[str, Any]) -> Config:
     )
 
 
+def read_consultant_tokens(env: Mapping[str, str]) -> ConsultantTokens:
+    """Only called when [pico] is configured: a half-configured consultant chat must not start."""
+    pico, mcp = env.get(PICO_TOKEN_ENV, "").strip(), env.get(MCP_TOKEN_ENV, "").strip()
+    for name, value in ((PICO_TOKEN_ENV, pico), (MCP_TOKEN_ENV, mcp)):
+        if not value:
+            raise ConfigError(f"environment variable {name} is not set but [pico] is configured")
+    if pico == mcp:
+        raise ConfigError(f"{PICO_TOKEN_ENV} and {MCP_TOKEN_ENV} must be different secrets")
+    return ConsultantTokens(pico, mcp)
+
+
 def read_token(env: Mapping[str, str]) -> str:
     token = env.get(TOKEN_ENV, "").strip()
     if not token:
         raise ConfigError(f"environment variable {TOKEN_ENV} (Telegram bot token) is not set")
     return token
+
+
+def _pico(raw: Any) -> PicoConfig:
+    sec = _section({"pico": raw}, "pico", {"url", "session_prefix", "idle_seconds", "max_connections",
+                                            "turn_timeout_seconds"})
+    url = sec.get("url", DEFAULT_PICO_URL)
+    parts = urlsplit(url) if isinstance(url, str) else None
+    if parts is None or parts.scheme != "ws" or parts.hostname not in _LOOPBACK or parts.port is None:
+        raise ConfigError("[pico] url must be ws://127.0.0.1:<port>/... (loopback only: the token is sent in clear)")
+    prefix = sec.get("session_prefix", DEFAULT_SESSION_PREFIX)
+    if not isinstance(prefix, str) or not re.fullmatch(r"[a-z0-9-]{2,16}", prefix):
+        raise ConfigError("[pico] session_prefix must be 2..16 characters of [a-z0-9-] (PicoClaw lowercases ids)")
+    return PicoConfig(
+        url=url, session_prefix=prefix,
+        idle_seconds=_int(sec, "pico", "idle_seconds", 120, 10, 3600),
+        max_connections=_int(sec, "pico", "max_connections", 50, 1, 90),
+        turn_timeout_seconds=_int(sec, "pico", "turn_timeout_seconds", 0, 0, 86400),
+    )
 
 
 def _section(raw: dict[str, Any], name: str, allowed: set[str]) -> dict[str, Any]:

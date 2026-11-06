@@ -22,6 +22,12 @@ class ConsultantDao:
         ).fetchone()
         return _to_consultant(row) if row else None
 
+    def get_by_session_key(self, session_key: str) -> Consultant | None:
+        row = self._conn.execute(
+            "SELECT * FROM consultants WHERE pico_session_key=?", (session_key,)
+        ).fetchone()
+        return _to_consultant(row) if row else None
+
     def get_many(self, source_id: str, root_ids: Collection[str]) -> dict[str, Consultant]:
         if not root_ids:
             return {}

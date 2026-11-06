@@ -183,6 +183,9 @@ class FakeTelegram:
         m["edits"] = m.get("edits", 0) + 1
         return True
 
+    async def m_sendChatAction(self, p: dict[str, Any]) -> bool:
+        return True
+
     async def m_pinChatMessage(self, p: dict[str, Any]) -> bool:
         self.pinned.append(p["message_id"])
         return True

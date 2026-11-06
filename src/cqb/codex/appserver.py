@@ -19,6 +19,7 @@ ALLOWED_METHODS = frozenset(
     {
         "thread/list", "thread/read", "thread/loaded/list", "thread/resume", "thread/unsubscribe",
         "thread/turns/list", "thread/goal/get", "account/rateLimits/read",  # status card: reads only
+        "thread/items/list",  # consultant context API: paged history reads
     }
 )
 # thread/resume may carry config overrides; the Bridge may only select the thread.

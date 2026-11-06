@@ -18,3 +18,6 @@ where = ["src"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["tests"]
+# tests/e2e drives the real PicoClaw binary: run it explicitly with `-m e2e`
+addopts = "-m 'not e2e'"
+markers = ["e2e: end to end with the real PicoClaw binary (needs the git-ignored spike files)"]

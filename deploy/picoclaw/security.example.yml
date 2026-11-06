@@ -1,0 +1,16 @@
+# PicoClaw secrets file: copy to $PICOCLAW_HOME/.security.yml, fill in, chmod 0600, owner = the picoclaw user.
+# Do not commit the filled-in copy. (config.json cannot carry comments: PicoClaw rejects unknown fields.)
+channel_list:
+  pico:
+    settings:
+      # Same value as CQB_PICO_TOKEN in the Bridge's environment. Without it the pico channel does not start.
+      # Alternative: export PICOCLAW_CHANNELS_PICO_TOKEN in the gateway unit instead of writing it here.
+      token: "REPLACE_WITH_CQB_PICO_TOKEN"
+model_list:
+  # One entry per model_name in config.json; the key is the OmniRoute key restricted to the combo.
+  "cqb-main:0":
+    api_keys: ["REPLACE_WITH_OMNIROUTE_KEY"]
+  "cqb-status:0":
+    api_keys: ["REPLACE_WITH_OMNIROUTE_KEY"]
+# The MCP bearer token (CQB_MCP_TOKEN) is NOT read from this file: tools.mcp.servers.cqb.headers is a plain
+# config.json value. Render __CQB_MCP_TOKEN__ in config.json at deploy time and keep config.json at mode 0600.

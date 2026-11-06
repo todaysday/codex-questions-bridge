@@ -165,6 +165,12 @@ class BotApi:
             params["text"] = text[:200]
         await self._call("answerCallbackQuery", params)
 
+    async def send_chat_action(self, chat_id: int, action: str, *, thread_id: int | None = None) -> None:
+        params: dict[str, Any] = {"chat_id": chat_id, "action": action}
+        if thread_id is not None:
+            params["message_thread_id"] = thread_id
+        await self._call("sendChatAction", params)
+
     # --- transport -------------------------------------------------------------------
 
     async def _call(

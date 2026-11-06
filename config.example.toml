@@ -17,3 +17,16 @@ allowed_user_ids = [123456789]            # only these users may press buttons o
 control_topic_name = "📋 Треды Codex"
 inbox_topic_name = "📥 Inbox"
 registry_refresh_seconds = 30             # 5..3600; the registry message is edited only if it changed
+
+# Consultant chat (PicoClaw). Present = consultants are enabled and the process refuses to start without
+# CQB_PICO_TOKEN and CQB_MCP_TOKEN in its environment (two different secrets, never in this file).
+# Remove both sections to run the bot without consultants: consultant topics then say the chat is not configured.
+[pico]
+url = "ws://127.0.0.1:18790/pico/ws"   # loopback only
+session_prefix = "cqb-"                # must match the stored consultant session keys; do not change
+idle_seconds = 120                     # 10..3600: an idle consultant's WebSocket is closed after this long
+max_connections = 50                   # 1..90, hard cap below PicoClaw's own limit of 100
+turn_timeout_seconds = 0               # 0 = no reply time limit (default); the owner stops a turn with /stop
+
+[mcp]
+port = 18791                           # 1024..65535; always bound to 127.0.0.1

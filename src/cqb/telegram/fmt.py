@@ -15,6 +15,20 @@ def clip(text: str, limit: int) -> str:
     return text if len(text) <= limit else text[: max(limit - 1, 0)] + "…"
 
 
+def chunks(text: str, size: int = 4000) -> list[str]:
+    """Split on a newline (else a space, else hard) so each piece fits one Telegram message."""
+    out: list[str] = []
+    text = text.strip()
+    while len(text) > size:
+        cut = max(text.rfind("\n", 0, size), text.rfind(" ", 0, size))
+        cut = cut if cut > size // 2 else size
+        out.append(text[:cut].rstrip())
+        text = text[cut:].lstrip()
+    if text:
+        out.append(text)
+    return out
+
+
 def hhmm(ts: int) -> str:
     return time.strftime("%H:%M", time.localtime(ts))
 

@@ -2,6 +2,7 @@
 
 from cqb.services.consultants import TopicGone
 from cqb.telegram.api import BadRequest, BotApi
+from cqb.telegram.fmt import chunks
 
 
 class TelegramTopics:
@@ -28,3 +29,11 @@ class TelegramTopics:
     async def announce(self, topic_id: int, text: str) -> None:
         """Opening message in a new consultant topic; best effort, the binding is already saved."""
         await self._api.send_message(self._chat_id, text, thread_id=topic_id)
+
+    async def say(self, topic_id: int, text: str) -> None:
+        """Plain text (no parse mode, so a reply can never fail on entities), split below 4096."""
+        for piece in chunks(text):
+            await self._api.send_message(self._chat_id, piece, thread_id=topic_id)
+
+    async def typing(self, topic_id: int) -> None:
+        await self._api.send_chat_action(self._chat_id, "typing", thread_id=topic_id)
