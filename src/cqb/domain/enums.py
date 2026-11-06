@@ -34,3 +34,20 @@ class ConsultantState(StrEnum):
     OPEN = "open"
     ARCHIVED = "archived"
     ERROR = "error"
+
+
+class RunState(StrEnum):
+    """Runtime state of a Codex thread as the status card shows it."""
+
+    WORKING = "working"
+    WAITING_INPUT = "waiting_input"
+    WAITING_APPROVAL = "waiting_approval"
+    IDLE = "idle"
+    NOT_LOADED = "not_loaded"
+    ERROR = "error"
+    STALLED = "stalled"  # derived: working, but quiet for too long
+    UNKNOWN = "unknown"
+
+    @property
+    def is_waiting(self) -> bool:
+        return self in (RunState.WAITING_INPUT, RunState.WAITING_APPROVAL)

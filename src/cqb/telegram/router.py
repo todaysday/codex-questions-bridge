@@ -17,7 +17,8 @@ from cqb.telegram.control import CONTROL, INBOX, ControlTopics, RegistryPublishe
 from cqb.telegram.inbox import InboxCards
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import CallbackQuery, Message, Reply, Update
-from cqb.telegram.registry_view import render_info, thread_name
+from cqb.telegram.registry_view import thread_name
+from cqb.telegram.status_card import StatusCards
 from cqb.telegram.topics import TelegramTopics
 
 log = logging.getLogger(__name__)
@@ -46,6 +47,7 @@ class Router:
         registry: RegistryQuery,
         questions: QuestionService,
         relay: ConsultantRelay,
+        status: StatusCards,
         source_id: str,
         request_poll: Callable[[], None],
         clock: Callable[[], float] = time.time,
@@ -61,6 +63,7 @@ class Router:
         self._registry = registry
         self._questions = questions
         self._relay = relay
+        self._status = status
         self._source = source_id
         self._request_poll = request_poll
         self._clock = clock
@@ -132,6 +135,10 @@ class Router:
         elif command == "questions":
             qs = self._questions.open_questions(consultant.root_thread_id)
             await self._say(m, render_questions(qs, self._names()))
+        elif command == "status":
+            error = await self._status.show(consultant.root_thread_id, m.thread_id)
+            if error:
+                await self._say(m, error)
         else:
             await self._relay.relay(consultant, m.text or "")
 
@@ -196,9 +203,8 @@ class Router:
         match a.action:
             case "create":
                 return await self._create(a.root_thread_id or "")
-            case "info":
-                row = self._registry.describe(a.root_thread_id or "")
-                return Reply(render_info(row, int(self._clock())) if row else "Тред не найден", alert=True)
+            case "status":
+                return await self._status_card(a.root_thread_id or "")
             case "page":
                 page, _, archived = (a.payload or "0:0").partition(":")
                 self._publisher.set_view(int(page), archived == "1")
@@ -218,6 +224,13 @@ class Router:
             case "other":
                 return self._inbox.other_hint()
         return Reply("Неизвестное действие")
+
+    async def _status_card(self, root: str) -> Reply:
+        topic = self._topics.topic_id(CONTROL)
+        if topic is None or self._registry.describe(root) is None:
+            return Reply("Тред не найден", alert=True)
+        error = await self._status.show(root, topic)
+        return Reply(error, alert=True) if error else Reply("Статус отправлен")
 
     async def _create(self, root: str) -> Reply:
         before = self._consultants.get(root)

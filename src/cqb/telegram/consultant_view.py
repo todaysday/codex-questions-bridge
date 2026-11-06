@@ -15,6 +15,7 @@ def render_opening(row: RegistryRow, source_id: str) -> str:
         f"Codex source: {source_id} · thread: …{row.thread.thread_id[-8:]}\n\n"
         "/questions — неотвеченные вопросы этого треда.\n"
         "/thread — сведения о привязке.\n"
+        "/status — состояние треда, контекст, субагенты, лимиты.\n"
         "Диалог с моделью пока не подключён."
     )
 

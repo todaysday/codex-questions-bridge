@@ -15,6 +15,7 @@ class CodexConfig:
     source_id: str
     poll_interval_seconds: int
     recency_days: int
+    codex_home: str = "/root/.codex"  # rollout files are read (token_count only) under its sessions dirs
 
 
 @dataclass(frozen=True, slots=True)
@@ -58,7 +59,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
     unknown = set(raw) - {"codex", "db", "telegram"}
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(sorted(unknown))}")
-    codex = _section(raw, "codex", {"socket", "source_id", "poll_interval_seconds", "recency_days"})
+    codex = _section(raw, "codex", {"socket", "source_id", "poll_interval_seconds", "recency_days", "codex_home"})
     db = _section(raw, "db", {"path"})
     tg = _section(raw, "telegram", {
         "chat_id", "control_topic_name", "inbox_topic_name", "allowed_user_ids",
@@ -70,6 +71,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
             source_id=_source_id(codex.get("source_id", "local")),
             poll_interval_seconds=_int(codex, "codex", "poll_interval_seconds", 30, 5, 3600),
             recency_days=_int(codex, "codex", "recency_days", 30, 1, 3650),
+            codex_home=_abs_path(codex.get("codex_home", "/root/.codex")),
         ),
         db=DbConfig(path=_text(db, "db", "path")),
         telegram=TelegramConfig(
@@ -118,6 +120,12 @@ def _int(sec: dict[str, Any], name: str, key: str, default: int, lo: int, hi: in
 def _source_id(v: Any) -> str:
     if not isinstance(v, str) or not _SOURCE_ID.match(v):
         raise ConfigError("[codex] source_id must match [A-Za-z0-9._-]{1,64}")
+    return v
+
+
+def _abs_path(v: Any) -> str:
+    if not isinstance(v, str) or not v.startswith("/"):
+        raise ConfigError("[codex] codex_home must be an absolute path")
     return v
 
 

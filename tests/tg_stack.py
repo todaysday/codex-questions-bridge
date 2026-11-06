@@ -10,16 +10,21 @@ from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import ThreadDao
 from cqb.codex.events import QuestionRequested, RequestResolved
 from cqb.domain.enums import ArchiveState
+from cqb.domain.enums import RunState
 from cqb.domain.models import QuestionItem, QuestionOption, Thread
+from cqb.domain.status import Descendants, GoalSummary, RateLimits, ThreadSnapshot
 from cqb.services.consultants import ConsultantService
 from cqb.services.questions import QuestionService
+from cqb.services.live_state import LiveState
 from cqb.services.registry import RegistryQuery
+from cqb.services.status import StatusService
 from cqb.telegram.api import BotApi
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.inbox import InboxCards
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
 from cqb.telegram.router import Router, RouterConfig
+from cqb.telegram.status_card import StatusCards
 from cqb.telegram.topics import TelegramTopics
 from fake_telegram import CHAT_ID, OWNER, TOKEN, FakeTelegram
 
@@ -38,6 +43,46 @@ class StubClient:
 
     async def respond(self, request_id, result):
         self.responses.append((request_id, result))
+
+
+class StatusSourceStub:
+    """In-memory StatusSource: no daemon, no aiohttp. `fail` makes every read return None."""
+
+    def __init__(self):
+        self.threads: dict[str, ThreadSnapshot] = {}
+        self.children: dict[str, tuple[ThreadSnapshot, ...]] = {}
+        self.more = False
+        self.turn_start: int | None = None
+        self.goals: dict[str, GoalSummary] = {}
+        self.limits: RateLimits | None = RateLimits(30, NOW + 3600, 10080)
+        self.fail = False
+        self.calls: list[str] = []
+
+    async def thread(self, thread_id):
+        self.calls.append("thread")
+        return None if self.fail else self.threads.get(thread_id)
+
+    async def descendants(self, root_id, limit):
+        self.calls.append("descendants")
+        return None if self.fail else Descendants(self.children.get(root_id, ()), self.more)
+
+    async def running_turn_start(self, thread_id):
+        self.calls.append("turn")
+        return self.turn_start
+
+    async def goal(self, thread_id):
+        self.calls.append("goal")
+        return self.goals.get(thread_id)
+
+    async def rate_limits(self):
+        self.calls.append("limits")
+        return self.limits
+
+
+def snapshot(tid, state=RunState.IDLE, updated=NOW - 60, parent=None, **kw):
+    fields = dict(model="gpt-6", effort="low", nickname=None, role=None, name=f"Thread {tid}", path=None)
+    fields.update(kw)
+    return ThreadSnapshot(tid, parent, state, updated_at=updated, **fields)
 
 
 class Relay:
@@ -77,6 +122,10 @@ class Stack:
         self.api = BotApi(token, base_url=fake.base_url, sleep=self._nosleep, rng=lambda: 0)
         self.client = StubClient()
         self.relay = Relay()
+        self.status_source = StatusSourceStub()
+        self.live = LiveState(clock=self.clock)
+        self.status_service = StatusService(self.status_source, self.live, lambda path: None, "s1", clock=self.clock)
+        self.status_cards = StatusCards(self.api, self.state, self.status_service, CHAT_ID, "s1")
         self.inventory = Recorder()
         self.consultant_dao = ConsultantDao(conn)
         self.question_dao = QuestionDao(conn)
@@ -98,7 +147,7 @@ class Stack:
         self.router = Router(
             RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.api, self.keys, self.topics,
             self.publisher, self.inbox, self.consultants, self.tg_topics, self.registry, self.questions,
-            self.relay, "s1", self.inventory.poke, self.clock,
+            self.relay, self.status_cards, "s1", self.inventory.poke, self.clock,
         )
         self.poller = Poller(self.api, self.state, self.router.handle, poll_timeout=0)
         self.questions.subscribe(on_question=self.inbox.on_question, on_resolved=self.inbox.on_resolved)

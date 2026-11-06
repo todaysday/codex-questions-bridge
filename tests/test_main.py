@@ -57,6 +57,16 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
         assert check.execute("SELECT state FROM consultants").fetchone()[0] == "open"
         assert len(tg.topic_named("FoxProfile")) == 1
 
+        # /status in the consultant topic: deterministic card from the (fake) daemon, never relayed
+        fox = tg.topic_named("FoxProfile")[0]
+        tg.push_message("/status", fox)
+        await wait_until(lambda: any("📊 Статус" in m["text"] for m in tg.live_messages(fox)))
+        card = next(m["text"] for m in tg.live_messages(fox) if "📊 Статус" in m["text"])
+        assert "FoxProfile" in card and "Лимит: 30% (неделя)" in card and "Субагенты: нет" in card
+        assert set(app.methods()) <= {"thread/list", "thread/read", "thread/resume", "thread/unsubscribe",
+                                      "thread/loaded/list", "thread/goal/get", "thread/turns/list",
+                                      "account/rateLimits/read"}
+
         stop.set()
         await asyncio.wait_for(task, 3)
         await app.stop()

@@ -38,7 +38,16 @@ def test_resume_cannot_carry_overrides():
 
 
 def test_whitelist_content():
-    assert ALLOWED_METHODS == {"thread/list", "thread/read", "thread/loaded/list", "thread/resume", "thread/unsubscribe"}
+    assert ALLOWED_METHODS == {
+        "thread/list", "thread/read", "thread/loaded/list", "thread/resume", "thread/unsubscribe",
+        "thread/turns/list", "thread/goal/get", "account/rateLimits/read",
+    }
+
+
+@pytest.mark.parametrize("method", ["account/rateLimitResetCredit/consume", "account/usage/read", "thread/goal/set",
+                                    "thread/items/list", "thread/queue/list"])
+def test_status_whitelist_stays_on_reads(method):
+    assert method not in ALLOWED_METHODS
 
 
 def test_initialize_requests_experimental_api_and_rpc_errors():

@@ -30,6 +30,13 @@ class FakeAppServer:
         self.calls: list[tuple[str, dict[str, Any]]] = []
         self.pending: dict[str, dict[str, Any]] = {}  # thread id -> request params
         self.answers: list[dict[str, Any]] = []
+        self.turns: dict[str, list[dict[str, Any]]] = {}  # thread id -> turns, newest first
+        self.goals: dict[str, dict[str, Any]] = {}
+        self.rate_limits: dict[str, Any] | None = {
+            "ordinaryUsageAllowed": True,
+            "rateLimits": {"primary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": 1_800_100_000},
+                           "secondary": None},
+        }
         self._runner: web.AppRunner | None = None
 
     async def start(self) -> None:
@@ -46,12 +53,14 @@ class FakeAppServer:
             await self._runner.cleanup()
 
     def add_thread(self, thread_id: str, updated_at: int, parent: str | None = None, archived: bool = False,
-                   name: str | None = None) -> None:
+                   name: str | None = None, path: str | None = None, model: str = "gpt-6", effort: str = "low",
+                   nickname: str | None = None, role: str | None = None) -> None:
         self.threads[thread_id] = {
             "id": thread_id, "name": name or f"thread {thread_id}", "preview": "p", "cwd": "/w",
             "updatedAt": updated_at, "status": {"type": "idle"},
             "source": {"subAgent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}} if parent else "cli",
-            "parentThreadId": parent,
+            "parentThreadId": parent, "model": model, "reasoningEffort": effort, "path": path,
+            "agentNickname": nickname, "agentRole": role,
         }
         if archived:
             self.archived.add(thread_id)
@@ -72,6 +81,12 @@ class FakeAppServer:
         status = {"type": "active", "activeFlags": flags} if flags is not None else {"type": "idle"}
         self.threads[thread_id]["status"] = status
         await self.broadcast("thread/status/changed", {"threadId": thread_id, "status": status})
+
+    async def token_usage(self, thread_id: str, last: dict[str, int], window: int | None = 100_000) -> None:
+        await self.broadcast("thread/tokenUsage/updated", {
+            "threadId": thread_id, "turnId": "u1",
+            "tokenUsage": {"last": last, "total": {k: v * 10 for k, v in last.items()}, "modelContextWindow": window},
+        })
 
     async def ask(self, thread_id: str, turn_id: str, item_id: str, questions: list[dict[str, Any]]) -> None:
         params = {
@@ -130,6 +145,18 @@ class FakeAppServer:
         self.calls.append((method, params))
         if method == "thread/list":
             await self._reply(conn, m, self._list(params))
+        elif method == "thread/read":
+            tid = params["threadId"]
+            if tid not in self.threads:
+                await conn.ws.send_json({"id": m["id"], "error": {"code": -32600, "message": "thread not found"}})
+                return
+            await self._reply(conn, m, {"thread": {**self.threads[tid], "turns": []}})
+        elif method == "thread/turns/list":
+            await self._reply(conn, m, {"data": self.turns.get(params["threadId"], [])[: params.get("limit") or 25]})
+        elif method == "thread/goal/get":
+            await self._reply(conn, m, {"goal": self.goals.get(params["threadId"])})
+        elif method == "account/rateLimits/read":
+            await self._reply(conn, m, self.rate_limits or {})
         elif method == "thread/loaded/list":
             await self._reply(conn, m, {"data": sorted(self.threads)})
         elif method == "thread/resume":
@@ -150,10 +177,22 @@ class FakeAppServer:
     async def _reply(self, conn: FakeConn, m: dict[str, Any], result: dict[str, Any]) -> None:
         await conn.ws.send_json({"id": m["id"], "result": result})
 
+    def _descends(self, t: dict[str, Any], ancestor: str) -> bool:
+        parent = t.get("parentThreadId")
+        for _ in range(16):
+            if parent is None:
+                return False
+            if parent == ancestor:
+                return True
+            parent = self.threads.get(parent, {}).get("parentThreadId")
+        return False
+
     def _list(self, p: dict[str, Any]) -> dict[str, Any]:
         want_archived = bool(p.get("archived"))
+        ancestor = p.get("ancestorThreadId")
         rows = sorted(
-            (t for t in self.threads.values() if (t["id"] in self.archived) == want_archived),
+            (t for t in self.threads.values()
+             if (t["id"] in self.archived) == want_archived and (not ancestor or self._descends(t, ancestor))),
             key=lambda t: -t["updatedAt"],
         )
         start = int(p.get("cursor") or 0)

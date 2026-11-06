@@ -16,7 +16,10 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 ALLOWED_METHODS = frozenset(
-    {"thread/list", "thread/read", "thread/loaded/list", "thread/resume", "thread/unsubscribe"}
+    {
+        "thread/list", "thread/read", "thread/loaded/list", "thread/resume", "thread/unsubscribe",
+        "thread/turns/list", "thread/goal/get", "account/rateLimits/read",  # status card: reads only
+    }
 )
 # thread/resume may carry config overrides; the Bridge may only select the thread.
 _RESUME_KEYS = frozenset({"threadId", "excludeTurns"})

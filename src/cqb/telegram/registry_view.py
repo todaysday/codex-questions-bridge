@@ -42,17 +42,6 @@ def render_registry(page: RegistryPage, chat_id: int, now: int) -> View:
     return View(header, clip("\n\n".join(lines), TEXT_LIMIT - 200), tuple(keyboard))
 
 
-def render_info(row: RegistryRow, now: int) -> str:
-    """Short text for an alert (Telegram limits it to 200 characters)."""
-    t = row.thread
-    state = CONSULTANT_MARK[row.consultant_state]
-    text = (
-        f"{thread_name(row)}\nid …{t.thread_id[-8:]} · {t.archive_state.value}\n"
-        f"активность {when(t.updated_at, now)} · консультант {state} · вопросов {row.pending_questions}"
-    )
-    return clip(text, 200)
-
-
 def _row_buttons(n: int, row: RegistryRow, chat_id: int, archived: bool) -> tuple[Button, ...]:
     buttons: list[Button] = []
     link = topic_link(chat_id, row.topic_id) if row.topic_id else None
@@ -60,7 +49,7 @@ def _row_buttons(n: int, row: RegistryRow, chat_id: int, archived: bool) -> tupl
         buttons.append(Button(_label(f"{n}. 💬 Открыть"), url=link))
     elif not archived and row.consultant_state not in (ConsultantState.OPEN, ConsultantState.ARCHIVED):
         buttons.append(Button(_label(f"{n}. ➕ Создать консультанта"), ActionSpec("create", row.thread.thread_id)))
-    buttons.append(Button(_label(f"{n}. ℹ️ Подробнее"), ActionSpec("info", row.thread.thread_id)))
+    buttons.append(Button(_label(f"{n}. ℹ️ Подробнее"), ActionSpec("status", row.thread.thread_id)))
     return tuple(buttons)
 
 

@@ -12,6 +12,14 @@ def test_defaults():
     assert c.telegram.chat_id == -1001234567890 and c.telegram.allowed_user_ids == (123,)
     assert (c.telegram.control_topic_name, c.telegram.inbox_topic_name) == ("📋 Треды Codex", "📥 Inbox")
     assert c.telegram.registry_refresh_seconds == 30
+    assert c.codex.codex_home == "/root/.codex"
+
+
+def test_codex_home_is_configurable_and_must_be_absolute():
+    assert parse_config({**OK, "codex": {"socket": "s", "codex_home": "/srv/codex"}}).codex.codex_home == "/srv/codex"
+    for bad in ("relative/dir", "", 5):
+        with pytest.raises(ConfigError, match="codex_home"):
+            parse_config({**OK, "codex": {"socket": "s", "codex_home": bad}})
 
 
 @pytest.mark.parametrize(

@@ -7,8 +7,9 @@ from dataclasses import dataclass
 from typing import Any
 
 from cqb.codex.appserver import Inbound
-from cqb.domain.enums import ArchiveState
+from cqb.domain.enums import ArchiveState, RunState
 from cqb.domain.models import QuestionItem, QuestionOption, Thread
+from cqb.domain.status import UsageSnapshot
 
 MAX_ITEMS = 8
 MAX_OPTIONS = 12
@@ -34,6 +35,7 @@ class ThreadStatusChanged:
     thread_id: str
     waiting_on_user_input: bool
     waiting_on_approval: bool
+    state: RunState = RunState.UNKNOWN
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,9 +67,21 @@ class TurnEnded:
     turn_id: str
 
 
+@dataclass(frozen=True, slots=True)
+class TokenUsageUpdated:
+    thread_id: str
+    usage: UsageSnapshot
+
+
+@dataclass(frozen=True, slots=True)
+class GoalChanged:
+    thread_id: str
+    present: bool  # goal/updated -> True, goal/cleared -> False
+
+
 Event = (
     Connected | Disconnected | ThreadStatusChanged | QuestionRequested
-    | RequestResolved | ThreadArchiveChanged | TurnEnded
+    | RequestResolved | ThreadArchiveChanged | TurnEnded | TokenUsageUpdated | GoalChanged
 )
 
 
@@ -82,8 +96,15 @@ def normalize(msg: Inbound) -> Event | None:
             case "notification", "thread/status/changed":
                 flags = _flags(p["status"])
                 return ThreadStatusChanged(
-                    p["threadId"], "waitingOnUserInput" in flags, "waitingOnApproval" in flags
+                    p["threadId"], "waitingOnUserInput" in flags, "waitingOnApproval" in flags,
+                    run_state(p["status"]),
                 )
+            case "notification", "thread/tokenUsage/updated":
+                return TokenUsageUpdated(p["threadId"], usage_from_wire(p["tokenUsage"]))
+            case "notification", "thread/goal/updated":
+                return GoalChanged(p["threadId"], True)
+            case "notification", "thread/goal/cleared":
+                return GoalChanged(p["threadId"], False)
             case "request", "item/tool/requestUserInput":
                 raw = p["questions"]
                 secret = any(q.get("isSecret") for q in raw)
@@ -102,7 +123,7 @@ def normalize(msg: Inbound) -> Event | None:
                 return ThreadArchiveChanged(p["threadId"], False)
             case "notification", "turn/completed":
                 return TurnEnded(p["threadId"], p["turn"]["id"])
-    except (KeyError, TypeError, AttributeError):
+    except (KeyError, TypeError, AttributeError, ValueError):
         return None  # malformed payload: ignore rather than crash the pump
     return None
 
@@ -129,6 +150,32 @@ def thread_from_wire(raw: dict[str, Any], source_id: str, now: int) -> Thread:
         archive_state=ArchiveState.UNKNOWN,
         archive_verified_at=None,
         last_seen_at=now,
+    )
+
+
+def run_state(status: dict[str, Any]) -> RunState:
+    flags = _flags(status)
+    match status.get("type"):
+        case "active":
+            if "waitingOnUserInput" in flags:
+                return RunState.WAITING_INPUT
+            return RunState.WAITING_APPROVAL if "waitingOnApproval" in flags else RunState.WORKING
+        case "idle":
+            return RunState.IDLE
+        case "notLoaded":
+            return RunState.NOT_LOADED
+        case "systemError":
+            return RunState.ERROR
+    return RunState.UNKNOWN
+
+
+def usage_from_wire(raw: dict[str, Any]) -> UsageSnapshot:
+    """thread/tokenUsage/updated payload: only `last` (the latest call) is used, never `total`."""
+    last = raw["last"]
+    window = raw.get("modelContextWindow")
+    return UsageSnapshot(
+        int(last["totalTokens"]), int(window) if window else None,
+        int(last["inputTokens"]), int(last.get("cachedInputTokens") or 0),
     )
 
 

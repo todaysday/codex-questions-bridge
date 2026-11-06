@@ -3,8 +3,9 @@
 A single-process asyncio service that connects as an extra client to the shared Codex
 app-server daemon, inventories threads and captures live `request_user_input` questions.
 It also runs the Telegram control UI: a pinned thread registry, an Inbox with question cards,
-and manually created consultant topics. There is no PicoClaw gateway, MCP/context API or `/status`
-yet: messages typed in a consultant topic go to a no-op relay that logs a counter only.
+and manually created consultant topics. There is no PicoClaw gateway or MCP/context API yet: messages typed in a consultant topic go to a no-op
+relay that logs a counter only. `/status` (and the registry button `ℹ️ Подробнее`) shows a deterministic status card
+(no LLM, separate from the consultant).
 Logs carry ids and counts, never question or message text. Design: `doc/Codex_Questions_Bridge_Design.md`.
 
 ## Run
@@ -16,7 +17,8 @@ Logs carry ids and counts, never question or message text. Design: `doc/Codex_Qu
     cd /tmp && sudo -n /path/.venv/bin/python /path/scripts/smoke_real_daemon.py   # read-only check
 
 Read-only boundary: the app-server client refuses every method except `thread/list`,
-`thread/read`, `thread/loaded/list`, `thread/resume` (thread id only), `thread/unsubscribe`;
+`thread/read`, `thread/loaded/list`, `thread/resume` (thread id only), `thread/unsubscribe` and the status reads
+`thread/turns/list`, `thread/goal/get`, `account/rateLimits/read` (the status card never resumes or subscribes);
 the only other write is the JSON-RPC response to a captured question request, and only
 when the caller asks (`QuestionService.answer`). Secret questions are stored without text
 and can never be answered by the Bridge.
@@ -39,7 +41,10 @@ is the only Bot API wire code (one shared aiohttp session).
    (calls only getMe, getChat, getChatMember).
 
 Commands: `/threads` (control topic: refresh now), `/questions` (Inbox: all; consultant topic: that thread),
-`/thread` (consultant topic). Consultants are created only by the `Создать консультанта` button.
+`/thread` (consultant topic), `/status` (consultant topic: status card; the registry
+button `ℹ️ Подробнее` posts the same card into the control topic). Root context/cache come from the tail of the
+rollout file (`[codex] codex_home`, default `/root/.codex`; read-only, path-checked). Live check:
+`cd /tmp && sudo -n /path/.venv/bin/python /path/scripts/smoke_status.py`. Consultants are created only by the `Создать консультанта` button.
 
 Layout: `telegram/` holds `api` (Bot API client), `poller`, `router` (authorization and dispatch),
 `control` (service topics, registry message), `inbox` (question cards), `topics` (consultant topic port),

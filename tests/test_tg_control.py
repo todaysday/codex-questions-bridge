@@ -7,7 +7,7 @@ import time
 from cqb.domain.enums import ArchiveState, ConsultantState as S
 from cqb.telegram.keys import ACTION_TTL
 from fake_telegram import OWNER
-from tg_stack import NOW, Stack, make_stack, thread
+from tg_stack import NOW, Stack, make_stack, snapshot, thread
 
 STRANGER = 4242
 
@@ -148,11 +148,11 @@ def test_navigation_buttons_are_reusable_until_expiry(conn):
     async def main():
         async with make_stack(conn, thread("r1", name="Fox")) as st:
             msg = st.registry_message
+            st.status_source.threads["r1"] = snapshot("r1")
             q1, q2 = click(st, msg, "Подробнее"), click(st, msg, "Подробнее")
             await st.pump()
             for q in (q1, q2):
-                a = answer_for(st, q)
-                assert a["show_alert"] and "Fox" in a["text"] and len(a["text"]) <= 200
+                assert answer_for(st, q)["text"] == "Статус отправлен"
     run(main())
 
 
@@ -210,7 +210,7 @@ def test_commands_in_the_right_topics_and_relay_of_free_text(conn):
             texts = [m["text"] for m in fake.live_messages(topic)]
             assert any(t.startswith("Тред: Fox\nid: r1") for t in texts)
             assert any(t == "Нет неотвеченных вопросов." for t in texts)
-            assert st.relay.got == [("r1", "why option A?"), ("r1", "/status")]  # /status is for the next increment
+            assert st.relay.got == [("r1", "why option A?")]  # /status is handled by the Bridge, not relayed
             await st.ask("r2", "i1")
             await st.ask("r1", "i2", request_id=2)
             fake.push_message("/questions", st.inbox_topic)

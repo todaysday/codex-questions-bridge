@@ -8,6 +8,8 @@ import sys
 from collections.abc import Callable
 
 from cqb.codex.appserver import AppServerClient
+from cqb.codex.rollout_tail import read_usage
+from cqb.codex.status_reader import DaemonStatusReader
 from cqb.codex.stream import dispatch
 from cqb.config import Config, ConfigError, load_config, read_token
 from cqb.dao import db
@@ -19,14 +21,17 @@ from cqb.dao.threads import SourceDao, ThreadDao
 from cqb.domain.models import Question, Source
 from cqb.services.consultants import ConsultantService
 from cqb.services.inventory import InventoryService
+from cqb.services.live_state import LiveState
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import CountingRelay
+from cqb.services.status import StatusService
 from cqb.telegram.api import API_BASE, BotApi
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.inbox import InboxCards
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
+from cqb.telegram.status_card import StatusCards
 from cqb.telegram.router import Router, RouterConfig
 from cqb.telegram.topics import TelegramTopics
 
@@ -98,10 +103,17 @@ async def run(
             api, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds
         )
         inbox = InboxCards(api, topics, keys, questions, registry, tg.chat_id, publisher.request_refresh)
+        live = LiveState()
+        home = config.codex.codex_home
+        status = StatusCards(
+            api, state,
+            StatusService(DaemonStatusReader(client), live, lambda path: read_usage(path, home), source_id),
+            tg.chat_id, source_id,
+        )
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
             api, keys, topics, publisher, inbox, consultants, tg_topics, registry, questions,
-            CountingRelay(), source_id, inventory.poke,
+            CountingRelay(), status, source_id, inventory.poke,
         )
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
         questions.subscribe(on_question=inbox.on_question, on_resolved=inbox.on_resolved)
@@ -116,7 +128,7 @@ async def run(
         poller = Poller(api, state, router.handle)
         tasks = [
             asyncio.create_task(client.run(), name="appserver"),
-            asyncio.create_task(dispatch(client, [inventory.handle, questions.handle]), name="dispatch"),
+            asyncio.create_task(dispatch(client, [inventory.handle, questions.handle, live.handle]), name="dispatch"),
             asyncio.create_task(inventory.run(), name="inventory"),
             asyncio.create_task(poller.run(), name="telegram-poll"),
             asyncio.create_task(publisher.run(before=consultants.reconcile), name="registry"),

@@ -4,6 +4,7 @@ socket = "/root/.codex/app-server-control/app-server-control.sock"
 source_id = "local"            # namespace for everything stored from this daemon
 poll_interval_seconds = 30     # 5..3600
 recency_days = 30              # inventory ignores threads not updated within this window
+codex_home = "/root/.codex"    # status card reads token_count from rollouts under sessions/ and archived_sessions/
 
 [db]
 path = "/var/lib/cqb/cqb.db"
