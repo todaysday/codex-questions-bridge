@@ -1,6 +1,6 @@
 # Codex Questions Bridge — Technical Design
 
-**Version:** 0.2  
+**Version:** 0.3  
 **Date:** 2026-11-06  
 **Status:** Design / implementation-ready with explicitly identified integration spikes  
 **Runtime:** Codex Desktop / Codex App Server + PicoClaw + Telegram Forum Topics + one lightweight Bridge service
@@ -13,7 +13,7 @@
 2. **One consultant per Codex root thread, created manually only.** Thread discovery, questions and registry synchronization must never create a consultant.
 3. **One private Telegram supergroup with forum topics.** Separate service topics: `📋 Треды Codex` and `📥 Inbox`. When manually requested, one topic per consultant.
 4. **Bridge is deterministic and contains no LLM.** It owns mappings, read-only Codex access, Telegram management, question lifecycle, cursors and security.
-5. **PicoClaw owns dialogs and model calls.** Each consultant has a persistent conversation scoped to its Telegram topic; it loads Codex context lazily through Bridge's read-only tools.
+5. **PicoClaw owns dialogs and model calls.** Each consultant has a persistent conversation scoped to its Telegram topic; it loads Codex context lazily through Bridge's read-only tools. PicoClaw has no Telegram channel here: Bridge owns the single Telegram bot and relays consultant messages to a long-running PicoClaw gateway over PicoClaw's `pico` WebSocket channel (§4.1).
 6. **`/status` invokes an ephemeral PicoClaw Status Agent.** It scans actual Codex log entries for the root thread and its descendants. Worker Codex agents are not asked to produce summaries and need no prompt changes.
 7. **Status is on demand, not periodic.** A no-change result should avoid LLM calls where possible; otherwise keep calls and retrieved bytes bounded.
 8. **Read-only is a hard boundary, not merely an instruction.** PicoClaw and Status Agent cannot edit repositories or Codex history through Bridge. Bridge's own app-server connection is limited to a method whitelist (list/read/resume/unsubscribe, plus answering a captured question request); every other method is refused client-side.
@@ -31,11 +31,10 @@ flowchart TD
     AS <-->|Whitelisted thread APIs, question requests and answers| BR
     STORE -->|Read-only fallback| BR[Codex Questions Bridge]
     BR <--> DB[(SQLite)]
-    BR <-->|Topic CRUD, control UI, Inbox| TB[Telegram Bot: bridge]
+    BR <-->|Topic CRUD, control UI, Inbox, consultant relay| TB[Telegram Bot: bridge]
     TB <--> TG[Private Telegram supergroup]
-    TG <--> PB[Telegram Bot: PicoClaw]
-    PB <--> PC[PicoClaw gateway]
-    PC -->|Per-topic persistent session| PS[(PicoClaw session store)]
+    BR <-->|pico WebSocket: one WS per active session| PC[PicoClaw gateway]
+    PC -->|Per-consultant persistent session| PS[(PicoClaw session store)]
     PC -->|Read-only MCP/tool queries| BR
     PC -->|delegate / subagent| SA[Ephemeral codex-status agent]
     SA -->|Read-only, bounded tools| BR
@@ -43,7 +42,7 @@ flowchart TD
 
 **Physical deployment:** normally one process `bridge` + one PicoClaw gateway + SQLite. Codex remains unchanged. The primary deployment is on the same host as the Codex daemon, connecting to its existing control socket (no second app-server). A Mac gets its own separately launched Bridge instance with its own `source_id`. Bridge and PicoClaw may be on a Linux VDS while Codex runs elsewhere **only if** the remote Codex home can be securely read or a remote read-only adapter is deployed. Local filesystem access is the simplest default, not something to assume across machines.
 
-**Two Telegram bots, one group:** Bridge Bot manages service topics, buttons and registry messages. PicoClaw Bot handles consultant conversations. They have distinct bot tokens and distinct update streams. **Never assume one bot automatically receives messages from the other.** Consultant context comes from Bridge tools/registry, not from reading Bridge Bot messages in Telegram. Telegram has opt-in bot-to-bot communication modes, but this design does not depend on them.
+**One Telegram bot, one group:** Bridge Bot manages service topics, buttons and registry messages and is the only bot in the group. It also receives consultant-topic messages, ignores unregistered topics, and forwards registered ones to PicoClaw over the `pico` WebSocket channel, posting the replies back to the topic. PicoClaw has no Telegram channel and no bot token. Consultant context comes from Bridge tools/registry, not from reading Bridge Bot messages in Telegram.
 
 ### 1.1 Modules and responsibility boundaries
 
@@ -54,9 +53,10 @@ flowchart TD
 | `consultant_registry` | `Codex root ↔ Telegram topic ↔ PicoClaw session key` | Agent reasoning, session summarization |
 | `question_inbox` | Captured questions, options, resolution states, Inbox messages, answers to the exact captured request | Free-form input into Codex |
 | `context_api` | Scoped read-only search/read/events tools, caps and redaction | Semantic reasoning and autonomous agent decisions |
-| `telegram_control` | `/threads`, callbacks, buttons, topic create/close/open, Inbox UI | Consultant replies |
+| `telegram_control` | `/threads`, callbacks, buttons, topic create/close/open, Inbox UI | Consultant relay (see `pico_gateway`) |
 | `status_cursors` | Last successfully covered event per root and child | LLM progress interpretation |
 | `pico_consultant` | Persistent Q&A dialog, choosing tools, delegation | Editing code or driving Codex work |
+| `pico_gateway` | Telegram consultant relay (registered topics only), per-session `pico` WebSocket, per-session serialization, slash-command escaping, `/status` interception, PicoClaw gateway supervision | Reasoning and model calls |
 | `codex_status` | Temporary log investigation and evidence-based synthesis | Persistent independent conversation or modifying Codex |
 
 ## 2. Telegram UX and commands
@@ -110,7 +110,7 @@ Telegram click → validate user/group/source/root/unarchived
 Important distinction:
 
 - **Creating the consultant = create Telegram topic and durable mapping.** This does not require an LLM call or a PicoClaw agent process.
-- **PicoClaw conversation/session materializes at the first inbound user message to that topic.** It must then reuse the same topic-scoped session on every later message.
+- **PicoClaw conversation/session materializes at the first inbound user message to that topic.** It must then reuse the same `pico` session (derived `session_id`) on every later message.
 - If topic creation succeeds and DB commit fails: recover using an idempotency/outbox record and reconcile the Telegram topic. Do not create a second topic on repeated click.
 - If an unrecognized topic is manually created by a user, do not automatically bind it to Codex.
 - Consultant remains the **same logical session** across messages and archive/unarchive, even if the physical PicoClaw process restarts.
@@ -127,7 +127,7 @@ Codex source: mac-codex-work · thread: 019…a9
 История Codex читается по необходимости и только на чтение.
 ```
 
-If PicoClaw's Telegram gateway does not auto-read this message (typical two-bot behavior), supply the actual binding via Bridge context tools, **not** by hoping that the message entered the LLM context.
+Bridge relays only user messages from the consultant topic to PicoClaw, so this message does not enter the LLM context; the actual binding comes from Bridge context tools and the scope hook, **not** from hoping that the message was read.
 
 ### 2.3 Forum topic `📥 Inbox`
 
@@ -167,7 +167,7 @@ An option button stages the choice (`decision_staged`) and asks for confirmation
 | `/questions` | List unanswered questions of the bound Codex root | Prefer deterministic Bridge response/tool |
 | `/thread` | Show bound root ID, source, archive state, last activity | Deterministic metadata |
 
-**Command collision:** PicoClaw's built-in `/subagents` describes **PicoClaw** subagents, **not** Codex workers. Use `/status agents` for Codex workers. PicoClaw currently passes unknown slash commands to normal model processing; `/status` is a **project-defined command**, not a stock PicoClaw feature. The initial implementation can interpret it via consultant instructions. A deterministic command handler is an optional optimization if routing cost/ambiguity becomes material.
+**Command collision:** PicoClaw's built-in `/subagents` describes **PicoClaw** subagents, **not** Codex workers. Use `/status agents` for Codex workers. Because Bridge relays consultant text, PicoClaw's built-in slash commands (`/clear`, `/switch`, `/reload`, `/use`, `/subagents`, `/help`, `/stop`, ...) would be executed by PicoClaw before any hook and without the model, and `/new`, `/model`, `/reset` would reach the model as ordinary text. Bridge therefore escapes a leading `/` in every relayed message (exact escaping form to verify). `/status` is a **project-defined command, not a stock PicoClaw feature**: PicoClaw passes it to the model, so Bridge intercepts and handles it deterministically, and may call the Status Agent for it (invocation path to verify in S0-D).
 
 ## 3. Data sources and integration contracts
 
@@ -262,17 +262,27 @@ Persistent identity is:
 
 ```text
 (source_id, codex_root_thread_id) -> (telegram_group_id, topic_id)
-                                        -> PicoClaw topic-scoped session
+                                        -> PicoClaw `pico` session (session_id)
 ```
 
-PicoClaw documents persistent session isolation by Telegram forum topic, and `session.dimensions: ["chat", "topic"]` is an explicit compatible policy. A separate PicoClaw process per Codex thread is **not needed**. The consultant's earlier dialog, decisions, and PicoClaw's own summarization stay in that topic session.
+Consultant sessions are PicoClaw `pico`-channel sessions selected by `session_id`; their history persists across gateway restart (S0-B, mock model). A separate PicoClaw process per Codex thread is **not needed**. The consultant's earlier dialog, decisions, and PicoClaw's own summarization stay in that session.
 
-**Critical binding issue:** PicoClaw does **not** inherently know that Telegram topic `42` corresponds to Codex root `019...`. Provide binding with one of the following, after a proof-of-capability spike:
+**Critical binding issue:** PicoClaw does **not** inherently know that Telegram topic `42` corresponds to Codex root `019...`. Decided design (Bridge-owned gateway, spike S0-B on PicoClaw v0.3.1):
 
-1. **Preferred (native gateway, low code):** PicoClaw process hook (`before_llm` and/or `before_tool`) uses a trustworthy `session_key`/topic identity to read binding from local Bridge and inject a compact `source_id`, `root_thread_id` header; tool-hook also enforces scope. Its hook system supports out-of-process JSON-RPC interceptors but message-level interception is not general purpose. Verify metadata available in the exact installed build before implementation.
-2. **Fallback (Bridge-owned gateway):** Bridge handles Telegram user updates and launches PicoClaw's supported `picoclaw agent --session <stable-key> -m <message>` invocation. Bridge injects binding deterministically and returns output to Telegram. This uses one Telegram bot, but has per-message subprocess/latency overhead and requires a concurrency/recovery smoke test. Do not implement both paths simultaneously.
+- Bridge owns the single Telegram bot, resolves topic → `(source_id, root_thread_id)` in SQLite and forwards the message to a long-running PicoClaw gateway over the `pico` WebSocket channel (`/pico/ws`, `Authorization: Bearer <token>`, `session_id` as query parameter).
+- `session_id` is derived deterministically from `(source_id, root_thread_id)` and must be lowercase-safe, because PicoClaw lowercases it (ids differing only in case share one history): e.g. a `cqb-` prefix plus lowercase base32 of a stable hash. It is stored as `pico_session_key`.
+- A PicoClaw process hook maps the pico session id to the allowed root and enforces scope. It reads the id from `context.inbound.raw.session_id` (also `context.inbound.chat_id = "pico:<sid>"`; `meta.SessionKey` is an opaque `sk_v1_` hash, meta keys are PascalCase). `before_tool` `modify` overwrites tool arguments such as `thread_id` with the trusted value; `approve_tool` validates them and is **fail-closed** (deny on error, exit or timeout); its denial reason is shown to the model. `before_llm`/`after_llm` are fail-open and hooks cannot change the system prompt, so they are best-effort only, never the security boundary.
 
-Both approaches require **no changes to Codex**. Choose one after a half-day integration spike. Prefer PicoClaw's native gateway if hook metadata and topic filtering work reliably; otherwise choose the single-bot CLI gateway, not a fork of PicoClaw.
+Operational requirements (from the spike):
+
+- **One WebSocket per active session**, held for the whole turn: replies go only to a connection attached with the same `session_id` and are lost otherwise (history keeps them). `max_connections` (default 100) counts across sessions. Treat a disconnect as a lost reply; ignore `message.create` frames with empty content (tool-call notices).
+- **Serialization per session:** a message sent while a turn is running is merged into that turn, so Bridge sends the next message only after the final reply / `typing.stop`.
+- **Supervision:** a dead hook process is not respawned until the gateway restarts, and `approve_tool` then denies every tool call. Bridge health-checks and restarts the gateway and treats this as an alarm (§11). Do not run the `picoclaw agent` CLI against live sessions (it shares session files without locking).
+- **Tool allowlist:** PicoClaw's default tools (`exec`, `write_file`, `edit_file`, `web_fetch`, `web_search`, `spawn`, `subagent`, `cron`, `install_skill`, `message`, `send_file`) must be disabled or denied for consultants; re-allowing `delegate`/`subagent` for `codex-status` is to verify (S0-D).
+- **Slash-command escaping and `/status`:** see §2.4; Bridge handles `/status` itself.
+- **Open items:** real model through OmniRoute, the Telegram message flow and concurrency at scale are to verify (§12.1).
+
+This needs **no changes to Codex** and no fork of PicoClaw. The native PicoClaw Telegram gateway (two bots) and the per-message `picoclaw agent` CLI path were evaluated and dropped.
 
 ### 4.2 Read-only tools exposed to PicoClaw
 
@@ -293,7 +303,7 @@ interface CodexContext {
 }
 ```
 
-**Tool authorization must not trust an arbitrary `thread_id` generated by the LLM.** It must bind request authorization to the immutable Telegram/PicoClaw session identity (or a server-side capability), check root/descendant membership, configured source and allowlisted repository paths. If a chosen PicoClaw transport cannot attach caller identity to MCP requests, enforce scope in a verified hook or use Bridge-owned gateway instead of sending secret scope tokens to the model.
+**Tool authorization must not trust an arbitrary `thread_id` generated by the LLM.** It must bind request authorization to the immutable Telegram/PicoClaw session identity (or a server-side capability), check root/descendant membership, configured source and allowlisted repository paths. MCP servers receive no caller identity from PicoClaw (verified in S0-B), so the scope hook (§4.1) injects the trusted root id into tool arguments and validates them, instead of sending secret scope tokens to the model; `context_api` still checks root/descendant membership server-side.
 
 Default caps (tunable):
 
@@ -351,7 +361,7 @@ sequenceDiagram
     end
 ```
 
-**Implementation note on zero-LLM no-change:** if `/status` reaches PicoClaw's LLM-based command parser first, the consultant routing turn **still costs tokens**. A strictly zero-token fast path requires Bridge to intercept `/status` deterministically before PicoClaw. This is an optional optimization, not a claimed property of the native gateway.
+**Implementation note on zero-LLM no-change:** Bridge intercepts `/status` deterministically before PicoClaw (PicoClaw would pass it to the model), so the no-change path needs no LLM call. If `/status` were forwarded to PicoClaw instead, the consultant routing turn **would still cost tokens**.
 
 ### 5.2 Status read window and cursor algorithm
 
@@ -689,6 +699,7 @@ codex-questions-bridge/
 │   ├── repository.py            # SQLite DAOs
 │   ├── registry.py              # thread / consultant state transitions
 │   ├── telegram_control.py      # control bot, topics, callbacks
+│   ├── pico_gateway.py          # consultant relay, pico WS sessions, supervision
 │   ├── questions.py             # capture, dedup, lifecycle
 │   ├── status.py                # scope, cursors, reports
 │   ├── context_api.py           # MCP or local read-only tools
@@ -698,7 +709,7 @@ codex-questions-bridge/
 │   └── codex-status.md
 ├── integrations/
 │   ├── codex-pretool-hook.py    # optional, enabled only after spike
-│   └── picoclaw-binding-hook.py # optional if verified native gateway route
+│   └── picoclaw-scope-hook.py   # PicoClaw approve_tool/before_tool scope hook
 ├── tests/
 │   ├── fixtures/               # versioned sanitized Codex events
 │   ├── test_registry.py
@@ -743,13 +754,30 @@ redact_secrets = true
 allow_project_file_read = false
 ```
 
-Credentials (Telegram bot tokens, model API keys) come from a secret store or restricted environment, not TOML committed to Git. PicoClaw supports `~/.picoclaw/.security.yml` for its tokens; ensure file permissions `0600`. **Do not combine personal and work Codex authentication stores.**
+Credentials (Telegram bot token, pico channel token, model API keys) come from a secret store or restricted environment, not TOML committed to Git. PicoClaw supports `~/.picoclaw/.security.yml` for its tokens; ensure file permissions `0600`. **Do not combine personal and work Codex authentication stores.**
 
 PicoClaw-specific configuration after verifying the installed schema:
 
 ```json
 {
-  "session": {"dimensions": ["chat", "topic"]},
+  "session": {"dimensions": ["chat"]},
+  "gateway": {"host": "127.0.0.1", "port": 18790, "hot_reload": false},
+  "channel_list": {
+    "pico": {"enabled": true, "type": "pico", "allow_from": ["pico-user"],
+             "settings": {"max_connections": 100, "allow_origins": ["<set explicitly>"]}}
+  },
+  "hooks": {
+    "enabled": true,
+    "processes": {
+      "scope": {"enabled": true, "transport": "stdio",
+                "command": ["python3", "-u", "integrations/picoclaw-scope-hook.py"],
+                "intercept": ["before_tool", "approve_tool"]}
+    }
+  },
+  "tools": {
+    "exec": {"enabled": false},
+    "mcp": {"enabled": true, "servers": {"cqb": {"enabled": true, "type": "stdio", "command": "python3", "args": ["-u", "..."]}}}
+  },
   "agents": {
     "list": [
       {"id": "main", "default": true,
@@ -760,7 +788,12 @@ PicoClaw-specific configuration after verifying the installed schema:
 }
 ```
 
-This is only a **configuration fragment**; real PicoClaw config also requires working `model_list`, `agents.defaults.model_name`, `channel_list.telegram`, `tools.mcp` / hooks and per-agent `AGENT.md`. Use an explicit tool allowlist in both agents. Set a cheaper model specifically in the `codex-status` agent definition, not by assuming an invalid generic model label.
+This is only a **configuration fragment**. Field names come from the S0-B spike report on PicoClaw v0.3.1 and **must be checked against the installed version**. Real PicoClaw config also requires working `model_list`, `agents.defaults.model_name` and per-agent `AGENT.md`; there is no `channel_list.telegram` entry, because Bridge owns Telegram. Notes:
+
+- The pico token is a secret: it goes into PicoClaw's `.security.yml` (`channel_list.pico.settings.token`, mode `0600`) and Bridge's own secret store, never into this JSON or Git. The channel does not start without a token.
+- `allow_from` must contain `"pico-user"` or `"*"`; a non-matching value silently drops all messages. Bind the gateway to loopback; `allow_origins` empty means allow all (whether a missing `Origin` header is still accepted once it is set: to verify).
+- `hooks.processes` runs the scope hook as a child process of the gateway; the hook must answer concurrently. With `hot_reload` false, config changes need a gateway restart.
+- Disable all default tools listed in §4.1 (`tools.*.enabled=false` in the spike notes; exact keys to verify) and expose only the Bridge MCP server (`tools.mcp.servers`; tool names are prefixed `mcp_<server>_<tool>`). Use an explicit tool allowlist in both agents. Set a cheaper model specifically in the `codex-status` agent definition, not by assuming an invalid generic model label.
 
 ### 9.1 Recovery at start
 
@@ -776,6 +809,7 @@ async def startup():
     await refresh_registry_message()
     launch_periodic_inventory_sync()
     launch_telegram_update_loop()
+    launch_pico_gateway_supervisor()
     launch_context_tool_server()
 ```
 
@@ -784,10 +818,10 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 ## 10. Threat model and access control
 
 - Telegram supergroup must be **private** and restricted to explicitly allowed user IDs; group ID is also checked. Ignore forwarded/anonymous-admin messages unless identities are reliably resolved.
-- Bridge Bot gets only necessary Telegram permissions (manage topics, post/edit/pin). PicoClaw Bot gets conversation permissions; avoid unnecessary admin rights.
-- With two bots, understand group privacy rules: PicoClaw may only receive mentions/replies when privacy mode is on; disabling privacy can cause it to receive `/threads`, Inbox discussions and other unrelated user messages. **Gate PicoClaw invocation to registered consultant topics**. If native gateway cannot reliably enforce this, choose Bridge-owned Telegram gateway. Do not silently pay tokens for unrelated service-topic messages.
+- Bridge Bot gets only necessary Telegram permissions (manage topics, post/edit/pin); avoid unnecessary admin rights. PicoClaw has no bot token.
+- Single bot: Bridge receives all group updates it is allowed to see, so **Bridge filters unregistered topics (service topics, unbound topics, unauthorized users) before any model call** and relays only registered consultant-topic messages to PicoClaw. Do not silently pay tokens for unrelated service-topic messages.
 - Untrusted Codex history, source comments, README content and command outputs are *data*, never tool instructions. Prompt injection within logs must not grant PicoClaw shell or network write capability.
-- No shell/exec, code write, git commit/push, file write, arbitrary network fetch or autonomous Codex turn actions in consultant/status allowlists. Read-only `context_api` uses a separate OS service account where practical.
+- No shell/exec, code write, git commit/push, file write, arbitrary network fetch or autonomous Codex turn actions in consultant/status allowlists. Read-only `context_api` uses a separate OS service account where practical. PicoClaw enables `exec`, file-write and `web_fetch` tools by default: disable them in config and deny them in `approve_tool`.
 - Source/account isolation: `(source_id, root_thread_id)` is the identity; never read across a different source using an arbitrary LLM-generated ID. Check descendant relation server-side.
 - Redact likely secrets/token headers, private keys, credential files and long binary outputs before sending to LLM/Telegram. Clearly label redacted/truncated evidence; avoid turning redaction into a misleading summary.
 - Resolve filesystem symlinks and normalize project paths; only read allowlisted paths, with byte caps. Never allow `../../`, arbitrary `$HOME` or secrets in project file tools.
@@ -795,6 +829,9 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 - The daemon control socket is root-only and grants full app-server rights. Bridge reaches it only through the method whitelist; it is never exposed to the consultant or Status Agent.
 - Answering a captured question is a mutation: verified `from.id`, one-time unexpired action and explicit confirmation are required; `isSecret` questions are never forwarded.
 - Protect local MCP or context endpoint (Unix socket preferred, mode 0600, localhost only if unavoidable); don't expose it to Internet.
+- PicoClaw `pico` channel: Bearer token from `.security.yml` (mode 0600), gateway bound to loopback only, `allow_origins` set explicitly (empty allows all), `allow_token_query` off, bounded `max_connections`.
+- Hook supervision: `approve_tool` is fail-closed (deny on error, exit or timeout), but `before_llm`/`after_llm` are fail-open and a dead hook process is not respawned until the gateway restarts. Bridge itself therefore gates every relayed message (registered topic, allowed user, escaping) instead of relying on those hooks, supervises the gateway and restarts it. Denial reasons are shown to the model verbatim and must not contain secrets.
+- Slash-command escaping: PicoClaw's built-in commands (`/clear`, `/switch`, `/reload`, `/use`, `/subagents`, which prints internal IDs, ...) run before any hook. Bridge must escape a leading `/` in relayed text so a Telegram user cannot switch the model, wipe history or reload the gateway.
 - Telegram group/chat history and remote LLM calls are data egress. The user must explicitly approve sending potentially sensitive development logs to these external services; provide per-source redaction/deny rules.
 
 ## 11. Error handling and behavior matrix
@@ -808,6 +845,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 | Archived root with consultant | Close only its topic | Closed in Telegram; history retained |
 | User manually deleted consultant topic | Mark orphaned; require user to rebind/create | No silent recreation |
 | PicoClaw stopped | Bridge lists topics; no hallucinated consultation | `Consultant temporarily unavailable` |
+| PicoClaw gateway down / hook process died | Bridge detects it (`/health`, WS failure, `approve_tool` denials), restarts the gateway, raises an alarm; no consultant turns meanwhile | `Consultant temporarily unavailable` |
 | Read-only tool fails | Return typed error and partial coverage | Evidence incomplete |
 | Status agent exceeds byte/token cap | Return truncated report with coverage | `Partial: N/M workers` |
 | New events during status processing | Keep original high-water; next run picks up | No lost delta |
@@ -823,7 +861,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 
 **S0-A — Codex reader (must pass):** on the installed Codex Desktop/CLI version, list two existing root threads, a child/subagent, read recent events, identify archived status, and confirm what is available from an independent reader. Verify `ancestorThreadId` support; test JSONL fallback if needed. Capture sample fixtures. Use the existing daemon socket; do not start a second app-server.
 
-**S0-B — Telegram/PicoClaw integration (must pass):** create two topics manually via Bridge; send messages; verify PicoClaw contexts remain isolated on reopen/restart; verify it ignores `📋 Треды` and `📥 Inbox`; verify secure topic→root binding without trusting LLM-provided ID. Determine native gateway/hook vs single-bot CLI fallback.
+**S0-B — PicoClaw gateway integration (passed on a mock model, 2026-11-06):** PicoClaw v0.3.1 `pico` WebSocket gateway driven by a test client: token auth, per-session isolation, history surviving gateway restart, hook visibility of the session id, `approve_tool` scope enforcement (allow own thread, deny other; fail-closed on error/exit/timeout), `before_tool` argument overwrite, slash-command behavior, `max_connections`. Results fixed the Bridge-owned gateway decision (§4.1). **Remaining:** real model through OmniRoute (not done: no access was provisioned); the Telegram message flow (two topics created via Bridge, relay, ignoring `📋 Треды` and `📥 Inbox`); concurrent sessions at scale; `/status` interception and the escaping form; re-allowing `delegate` for `codex-status` under the disabled-tools policy.
 
 **S0-C — Real question capture (passed 2026-11-06 for the daemon client path):** on a throwaway thread a second client received the live request with full options, answered it, and a late-joining client received a replay. Still to test: simultaneous answers from two clients, Desktop/mobile as co-subscribers, Bridge reconnect mid-question. Hook and journal paths are optional fallbacks.
 
@@ -893,11 +931,12 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 | `thread/items/list` | Backing-store dependent; fallback JSONL |
 | Codex hook on `request_user_input` | Not documented, unverified; not needed while the daemon path works |
 | Reply to a pending `request_user_input` from Bridge | Verified for a second client; simultaneous-answer behavior untested |
-| PicoClaw native gateway dynamic topic→root binding | **Must validate process-hook metadata and scope enforcement** |
-| Two Telegram bots exchanging messages | **Not required**; pass via Bridge's persistent state/tools |
-| Telegram topic isolation | Documented in PicoClaw; test installed version |
+| Dynamic topic→root binding in PicoClaw | Decided: Bridge-owned gateway, `session_id` from root, `approve_tool` scope hook; passed on a mock model (S0-B), real model to verify |
+| Two Telegram bots in one group | **Dropped**: single Bridge-owned bot (§1); no bot-to-bot messaging |
+| Topic isolation | Bridge maps topic to a `pico` `session_id`; isolation and restart persistence verified on a mock model (S0-B); Telegram flow to verify |
+| PicoClaw `pico` channel semantics | Verified on v0.3.1 (mock): replies lost without an attached WS, same-session messages merged, built-in slash commands run before hooks; Bridge compensates (§4.1) |
 | PicoClaw named `delegate` and separate models | Documented; test installed version and allowlist |
-| `/status` as slash command | Project-defined, needs explicit prompt/handler; not built-in PicoClaw |
+| `/status` as slash command | Project-defined; PicoClaw passes it to the model, so Bridge intercepts it; not built-in PicoClaw |
 | Running on another server | Needs remote read-only adapter or mounted Codex store; local-only assumption is invalid |
 
 ## 15. Primary references (verified 2026-11-06)
@@ -921,3 +960,4 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 
 - **v0.1 (2026-11-06):** Initial consolidated design: manual topic-bound consultants, Telegram registry/Inbox, read-only Codex integration, ephemeral status delegation, archive mirroring, phased answer delivery and explicit compatibility gates.
 - **v0.2 (2026-11-06):** Bridge is an additional client of the shared Codex app-server daemon (verified live question delivery, answering and late-join replay); answer delivery moved into V1; `isSecret` handling; status cursors advance to `read_until`.
+- **v0.3 (2026-11-06):** Consultant gateway decided: Bridge-owned Telegram bot talking to a long-running PicoClaw gateway over the pico WebSocket channel, scope enforced by an approve_tool process hook (spike S0-B results).
