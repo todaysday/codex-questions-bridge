@@ -92,6 +92,8 @@ class InventoryService:
                 {
                     "archived": archived, "limit": self._page_size, "cursor": cursor,
                     "sortKey": "updated_at", "sourceKinds": SOURCE_KINDS,
+                    # without it a 50-thread page takes ~100 s on a busy daemon; state-db-only is instant
+                    "useStateDbOnly": True,
                 },
             )
             raw_page = result.get("data") or []
