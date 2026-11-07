@@ -1,16 +1,20 @@
 import asyncio
 import contextlib
+import gc
+import logging
 
 import aiohttp
 import pytest
 
 from cqb.config import PicoConfig
+from cqb.domain.enums import ConsultantState
+from cqb.domain.models import Consultant
 from cqb.pico.gateway import (
     BAD_SESSION, CONN_FAILED, CONN_LOST, EXCHANGE_FAILED, QUEUE_MAX, TOO_MANY_SOCKETS, PicoGateway, ReplyAssembler,
     escape_command,
 )
 from cqb.pico.health import HEALTH_FAILING, HOOK_SILENT, PicoHealth, health_url
-from cqb.services.relay import UNAVAILABLE, Outcome, Submit, present
+from cqb.services.relay import UNAVAILABLE, ConsultantRelay, Outcome, Submit, present
 from fake_appserver import wait_until
 from fake_pico import TOKEN, FakePico, create, echo, update
 
@@ -611,4 +615,216 @@ def test_reason_connection_cap_and_exchange_failure(monkeypatch):
             gw.submit(SID, "hi", inbox)
             (r,) = await inbox.wait()
             assert (r.outcome, r.text) == (Outcome.ERROR, EXCHANGE_FAILED) and "private" not in shown(r)
+    arun(main())
+
+
+# --- a dead cached socket and a crashing turn must never kill the session worker -----------------------
+
+class LoopErrors:
+    """Records what asyncio's exception handler sees, e.g. 'Task exception was never retrieved'."""
+
+    def __init__(self):
+        self.messages = []
+        asyncio.get_running_loop().set_exception_handler(lambda loop, ctx: self.messages.append(ctx.get("message")))
+
+    async def settled(self):
+        for _ in range(3):  # an unretrieved task exception is reported when the task is garbage collected
+            gc.collect()
+            await asyncio.sleep(0.01)
+        return self.messages
+
+
+def typing_tasks():
+    return [t for t in asyncio.all_tasks() if t.get_name() == "consultant-typing" and not t.done()]
+
+
+class TypingSink:
+    def __init__(self):
+        self.said, self.typed = [], 0
+
+    async def say(self, topic, text):
+        self.said.append(text)
+
+    async def typing(self, topic):
+        self.typed += 1
+
+
+def consultant():
+    return Consultant(1, "s1", "r1", -100, 7, SID, ConsultantState.OPEN, 1, 1)
+
+
+def test_cached_socket_closed_by_the_server_while_idle_is_replaced_and_the_reply_arrives():
+    async def main():
+        errors = LoopErrors()
+        async with stack() as (gw, fake, _):
+            inbox = Inbox()
+            gw.submit(SID, "one", inbox)
+            await inbox.wait()
+            await fake.drop_connections()  # PicoClaw closed (or restarted) while the session was idle
+            await asyncio.sleep(0.05)
+            gw.submit(SID, "two", inbox)
+            await inbox.wait(2)
+            assert [r.text for r in inbox.results] == ["echo:one", "echo:two"] and fake.opened == 2
+            assert fake.texts(SID) == ["one", "two"]  # nothing was resent, nothing lost
+            assert await errors.settled() == []
+    arun(main())
+
+
+def test_a_socket_that_fails_answering_a_ping_while_idle_is_dropped_and_replaced():
+    async def main():
+        errors = LoopErrors()
+        async with stack() as (gw, fake, _):
+            inbox = Inbox()
+            gw.submit(SID, "one", inbox)
+            await inbox.wait()
+            ws = gw._sessions[SID].ws
+            pongs = []
+
+            async def broken_pong(message=b""):  # what aiohttp raised in production on a closing transport
+                pongs.append(message)
+                raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+            ws.pong = broken_pong
+            await fake.sockets[SID][0].ping()
+            await asyncio.sleep(0.05)
+            gw.submit(SID, "two", inbox)
+            await inbox.wait(2)
+            assert pongs and inbox.results[1].text == "echo:two" and fake.opened == 2
+            assert await errors.settled() == []
+    arun(main())
+
+
+def test_a_socket_that_fails_answering_a_ping_mid_turn_loses_that_reply_but_the_next_message_works():
+    async def main():
+        errors = LoopErrors()
+        async with stack() as (gw, fake, _):
+            fake.turn_delay = 5
+            inbox = Inbox()
+            gw.submit(SID, "slow", inbox)
+            await wait_until(lambda: fake.texts(SID) == ["slow"])
+
+            async def broken_pong(message=b""):
+                raise aiohttp.ClientConnectionResetError("Cannot write to closing transport")
+            gw._sessions[SID].ws.pong = broken_pong
+            await fake.sockets[SID][0].ping()
+            (r,) = await inbox.wait(1)
+            assert (r.outcome, r.text) == (Outcome.UNAVAILABLE, CONN_LOST)
+            fake.turn_delay = 0
+            gw.submit(SID, "next", inbox)
+            await inbox.wait(2)
+            assert inbox.results[1].text == "echo:next"
+            assert await errors.settled() == []
+    arun(main())
+
+
+def test_when_the_fresh_connection_fails_too_the_user_gets_the_reason_and_the_queue_goes_on():
+    async def main():
+        errors = LoopErrors()
+        async with stack() as (gw, fake, _):
+            inbox = Inbox()
+            gw.submit(SID, "one", inbox)
+            await inbox.wait()
+            await fake.drop_connections()  # the cached socket dies and nothing answers the reconnect either
+            await fake.stop()
+            gw.submit(SID, "two", inbox)
+            gw.submit(SID, "three", inbox)
+            await inbox.wait(3, 10)
+            for r in inbox.results[1:]:
+                assert (r.outcome, r.text) == (Outcome.UNAVAILABLE, CONN_FAILED)
+            assert shown(inbox.results[1]) == f"{UNAVAILABLE} ({CONN_FAILED})"
+            await fake.start()  # PicoClaw is back: the same session works again
+            gw.submit(SID, "four", inbox)
+            await inbox.wait(4, 10)
+            assert inbox.results[3].text == "echo:four"
+            assert await errors.settled() == []
+    arun(main())
+
+
+def test_an_unexpected_exception_in_a_turn_is_reported_and_the_worker_survives(monkeypatch, caplog):
+    async def main():
+        errors = LoopErrors()
+        async with stack() as (gw, fake, _):
+            real = gw._attach
+            calls = []
+
+            async def flaky(s):
+                calls.append(1)
+                if len(calls) == 1:
+                    raise RuntimeError("secret token abc123 in message")
+                return await real(s)
+            monkeypatch.setattr(gw, "_attach", flaky)
+            inbox = Inbox()
+            gw.submit(SID, "boom", inbox)
+            gw.submit(SID, "after", inbox)
+            await inbox.wait(2)
+            first, second = inbox.results
+            assert (first.outcome, first.text) == (Outcome.ERROR, "внутренняя ошибка шлюза: RuntimeError")
+            assert shown(first) == "Консультант вернул ошибку (внутренняя ошибка шлюза: RuntimeError)"
+            assert second.text == "echo:after" and fake.texts(SID) == ["after"]
+            logged = [r for r in caplog.records if r.levelno >= logging.ERROR]
+            assert len(logged) == 1 and "RuntimeError" in logged[0].getMessage() and "abc123" not in caplog.text
+            assert await errors.settled() == []
+    caplog.set_level("INFO")
+    arun(main())
+
+
+def test_a_worker_that_ends_with_an_exception_is_restarted_by_its_done_callback(monkeypatch, caplog):
+    async def main():
+        errors = LoopErrors()
+        async with stack() as (gw, fake, _):
+            real = gw._safe_turn
+            calls = []
+
+            async def bug(s, text, timeout):  # a defect outside the turn's own guard: it kills the worker task
+                calls.append(text)
+                if len(calls) == 1:
+                    raise ValueError("bug")
+                return await real(s, text, timeout)
+            monkeypatch.setattr(gw, "_safe_turn", bug)
+            inbox = Inbox()
+            for t in ("lost", "two", "three"):
+                gw.submit(SID, t, inbox)
+            await inbox.wait(3)
+            assert [(r.outcome, r.text) for r in inbox.results[:1]] == [(Outcome.ERROR, "внутренняя ошибка шлюза: ValueError")]
+            assert [r.text for r in inbox.results[1:]] == ["echo:two", "echo:three"]
+            assert "pico session worker crashed: ValueError" in caplog.text
+            assert await errors.settled() == []
+    caplog.set_level("INFO")
+    arun(main())
+
+
+# --- typing indicator: it stops after success, failure, cancellation and a crash ------------------------
+
+@pytest.mark.parametrize("how", ["success", "failure", "crash", "worker_crash", "cancelled"])
+def test_typing_stops_after_success_failure_crash_and_cancellation(how, monkeypatch):
+    async def main():
+        errors = LoopErrors()
+        sink = TypingSink()
+        async with stack() as (gw, fake, _):
+            relay = ConsultantRelay(gw, sink, typing_seconds=0.01)
+            if how == "failure":
+                await fake.stop()
+            elif how == "crash":
+                async def boom(s):
+                    raise RuntimeError("x")
+                monkeypatch.setattr(gw, "_attach", boom)
+            elif how == "worker_crash":
+                async def bug(s, text, timeout):
+                    raise ValueError("x")
+                monkeypatch.setattr(gw, "_safe_turn", bug)
+            elif how == "cancelled":
+                fake.turn_delay = 5
+            await relay.relay(consultant(), "hi")
+            await wait_until(lambda: sink.typed >= 1)  # it is typing while the turn runs
+            if how == "cancelled":
+                await wait_until(lambda: fake.texts(SID) == ["hi"])
+                await gw.close()  # the worker is cancelled: no result is ever delivered
+            else:
+                await wait_until(lambda: sink.said, 5)
+            await wait_until(lambda: not typing_tasks(), 2)  # the typing loop ended
+            n = sink.typed
+            await asyncio.sleep(0.1)
+            assert sink.typed == n
+            if how != "cancelled":
+                assert relay._pending == {}
+            assert await errors.settled() == []
     arun(main())

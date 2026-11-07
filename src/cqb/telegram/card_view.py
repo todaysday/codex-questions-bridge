@@ -8,7 +8,7 @@ from cqb.domain.enums import QuestionLifecycle as L
 from cqb.domain.labels import question_label
 from cqb.domain.models import Question, QuestionItem
 from cqb.telegram.fmt import clip, hhmm
-from cqb.telegram.models import ActionSpec, Button, View
+from cqb.telegram.models import ActionSpec, Button, Keyboard, View
 
 ANSWER_LIMIT = 1000
 OPTIONS_PER_ROW = 5
@@ -20,6 +20,9 @@ DISCUSS_HINT = "💬 Ответ на это сообщение уйдёт кон
 ARMED_TEXT = "следующий ответ на это сообщение уйдёт в Codex"
 ARMED_HINT = f"✍️ {ARMED_TEXT}"
 TEXT_BUTTON = "✍️ Ответить текстом"
+CONFIRM_PROMPT = "Подтвердите отправку"
+CONFIRM_BUTTON = "✅ Отправить в Codex"
+CANCEL_BUTTON = "↩️ Отмена"
 TAG_ANSWERED = "✅ отвечено"
 TAG_ELSEWHERE = "отвечено в другом месте"
 TAG_STALE = "устарел"
@@ -84,18 +87,29 @@ def _answer_rows(q: Question, armed: bool) -> list[tuple[Button, ...]]:
         return []
     root = q.root_thread_id
     if q.lifecycle is L.DECISION_STAGED:
-        return [(
-            Button("✅ Отправить в Codex", ActionSpec("send", root, q.question_id)),
-            Button("↩️ Отмена", ActionSpec("cancel", root, q.question_id)),
-        )]
+        return list(confirm_keyboard("send", "cancel", root, q.question_id))
     if q.lifecycle is not L.PENDING_CONFIRMED:
         return []
     item = q.items[0]
     return option_rows(
         [Button(letter(i), ActionSpec("opt", root, f"{q.question_id}:{i}")) for i in range(len(item.options))],
-        text_button=(Button("↩️ Отмена", ActionSpec("unarm", root, q.question_id)) if armed
+        text_button=(Button(CANCEL_BUTTON, ActionSpec("unarm", root, q.question_id)) if armed
                      else Button(TEXT_BUTTON, ActionSpec("other", root, q.question_id))) if item.is_other else None,
     )
+
+
+def confirm_keyboard(send: str, cancel: str, root: str, question_id: str) -> Keyboard:
+    """The stage -> confirm step: send and cancel, under the card and under the confirmation of a typed answer."""
+    return ((
+        Button(CONFIRM_BUTTON, ActionSpec(send, root, question_id)),
+        Button(CANCEL_BUTTON, ActionSpec(cancel, root, question_id)),
+    ),)
+
+
+def confirm_message(answer: str) -> str:
+    """The message that asks to confirm a typed answer: it shows what will be sent. The answer is at most
+    ANSWER_LIMIT characters (both card kinds refuse longer ones before staging), so nothing needs cutting."""
+    return f"{CONFIRM_PROMPT}:\n{answer.strip()}"
 
 
 def option_rows(letters: list[Button], text_button: Button | None) -> list[tuple[Button, ...]]:

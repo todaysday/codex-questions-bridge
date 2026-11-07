@@ -251,9 +251,10 @@ def test_commands_in_the_right_topics_and_relay_of_free_text(conn):
             assert fake.messages[st.registry_message]["edits"] == edits_before + 1  # /threads re-rendered it
             assert fake.deleted_user_messages == [cmd]  # and removed the command message
             texts = [m["text"] for m in fake.live_messages(topic)]
-            assert any(t.startswith("Тред: Fox\nid: r1") for t in texts)
+            assert not any(t.startswith("Тред:") for t in texts)  # /thread is disabled: nothing is answered by the Bridge
             assert any(t == "Нет неотвеченных вопросов." for t in texts)
-            assert st.relay.got == [("r1", "why option A?")]  # /status is handled by the Bridge, not relayed
+            # /status is handled by the Bridge, not relayed; /thread (ours or not) is like any unknown slash text
+            assert st.relay.got == [("r1", "/thread@cqb_test_bot"), ("r1", "why option A?")]
             await st.ask("r2", "i1")
             await st.ask("r1", "i2", request_id=2)
             fake.push_message("/questions", topic)

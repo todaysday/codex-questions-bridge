@@ -118,8 +118,8 @@ class ContextService:
         since: int | None = None, max_events: int | None = None, max_bytes: int | None = None,
     ) -> EventPage:
         self._root(root_id, source_id)
-        events = _cap("max_events", max_events, DEFAULT_EVENTS, 1, MAX_EVENTS)
-        budget = _cap("max_bytes", max_bytes, DEFAULT_BYTES, MIN_BYTES, MAX_BYTES)
+        events = cap_int("max_events", max_events, DEFAULT_EVENTS, 1, MAX_EVENTS)
+        budget = cap_int("max_bytes", max_bytes, DEFAULT_BYTES, MIN_BYTES, MAX_BYTES)
         if since is not None and (isinstance(since, bool) or not isinstance(since, int) or since < 0):
             raise ToolError("invalid_arguments", "since must be a unix time in seconds")
         thread = await self._thread_in_scope(root_id, thread_id or root_id)
@@ -148,7 +148,7 @@ class ContextService:
         self, root_id: str, event_ref: str, source_id: str | None = None, max_bytes: int | None = None
     ) -> HistoryEvent:
         self._root(root_id, source_id)
-        budget = _cap("max_bytes", max_bytes, DEFAULT_READ_BYTES, MIN_BYTES, READ_MAX_BYTES)
+        budget = cap_int("max_bytes", max_bytes, DEFAULT_READ_BYTES, MIN_BYTES, READ_MAX_BYTES)
         parts = split_ref(event_ref) if isinstance(event_ref, str) else None
         if parts is None:
             raise ToolError("invalid_arguments", "event_ref must come from get_recent_events")
@@ -182,6 +182,10 @@ class ContextService:
 
     # --- scope -----------------------------------------------------------------------
 
+    def check_scope(self, root_id: Any, source_id: Any = None) -> None:
+        """Raise ToolError unless root_id is an open consultant of this source (used by other tool services)."""
+        self._root(root_id, source_id)
+
     def _root(self, root_id: Any, source_id: Any) -> None:
         if not isinstance(root_id, str) or not _ID.match(root_id):
             raise ToolError("invalid_arguments", "root_id is required")
@@ -209,7 +213,7 @@ class ContextService:
         return dataclasses.replace(ev, text=text, redacted=ev.redacted or changed)
 
 
-def _cap(name: str, value: Any, default: int, lo: int, hi: int) -> int:
+def cap_int(name: str, value: Any, default: int, lo: int, hi: int) -> int:
     if value is None:
         return default
     if isinstance(value, bool) or not isinstance(value, int) or value < lo:

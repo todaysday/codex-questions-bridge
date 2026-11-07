@@ -5,8 +5,8 @@ from dataclasses import dataclass
 from cqb.domain.enums import ItemKind, RunState
 
 AGENT_LINES = 6  # subagent lines the card can show; the service reads 'now' data for exactly these
-SUMMARY_MAX = 350  # characters of the Status Agent summary in all
-NEXT_MAX = 120  # of them at most this many for its `Дальше` part
+PROGRESS_MAX = 650  # characters of the Status Agent's `В процессе` part (the prompt asks for about 900 in all)
+NEXT_MAX = 400  # and of its `Дальше` part
 
 
 @dataclass(frozen=True, slots=True)
@@ -118,8 +118,8 @@ class AgentLine:
 class StatusSummary:
     """The Status Agent's answer, already parsed, bounded and redacted: what is going on, and what comes next."""
 
-    progress: str  # one to three short lines
-    next_steps: str | None = None  # one or two short lines; None when the reports do not say
+    progress: str  # three to five short lines
+    next_steps: str | None = None  # two to four short lines; None when the reports do not say
 
 
 @dataclass(frozen=True, slots=True)

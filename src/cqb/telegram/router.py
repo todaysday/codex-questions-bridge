@@ -16,18 +16,21 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.telegram.api import BotApi, TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
-from cqb.telegram.consultant_view import render_opening, render_questions, render_thread
+from cqb.telegram.consultant_view import THREAD_COMMAND_ENABLED, render_questions, render_thread
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
-from cqb.telegram.models import CallbackQuery, Message, Reply, Update
+from cqb.telegram.models import CallbackQuery, Keyboard, Message, Reply, Update
 from cqb.telegram.registry_view import thread_name
 from cqb.telegram.status_post import BUSY as STATUS_BUSY, StatusPoster
-from cqb.telegram.topics import TelegramTopics
 
 log = logging.getLogger(__name__)
 
 STALE = "Кнопка устарела; обновляю сообщение"
+DONE_NOTE = "✅ отправлено"
+CANCELLED_NOTE = "↩️ отменено"
+STALE_NOTE = "⌛ устарело"
+CONFIRMATION_DONE = ("send", "asend", "cancel", "acancel")  # presses that end the confirmation of a typed answer
 SECRET_REFUSAL = "Секретный ввод: Bridge не обсуждает и не принимает его, ответьте в Codex"
 
 
@@ -49,7 +52,6 @@ class Router:
         cards: QuestionCards,
         agent_cards: AgentQuestionCards,
         consultants: ConsultantService,
-        consultant_topics: TelegramTopics,
         registry: RegistryQuery,
         questions: QuestionService,
         agent_questions: AgentQuestionService,
@@ -68,7 +70,6 @@ class Router:
         self._cards = cards
         self._agent_cards = agent_cards
         self._consultants = consultants
-        self._consultant_topics = consultant_topics
         self._registry = registry
         self._questions = questions
         self._agent_questions = agent_questions
@@ -136,7 +137,7 @@ class Router:
         consultant = self._consultants.by_topic(m.thread_id)
         if consultant is None or consultant.state is not ConsultantState.OPEN:
             return  # unknown, unbound or closed topic
-        if command == "thread":
+        if THREAD_COMMAND_ENABLED and command == "thread":
             row = self._registry.describe(consultant.root_thread_id)
             if row:
                 await self._say(m, render_thread(row, self._source, int(self._clock())))
@@ -171,7 +172,7 @@ class Router:
             reply = await self._agent_cards.stage_text(reply_to, text)
         if reply is not None:  # the armed card took it as its answer
             if reply.text:
-                await self._say(m, reply.text)
+                await self._say(m, reply.text, reply.keyboard)  # the confirmation carries the card's send/cancel buttons
         elif isinstance(card, Question) and card.is_secret:
             await self._say(m, SECRET_REFUSAL)  # whatever the owner typed may be the secret: nothing is forwarded
         elif text.strip():
@@ -196,8 +197,8 @@ class Router:
                 rows[q.root_thread_id] = thread_name(row)
         return rows
 
-    async def _say(self, m: Message, text: str) -> None:
-        await self._api.send_message(self._cfg.chat_id, text, thread_id=m.thread_id)
+    async def _say(self, m: Message, text: str, keyboard: Keyboard = ()) -> None:
+        await self._api.send_message(self._cfg.chat_id, text, thread_id=m.thread_id, keyboard=keyboard)
 
     # --- callbacks -------------------------------------------------------------------
 
@@ -207,12 +208,15 @@ class Router:
             return  # no answer: do not confirm anything to a stranger
         assert cb.data is not None and cb.message_id is not None
         action = self._keys.resolve(cb.data)
+        retire: str | None = None  # what to do with a confirmation message once the press is answered
         if action is None:
-            self._heal(cb.message_id)
+            retire = None if self._heal(cb.message_id) else STALE_NOTE
             reply = Reply(STALE)
         else:
             try:
                 reply = await self._dispatch(action)
+                if action.action in CONFIRMATION_DONE and not reply.alert:
+                    retire = DONE_NOTE if action.action in ("send", "asend") else CANCELLED_NOTE
             except ConsultantError as exc:
                 reply = Reply(str(exc), alert=True)
             except (KeyError, ValueError):
@@ -227,15 +231,36 @@ class Router:
             await self._api.answer_callback_query(cb.query_id, reply.text, reply.alert)
         except TelegramError as exc:
             log.debug("answerCallbackQuery failed: %s", exc)
+        if retire is not None and not self._is_card(cb.message_id):
+            await self._retire(cb.message_id, retire)
 
-    def _heal(self, message_id: int) -> None:
-        """An expired or used key on a visible message: re-render it with fresh keys."""
+    def _is_card(self, message_id: int) -> bool:
+        return (self._questions.by_card_message(message_id) is not None
+                or self._agent_questions.by_card_message(message_id) is not None)
+
+    async def _retire(self, message_id: int, note: str) -> None:
+        """A confirmation message of a typed answer is no longer needed: delete it, or when the bot may not,
+        leave a one-line note without buttons. Errors (the message is already gone) are ignored."""
+        try:
+            await self._api.delete_message(self._cfg.chat_id, message_id)
+        except TelegramError:
+            try:
+                await self._api.edit_message_text(self._cfg.chat_id, message_id, note)
+            except TelegramError as exc:
+                log.debug("cannot retire the confirmation message: %s", exc)
+
+    def _heal(self, message_id: int) -> bool:
+        """An expired or used key on a visible message: re-render it with fresh keys. False when the message is
+        neither the registry nor a card: a confirmation of a typed answer, which has nothing to re-render."""
         if message_id == self._publisher.message_id:
             self._publisher.request_refresh(force=True)
         elif (q := self._questions.by_card_message(message_id)) is not None:
             self._cards.mark(q.question_id)
         elif (aq := self._agent_questions.by_card_message(message_id)) is not None:
             self._agent_cards.mark(aq.agent_question_id)
+        else:
+            return False
+        return True
 
     async def _dispatch(self, a: TelegramAction) -> Reply:
         match a.action:
@@ -281,14 +306,7 @@ class Router:
 
     async def _create(self, root: str) -> Reply:
         before = self._consultants.get(root)
-        consultant = await self._consultants.create(root)
+        await self._consultants.create(root)  # sends and pins the opening message before the cards may be posted
         known = before is not None and before.state in (ConsultantState.OPEN, ConsultantState.ARCHIVED)
-        if not known and consultant.tg_topic_id is not None:
-            row = self._registry.describe(root)
-            if row:
-                try:
-                    await self._consultant_topics.announce(consultant.tg_topic_id, render_opening(row, self._source))
-                except TelegramError as exc:
-                    log.warning("opening message failed: %s", exc)
         self._publisher.request_refresh()
         return Reply("Консультант уже создан" if known else "Консультант создан")

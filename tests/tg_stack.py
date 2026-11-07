@@ -23,6 +23,7 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.status import StatusService
 from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.api import BotApi
+from cqb.telegram.consultant_view import render_opening
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.keys import ActionKeys
@@ -203,11 +204,12 @@ class Stack:
         self.consultants = ConsultantService(
             self.consultant_dao, self.threads, self.tg_topics, "s1", CHAT_ID, self.clock, persist_delay=0,
             on_open=lambda root: (self.cards.mark_root(root), self.agent_cards.mark_root(root)),
+            opening=lambda root: (row := self.registry.describe(root)) and render_opening(row, "s1"),
         )
         self.focus = QuestionFocus(self.consultant_dao, self.questions, self.agent, "s1")
         self.router = Router(
             RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.api, self.keys, self.topics,
-            self.publisher, self.cards, self.agent_cards, self.consultants, self.tg_topics, self.registry,
+            self.publisher, self.cards, self.agent_cards, self.consultants, self.registry,
             self.questions, self.agent, self.relay, self.focus, self.status_cards, "s1", self.inventory.poke, self.clock,
         )
         self.poller = Poller(self.api, self.state, self.router.handle, poll_timeout=0)

@@ -29,6 +29,15 @@ turn_timeout_seconds = 0               # 0 = no reply time limit (default); the 
 
 [mcp]
 port = 18791                           # 1024..65535; always bound to 127.0.0.1
+# Read-only project files for the consultant (tools read_project_file and list_project_dir). OFF by default:
+# while false the tools are not listed and calls are refused with `disabled`. The root is the working directory
+# of the consultant's root thread (broad ones such as /, /root, /home, /etc, /var, /usr, /opt, /srv are refused);
+# symlinks are never followed; names such as .git, .env*, keys, *secret*, *token*, *credential*, databases,
+# node_modules, .venv are denied and hidden; everything returned is redacted. Never logs paths or contents.
+project_files = false
+project_file_max_bytes = 16384         # 1024..65536: output cap of one read or listing
+project_dir_max_entries = 200          # 1..1000
+project_file_deny_extra = []           # extra name patterns (fnmatch, case-insensitive) added to the built-in deny table
 
 # The /status snapshot (consultant topics only). Works without [pico] too: the card then says `резюме недоступно`.
 [status]

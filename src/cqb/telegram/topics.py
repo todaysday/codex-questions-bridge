@@ -1,8 +1,12 @@
 """Adapter: the consultant service's TopicPort on top of the Bot API."""
 
+import logging
+
 from cqb.services.consultants import TopicGone
-from cqb.telegram.api import BadRequest, BotApi
+from cqb.telegram.api import BadRequest, BotApi, TelegramError
 from cqb.telegram.fmt import chunks
+
+log = logging.getLogger(__name__)
 
 
 class TelegramTopics:
@@ -27,8 +31,13 @@ class TelegramTopics:
             raise
 
     async def announce(self, topic_id: int, text: str) -> None:
-        """Opening message in a new consultant topic; best effort, the binding is already saved."""
-        await self._api.send_message(self._chat_id, text, thread_id=topic_id)
+        """Opening message in a new consultant topic, pinned (by its own message id). A failed pin (no rights) is only
+        logged: the message stays. A failed send raises; the caller decides."""
+        sent = await self._api.send_message(self._chat_id, text, thread_id=topic_id)
+        try:
+            await self._api.pin_chat_message(self._chat_id, sent.message_id)
+        except TelegramError as exc:
+            log.warning("cannot pin the opening message in topic %d: %s", topic_id, exc)
 
     async def say(self, topic_id: int, text: str) -> None:
         """Plain text (no parse mode, so a reply can never fail on entities), split below 4096."""

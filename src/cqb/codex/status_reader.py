@@ -34,6 +34,12 @@ class DaemonStatusReader:
         result = await self._soft("thread/read", {"threadId": thread_id, "includeTurns": False})
         return snapshot_from_wire(result["thread"]) if result and result.get("thread") else None
 
+    async def cwd(self, thread_id: str) -> str | None:
+        """Working directory of a thread as the daemon reports it (None: unreadable or absent)."""
+        result = await self._soft("thread/read", {"threadId": thread_id, "includeTurns": False})
+        cwd = ((result or {}).get("thread") or {}).get("cwd")
+        return cwd if isinstance(cwd, str) and cwd else None
+
     async def descendants(self, root_id: str, limit: int) -> Descendants | None:
         """All depths, at most `limit` threads in pages of 100; the ancestor filter is cheap (state db only).
 

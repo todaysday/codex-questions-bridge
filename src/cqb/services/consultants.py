@@ -28,6 +28,7 @@ PERSIST_ATTEMPTS = 3
 class TopicPort(Protocol):
     async def create_topic(self, name: str) -> int: ...
     async def set_topic_closed(self, topic_id: int, closed: bool) -> None: ...
+    async def announce(self, topic_id: int, text: str) -> None: ...
 
 
 class TopicGone(Exception):
@@ -60,6 +61,7 @@ class ConsultantService:
         clock: Callable[[], float] = time.time,
         persist_delay: float = 0.2,
         on_open: Callable[[str], None] | None = None,
+        opening: Callable[[str], str | None] | None = None,
     ) -> None:
         self._dao = consultants
         self._threads = threads
@@ -69,6 +71,7 @@ class ConsultantService:
         self._clock = clock
         self._persist_delay = persist_delay
         self._on_open = on_open  # root id of a consultant that just became open (created or reopened)
+        self._opening = opening  # root id -> text of the opening message of its new topic (None: send nothing)
         self._locks: dict[str, list] = {}  # root -> [lock, users]; entries live only while in use
         self._created: dict[str, int] = {}  # root -> topic created but not yet persisted
 
@@ -115,6 +118,7 @@ class ConsultantService:
             if topic_id is None:
                 topic_id = await self._create_topic(row, thread)
                 self._created[root_thread_id] = topic_id
+                await self._announce(root_thread_id, topic_id)  # before the row is open: no card can precede it
             await self._persist_open(row, topic_id)
             self._created.pop(root_thread_id, None)
             opened = self._dao.get(self._source, root_thread_id)
@@ -159,6 +163,16 @@ class ConsultantService:
     def _opened(self, root_thread_id: str) -> None:
         if self._on_open:
             self._on_open(root_thread_id)
+
+    async def _announce(self, root_thread_id: str, topic_id: int) -> None:
+        """The opening message (the topic's first message, pinned) goes out once per new topic, best effort."""
+        text = self._opening(root_thread_id) if self._opening else None
+        if not text:
+            return
+        try:
+            await self._topics.announce(topic_id, text)
+        except Exception as exc:
+            log.warning("opening message of topic %d failed: %s", topic_id, type(exc).__name__)
 
     async def _create_topic(self, row: Consultant, thread: Thread) -> int:
         try:

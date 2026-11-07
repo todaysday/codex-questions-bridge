@@ -4,7 +4,8 @@ option labelled A., B., C. ..., and short letter buttons; stage, confirm, send. 
 from cqb.domain.enums import AgentQuestionState as S
 from cqb.domain.models import AgentQuestion
 from cqb.telegram.card_view import (
-    ARMED_HINT, DISCUSS_HINT, TAG_ANSWERED, TAG_ELSEWHERE, TAG_STALE, TEXT_BUTTON, card_header, letter, option_rows,
+    ARMED_HINT, CANCEL_BUTTON, DISCUSS_HINT, TAG_ANSWERED, TAG_ELSEWHERE, TAG_STALE, TEXT_BUTTON, card_header,
+    confirm_keyboard, letter, option_rows,
 )
 from cqb.telegram.models import ActionSpec, Button, View
 
@@ -48,12 +49,9 @@ def _rows(q: AgentQuestion, armed: bool) -> list[tuple[Button, ...]]:
         return []
     root, qid = q.root_thread_id, q.agent_question_id
     if q.staged is not None:
-        return [(
-            Button("✅ Отправить в Codex", ActionSpec("asend", root, qid)),
-            Button("↩️ Отмена", ActionSpec("acancel", root, qid)),
-        )]
+        return list(confirm_keyboard("asend", "acancel", root, qid))
     return option_rows(
         [Button(letter(i), ActionSpec("aopt", root, f"{qid}:{i}")) for i in range(len(q.options))],
-        text_button=Button("↩️ Отмена", ActionSpec("unarm", root, qid)) if armed
+        text_button=Button(CANCEL_BUTTON, ActionSpec("unarm", root, qid)) if armed
         else Button(TEXT_BUTTON, ActionSpec("aother", root, qid)),
     )

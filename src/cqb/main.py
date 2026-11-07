@@ -31,6 +31,7 @@ from cqb.pico.status_narrator import STATUS_PROMPT, PicoStatusNarrator
 from cqb.services.agent_questions import AgentQuestionService
 from cqb.services.consultants import ConsultantService
 from cqb.services.context import ContextService
+from cqb.services.project_files import ProjectFiles
 from cqb.services.inventory import InventoryService
 from cqb.services.live_state import LiveState
 from cqb.services.focus import QuestionFocus
@@ -42,6 +43,7 @@ from cqb.services.status import StatusNarrator, StatusService
 from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.api import API_BASE, BotApi
 from cqb.telegram.cards import QuestionCards
+from cqb.telegram.consultant_view import render_opening
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
@@ -144,8 +146,12 @@ async def run(
             cards.mark_root(root)
             agent_cards.mark_root(root)
 
+        def opening_text(root: str) -> str | None:
+            row = registry.describe(root)
+            return render_opening(row, source_id) if row else None
+
         consultants = ConsultantService(
-            consultant_dao, threads, tg_topics, source_id, tg.chat_id, on_open=cards_for_root
+            consultant_dao, threads, tg_topics, source_id, tg.chat_id, on_open=cards_for_root, opening=opening_text
         )
         inventory = InventoryService(
             client, threads, source_id,
@@ -167,8 +173,9 @@ async def run(
                 consultant_dao, threads, question_dao, reader, HistoryReader(client), source_id, agent_dao
             )
             scopes = SessionScopes(consultants.scope_for_session)
+            files = ProjectFiles(config.mcp, context.check_scope, reader)
             mcp = McpServer(
-                consultant_tokens.mcp, build_tools(context), scopes.lookup, health.beat, port=config.mcp.port,
+                consultant_tokens.mcp, build_tools(context, files), scopes.lookup, health.beat, port=config.mcp.port,
             )
             narrator = PicoStatusNarrator(
                 gateway, scopes, config.pico.session_prefix, config.status.slots, status_prompt
@@ -186,7 +193,7 @@ async def run(
         focus = QuestionFocus(consultant_dao, questions, agent_questions, source_id)
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
-            api, keys, topics, publisher, cards, agent_cards, consultants, tg_topics, registry, questions,
+            api, keys, topics, publisher, cards, agent_cards, consultants, registry, questions,
             agent_questions,
             ConsultantRelay(gateway, tg_topics, context=focus), focus, status, source_id, inventory.poke,
         )

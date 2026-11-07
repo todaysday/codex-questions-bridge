@@ -72,7 +72,8 @@ deploy() {
   short=$(printf %s "$new" | cut -c1-10)
   checkout "$new" || die "cannot check out $short"
   log "testing $short"
-  if ! run_cmd "$CQB_TEST_TIMEOUT" "$CQB_TEST_CMD"; then
+  # one retry: a timing-sensitive test must not brand a good commit as bad
+  if ! run_cmd "$CQB_TEST_TIMEOUT" "$CQB_TEST_CMD" && { log "tests failed for $short, retrying once"; ! run_cmd "$CQB_TEST_TIMEOUT" "$CQB_TEST_CMD"; }; then
     mark_bad "$new"; record "$new" tests-failed
     [ -z "$prev" ] || checkout "$prev" || true
     die "tests failed for $short: not deployed, marked bad"

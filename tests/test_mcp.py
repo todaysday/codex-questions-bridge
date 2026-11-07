@@ -207,7 +207,7 @@ def test_internal_scope_and_heartbeat_endpoints(conn):
 def test_root_must_be_an_open_consultant_of_the_configured_source(conn):
     async def main():
         async with server(conn) as w:
-            for tool in w.tools:
+            for tool in (n for n, t in w.tools.items() if t.listed):  # project-file tools: test_project_files.py
                 for args in ({"root_id": "r3"}, {"root_id": "c1"}, {"root_id": "zzz"}, {"root_id": "r1", "source_id": "other"}):
                     body, err = await call(w, tool, **({"event_ref": "r1:t1:i1"} if tool == "read_event" else {}), **args)
                     assert err and body["error"] == "scope_denied", (tool, args, body)

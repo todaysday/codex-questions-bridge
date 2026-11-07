@@ -30,6 +30,12 @@ def card_of(svc, root="r1"):
     return render_status(run(svc.collect("s1", root)))
 
 
+def now_of(svc, root="r1"):
+    """The `💭 сейчас` fragment of the status line (the root's second card line); `💭 —` when the line has none."""
+    line = card_of(svc, root).splitlines()[1]
+    return "💭 " + line.partition(" 💭 ")[2] if " 💭 " in line else "💭 —"
+
+
 def running(item, started=NOW - 60):
     return Activity(True, started, None, item)
 
@@ -119,7 +125,7 @@ def test_root_now_line_per_item_kind(item, phrase):
     svc, src = make()
     src.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
     src.activities["r1"] = running(item)
-    assert card_of(svc).splitlines()[2] == phrase
+    assert now_of(svc) == phrase
 
 
 def test_waiting_states_idle_age_and_missing_data():
@@ -127,14 +133,14 @@ def test_waiting_states_idle_age_and_missing_data():
     for state, phrase in ((R.WAITING_INPUT, "💭 ждёт ответа"), (R.WAITING_APPROVAL, "💭 ждёт одобрения")):
         src.threads["r1"] = snapshot("r1", state, updated=NOW - 5)
         src.activities["r1"] = running(ItemBrief(K.COMMAND, False, "never shown"))
-        assert card_of(svc).splitlines()[2] == phrase
+        assert now_of(svc) == phrase
     src.threads["r1"] = snapshot("r1", R.IDLE, updated=NOW - 5)
     src.activities["r1"] = Activity(False, NOW - 900, NOW - 720, None)
-    assert card_of(svc).splitlines()[2] == "💭 ход завершён 12м назад"
+    assert now_of(svc) == "💭 ход завершён 12м назад"
     src.activities["r1"] = Activity(False, None, None, None)
-    assert card_of(svc).splitlines()[2] == "💭 —"
+    assert now_of(svc) == "💭 —"
     del src.activities["r1"]  # the daemon could not say
-    assert card_of(svc).splitlines()[2] == "💭 —"
+    assert now_of(svc) == "💭 —"
 
 
 def test_waiting_flag_costs_no_item_read_and_only_working_threads_read_items():
@@ -152,10 +158,10 @@ def test_command_head_is_redacted_then_cut_to_eighty_characters():
     src.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
     token = "ghp_" + "a" * 36
     src.activities["r1"] = running(ItemBrief(K.COMMAND, False, f"curl -H 'Authorization: Bearer {token}' https://x.test"))
-    line = card_of(svc).splitlines()[2]
+    line = now_of(svc)
     assert token not in line and "[REDACTED]" in line
     src.activities["r1"] = running(ItemBrief(K.COMMAND, False, "echo " + "word " * 60))
-    line = card_of(svc).splitlines()[2]
+    line = now_of(svc)
     detail = line.removeprefix("💭 выполняет: ")
     assert len(detail) == DETAIL_MAX and detail.endswith("…")
     # a secret that straddles the cut is redacted before the cut, never half shown

@@ -34,6 +34,12 @@ running turn without a model call). While a turn is in flight it is sent at once
 socket instead of waiting in the queue; with nothing running it is an ordinary message. Every
 other slash/bang text, `/stop now` and `/STOP` included, is escaped.
 
+Dead sockets: a cached socket may have died while idle (PicoClaw restarted or closed it). Whatever aiohttp raises
+on it (`ClientError` such as ClientConnectionResetError, `OSError`, a CLOSE/ERROR frame, `ws.closed`) means "this socket
+is dead": it is closed quietly, dropped, and the turn goes on a fresh socket. The session worker itself never dies from
+an unexpected exception: the turn fails with `внутренняя ошибка шлюза: <ExceptionType>`, the next message is served, and
+a done-callback restarts a worker that still ended with an exception while messages wait.
+
 Memory: sessions exist only while they have a socket, a queue or a worker. Sockets close after
 `idle_seconds` and, at the connection cap, the least recently used idle one is closed first.
 """
@@ -79,6 +85,11 @@ CONN_BACKOFF = "PicoClaw недавно не отвечал, повторная 
 BAD_SESSION = "недопустимая сессия консультанта"
 TOO_MANY_SOCKETS = "слишком много открытых соединений с PicoClaw"
 EXCHANGE_FAILED = "сбой обмена с PicoClaw"
+INTERNAL_ERROR = "внутренняя ошибка шлюза"
+CLOSE_TIMEOUT = 2.0  # closing a socket is housekeeping: never wait long for a peer that is gone
+_DEAD_FRAMES = (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED, aiohttp.WSMsgType.ERROR)
+# what a dead socket raises (TimeoutError is an OSError too: callers test it first)
+_SOCKET_ERRORS = (aiohttp.ClientError, OSError)
 
 
 def escape_command(text: str) -> str:
@@ -139,6 +150,7 @@ class _Session:
     touched: float = 0.0
     inflight: bool = False  # a turn is waiting for its reply on `ws`
     orphaned: bool = False  # the last socket died mid-turn: PicoClaw may still be running that turn
+    current: Deliver | None = None  # the popped message whose result has not been delivered yet
 
     @property
     def busy(self) -> bool:
@@ -204,11 +216,16 @@ class PicoGateway:
         s.touched = self._clock()
         self._sessions.move_to_end(session_id)
         if s.worker is None:
-            s.worker = asyncio.create_task(self._work(s), name="pico-session")
+            self._start_worker(s)
         return Submit.QUEUED if queued else Submit.ACCEPTED
 
     def unavailable_reason(self) -> str:
         return self._refusal
+
+    def active(self, session_id: str) -> bool:
+        """A turn is running or queued for the session (the relay's typing indicator asks)."""
+        s = self._sessions.get(session_id)
+        return s is not None and s.busy
 
     async def ask(self, session_id: str, text: str, timeout: float) -> DialogResult:
         """One request on a named session, answered within `timeout` seconds: the Status Agent's way in.
@@ -241,10 +258,14 @@ class PicoGateway:
         tick = min(self._liveness, RECOVERY_PROBE_SECONDS, max(self._cfg.idle_seconds / 4, 0.05))
         while True:
             now = self._clock()
-            if now >= next_probe:
-                healthy = await self._health.check()
-                next_probe = now + (self._liveness if healthy else min(self._liveness, RECOVERY_PROBE_SECONDS))
-            await self._sweep()
+            try:
+                if now >= next_probe:
+                    healthy = await self._health.check()
+                    next_probe = now + (self._liveness if healthy else min(self._liveness, RECOVERY_PROBE_SECONDS))
+                await self._sweep()
+            except Exception as exc:  # housekeeping must outlive any one failure
+                log.error("pico liveness loop failed: %s", type(exc).__name__)
+                next_probe = now + min(self._liveness, RECOVERY_PROBE_SECONDS)
             await asyncio.sleep(tick)
 
     async def close(self) -> None:
@@ -257,20 +278,53 @@ class PicoGateway:
 
     # --- per-session worker ----------------------------------------------------------
 
+    def _start_worker(self, s: _Session) -> None:
+        s.worker = asyncio.create_task(self._work(s), name="pico-session")
+        s.worker.add_done_callback(lambda task: self._worker_done(s, task))
+
+    def _worker_done(self, s: _Session, task: asyncio.Task[None]) -> None:
+        """Defence in depth: `_work` is written never to raise, but if it ever does, say so (this also marks the
+        exception retrieved), answer the message it was holding and carry on with the queue."""
+        if task.cancelled() or (exc := task.exception()) is None:
+            return
+        log.error("pico session worker crashed: %s", type(exc).__name__)
+        lost, s.current = s.current, None
+        if lost is not None:
+            asyncio.get_running_loop().create_task(self._deliver(lost, _internal_error(exc)), name="pico-deliver")
+        if s.worker is None and s.queue and self._sessions.get(s.sid) is s:
+            self._start_worker(s)
+
     async def _work(self, s: _Session) -> None:
         try:
             while s.queue:
                 text, deliver, timeout = s.queue.popleft()
-                result = await self._turn(s, text, timeout)
+                s.current = deliver
+                result = await self._safe_turn(s, text, timeout)
                 s.touched = self._clock()
-                try:
-                    await deliver(result)
-                except Exception as exc:
-                    log.warning("delivering a consultant result failed: %s", type(exc).__name__)
+                await self._deliver(deliver, result)
+                s.current = None
         finally:
             s.worker = None  # no await between the loop test and here: submit() sees a consistent state
-            if s.ws is None and not s.queue:
-                self._sessions.pop(s.sid, None)
+            if s.ws is None and not s.queue and not s.orphaned:  # an orphaned turn must still be stopped first:
+                self._sessions.pop(s.sid, None)  # the idle sweep forgets the session later
+
+    async def _safe_turn(self, s: _Session, text: str, timeout: float | None) -> DialogResult:
+        """One turn that cannot take the worker down: an unexpected exception becomes the user's failure line."""
+        try:
+            return await self._turn(s, text, timeout)
+        except Exception as exc:  # not BaseException: cancellation must pass
+            log.error("pico turn crashed: %s", type(exc).__name__)  # the type only: no message text, no tokens
+            s.inflight = False
+            with contextlib.suppress(Exception):
+                await self._drop(s)  # unknown socket state: the next message starts clean
+            return _internal_error(exc)
+
+    @staticmethod
+    async def _deliver(deliver: Deliver, result: DialogResult) -> None:
+        try:
+            await deliver(result)
+        except Exception as exc:
+            log.warning("delivering a consultant result failed: %s", type(exc).__name__)
 
     async def _turn(self, s: _Session, text: str, timeout: float | None) -> DialogResult:
         ws = None
@@ -315,6 +369,12 @@ class PicoGateway:
                                        else deadline - loop.time())
             except TimeoutError:
                 break
+            except _SOCKET_ERRORS:
+                msg = None  # a dead socket, like a CLOSE frame
+            if msg is None:
+                await self._drop(s)
+                self._note_failure()
+                raise _Unavailable(CONN_LOST)
             if msg.type is aiohttp.WSMsgType.TEXT and (frame := _parse(msg.data)) is not None:
                 asm.feed(frame)
                 if asm.error is not None:
@@ -356,6 +416,13 @@ class PicoGateway:
                 if asm.has_reply:
                     return DialogResult(Outcome.REPLY, asm.text)
                 continue
+            except _SOCKET_ERRORS as exc:  # e.g. ClientConnectionResetError while answering a ping
+                log.warning("pico socket failed mid-turn (session %s): %s; the reply is lost", s.sid[:8],
+                            type(exc).__name__)
+                s.orphaned = True
+                await self._drop(s)
+                self._note_failure()
+                return DialogResult(Outcome.UNAVAILABLE, CONN_LOST)
             if msg.type is aiohttp.WSMsgType.TEXT:
                 frame = _parse(msg.data)
                 if frame is None:
@@ -364,8 +431,7 @@ class PicoGateway:
                 if asm.error is not None:
                     log.warning("pico error frame %r (session %s)", asm.error, s.sid[:8])
                     return DialogResult(Outcome.ERROR, _error_reason(asm.error_text))
-            elif msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED,
-                              aiohttp.WSMsgType.ERROR):
+            elif msg.type in _DEAD_FRAMES:
                 log.warning("pico socket closed mid-turn (session %s): the reply is lost", s.sid[:8])
                 s.orphaned = True
                 await self._drop(s)
@@ -375,11 +441,11 @@ class PicoGateway:
     # --- sockets ---------------------------------------------------------------------
 
     async def _attach(self, s: _Session) -> aiohttp.ClientWebSocketResponse:
-        if s.ws is not None and not s.ws.closed:
-            await self._drain(s.ws)
-            if s.ws is not None and not s.ws.closed:
+        if s.ws is not None:
+            if await self._alive(s.ws):
                 return s.ws
-        s.ws = None
+            log.info("cached pico socket is dead (session %s): reconnecting", s.sid[:8])
+            await self._drop(s)  # closed quietly; a fresh socket is opened below, once
         if self._clock() < self._down_until:
             raise _Unavailable(CONN_BACKOFF)  # inside the backoff window: fail fast instead of piling up connects
         await self._make_room(s)
@@ -399,24 +465,32 @@ class PicoGateway:
 
     async def _send(self, s: _Session, ws: aiohttp.ClientWebSocketResponse, text: str) -> None:
         try:
+            if ws.closed:
+                raise ConnectionResetError("closed")
             await ws.send_json({"type": "message.send", "id": str(uuid.uuid4()), "session_id": s.sid,
                                 "payload": {"content": text}})
-        except (aiohttp.ClientError, ConnectionError, OSError):
+        except _SOCKET_ERRORS:
             # Not delivered (the socket was already dead), so nothing ran: report it, do not guess.
             self._note_failure()
             await self._drop(s)
             raise _Unavailable(CONN_LOST) from None
 
-    async def _drain(self, ws: aiohttp.ClientWebSocketResponse) -> None:
-        """Between turns every frame is stale (late typing.stop, a reply to an abandoned turn)."""
-        for _ in range(64):
-            try:
+    async def _alive(self, ws: aiohttp.ClientWebSocketResponse) -> bool:
+        """Is a cached socket still usable? Between turns every frame is stale (late typing.stop, a reply to an
+        abandoned turn), so they are read and dropped; a closed socket, a close/error frame or any transport error
+        met while doing so means it is dead (the caller then reconnects)."""
+        if ws.closed or ws.exception() is not None:
+            return False
+        try:
+            for _ in range(64):
                 msg = await ws.receive(timeout=0.005)
-            except TimeoutError:
-                return
-            if msg.type in (aiohttp.WSMsgType.CLOSE, aiohttp.WSMsgType.CLOSING, aiohttp.WSMsgType.CLOSED,
-                            aiohttp.WSMsgType.ERROR):
-                return  # ws.closed is now true; the caller reconnects
+                if msg.type in _DEAD_FRAMES:
+                    return False
+        except TimeoutError:
+            pass  # nothing more to read: quiet and open
+        except _SOCKET_ERRORS:
+            return False
+        return not ws.closed
 
     async def _make_room(self, s: _Session) -> None:
         """Hard cap on sockets: close least recently used idle ones; refuse when all are busy."""
@@ -429,8 +503,9 @@ class PicoGateway:
     async def _drop(self, s: _Session) -> None:
         ws, s.ws = s.ws, None
         if ws is not None and not ws.closed:
-            with contextlib.suppress(Exception):
-                await ws.close()
+            with contextlib.suppress(Exception):  # a dead peer: close quietly, never wait long
+                async with asyncio.timeout(CLOSE_TIMEOUT):
+                    await ws.close()
         if not s.busy:
             self._sessions.pop(s.sid, None)
 
@@ -442,6 +517,10 @@ class PicoGateway:
     def _note_failure(self) -> None:
         self._backoff = min(max(self._backoff * 2, self._backoff_base), BACKOFF_MAX)
         self._down_until = self._clock() + self._backoff
+
+
+def _internal_error(exc: Exception) -> DialogResult:
+    return DialogResult(Outcome.ERROR, f"{INTERNAL_ERROR}: {type(exc).__name__}")
 
 
 def _error_reason(text: str) -> str:

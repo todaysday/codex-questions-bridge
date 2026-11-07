@@ -232,7 +232,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
                 fake.turns["r1"] = [{"id": "t1", "status": "inProgress", "startedAt": int(asyncio.get_running_loop().time())}]
                 report = await svc.collect("local", "r1")
                 text = render_status(report)
-                assert "🧠 ctx 51k/200k (26%) · 💾 кэш 50%" in text  # root: rollout tail
+                assert " <b>ctx</b> 51k/200k (26%) · 💾 50%" in text  # root: rollout tail
                 assert " 🟢 Ada · luna·low · ctx 40%" in text  # subagent: broadcast usage
                 assert "🎯 Ship · 10/100\n" in text and "📈 лимит 30% нед." in text
                 assert set(fake.methods()) <= {"thread/read", "thread/list", "thread/goal/get",

@@ -98,7 +98,7 @@ When several cards pile up in a topic, tell the consultant which one you mean:
 - **Q-numbers.** Every question of a thread has a stable number, `Q3` (one per question, also for the questions of one agent message), in the card header and in `/questions`. A number is never reused. Write `Q3` (or `вопрос 3`) in a message and the consultant knows what you mean.
 - **Full text, no cut.** A card shows the whole question and the whole text of every option (`A.`, `B.` ...); buttons carry only the letters. A very long card continues in further messages (`↪ Q3 · 2/3`), with the buttons under the last one.
 - **Reply to the card.** A reply to a question card goes to the consultant, with the card (title and options) as context, even if the question is already answered. A secret question is never discussed: Bridge refuses and sends nothing.
-- **A reply is an answer only after `✍️ Ответить текстом`.** The button arms the card for 10 minutes (the card says `следующий ответ на это сообщение уйдёт в Codex`, `↩️ Отмена` disarms it). Then the next reply to that card is your answer, and the usual confirm step follows. Any other reply is a discussion.
+- **A reply is an answer only after `✍️ Ответить текстом`.** The button arms the card for 10 minutes (the card says `следующий ответ на это сообщение уйдёт в Codex`, `↩️ Отмена` disarms it). Then the next reply to that card is your answer (at most 1000 characters). The bot echoes it as `Подтвердите отправку:` with `✅ Отправить в Codex` and `↩️ Отмена`; the confirmation is deleted after a send or a cancel, and after a failed send it stays with working buttons. Any other reply is a discussion.
 - **Focus.** Bridge remembers the question you pointed at last (reply, Q-number, button), or else the newest pending one, and puts one `[Context: ...]` line in front of every message to the consultant, so follow-ups need no repeated explanation. The consultant reads details with `get_questions` (both kinds, optional `number`) and never answers for you.
 - **Failures say why.** `Консультант временно недоступен (хук не отвечает)`: the reason (connection dropped, hook silent, health probe failing, model error) is appended; PicoClaw's own error text is shown as is.
 
@@ -168,7 +168,7 @@ thread ids and states) and, for the status numbers, `cd /tmp && sudo -n /path/to
    calls only `getMe`, `getChat` and `getChatMember`, prints `ok`/`FAIL` facts and never prints the token.
 
 On start the Bridge creates the control topic `📋 Треды Codex` (name configurable) with exactly one pinned message.
-Consultant topics appear only when you press `Создать консультанта` ("Create consultant") on a registry row.
+Consultant topics appear only when you press `Создать консультанта` ("Create consultant") on a registry row. The opening message is sent and pinned first; cards for pending questions follow it.
 
 ## 🏭 Production install (what runs where)
 
@@ -259,12 +259,13 @@ occasional cleanup.
 | Layer | What it does |
 | --- | --- |
 | Scope hook | Every tool call is checked by the hook against the Bridge (`/internal/scope/<session>`). The hook overwrites `root_id` with the trusted value, so the model cannot pick another thread. An error, exit or timeout means deny. |
-| Tool allowlists | The consultant gets five read-only tools (`get_thread_overview`, `list_agents`, `get_recent_events`, `read_event`, `get_questions`). `codex-status` gets four of them (no `read_event`). Default PicoClaw tools are disabled too. |
+| Tool allowlists | The consultant gets five read-only tools (`get_thread_overview`, `list_agents`, `get_recent_events`, `read_event`, `get_questions`), plus `read_project_file` and `list_project_dir` when `[mcp] project_files = true` (seven in all). `codex-status` gets four of them (no `read_event`, never the file tools). Default PicoClaw tools are disabled too. |
 | Context API | Loopback only, bearer token. Results are redacted and bounded (at most 100 events and 64 KiB per call, 16 KiB per event). A secret question's text is never returned. |
 | Slash escaping | Only free text reaches PicoClaw. Any text starting with `/` or `!` gets a visible `User says: ` prefix, so `/clear`, `/switch`, `/reload`, `/subagents` cannot run. |
 | `/stop` | Exactly `/stop` passes through unescaped, so the owner can cancel a running turn. |
 | Timeouts | Consultant replies have no time limit (`turn_timeout_seconds = 0`). The `/status` collect has a 5 minute deadline (`[status] timeout_seconds = 300`), after which the card goes out with `резюме недоступно` ("summary unavailable"). |
-| Dead gateway | If `GET /health` fails or the hook heartbeat is silent, the topic answers `Консультант временно недоступен` ("consultant temporarily unavailable"). |
+| Dead gateway | If `GET /health` fails or the hook heartbeat is silent, the topic answers `Консультант временно недоступен` ("consultant temporarily unavailable"). A dead cached socket is replaced once; an unexpected error in a session worker gives `внутренняя ошибка шлюза: <Type>` and the queue goes on. |
+| Project files | Off by default (`[mcp] project_files`). The Bridge runs as root, so confinement is by file descriptor: `O_NOFOLLOW` at every step, no symlinks, no `..`, regular files only, root = the thread's working directory (broad roots such as `/`, home, `/srv`, `/tmp` refused). Secrets, keys, `.git`, `.env*`, databases, `node_modules` and similar names are denied by a built-in table without revealing whether they exist; output is capped (`project_file_max_bytes`) and redacted. Only the consultant can call these tools. |
 | Queue | One turn at a time per consultant, at most 5 queued messages. Replies are plain text, at most 12000 characters, split below 4096 per message. |
 
 ## 🌐 Tailscale: reaching a loopback-only model gateway
@@ -308,7 +309,6 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 | Control topic | `/threads` | Re-render the registry message now (the command message is deleted if the bot may). |
 | Consultant topic | `/status` | One static snapshot message. A second request while one collects answers `статус уже собирается`. |
 | Consultant topic | `/questions` | Unanswered questions of this thread (both kinds, with `Q` numbers). Deterministic, no LLM. |
-| Consultant topic | `/thread` | Bound thread id, source, archive state, last activity. Deterministic, no LLM. |
 | Consultant topic | `/stop` | Cancels the running consultant turn (the one command passed to PicoClaw). |
 | Consultant topic | free text | Goes to the consultant, with a context line about pending questions. A reply to a question card is a discussion unless armed by `✍️ Ответить текстом`. |
 
@@ -326,21 +326,20 @@ unarchiving reopens the same one.
 
 ### `/status` content
 
-Numbers: state, model (short, `luna·high`) and effort, context and cache, turn time, goal, subagent counts (up to 300
+Header: state icon and thread name, then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context and cache, goal, subagent counts (up to 300
 read; at most 6 one-line entries named like the Codex app, working first, then waiting, then recent, then `… и ещё N`),
 rate limit. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,
 `правит файлы (N)`, `думает`, `ждёт ответа`, ...), built without an LLM from the kind of the newest item. Command heads are
-redacted and cut at 80 characters, and message text and command output are never read. Two short parts from the Status
-Agent follow: `В процессе` (what the thread as a whole is doing, no per-agent breakdown) and `Дальше` (what remains, only when
+redacted and cut at 80 characters, and message text and command output are never read. Two parts from the Status
+Agent follow (about 900 characters): `В процессе` (3-5 lines about the thread as a whole, no per-agent breakdown), then after an empty line `Дальше` (2-4 lines about what remains, only as far as
 the recent reports say so). The message is Telegram HTML, sent once when all of it is ready (typing indicator meanwhile) and
 never edited; the only absolute time is the limit reset, in UTC. A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
-📊 FoxProfile
-🟢 работает · sol·low · ход 25м · 🕒 2м назад
-💭 выполняет: pytest -q
-🧠 ctx 160k/475k (34%) · 💾 кэш 80%
+🟢 FoxProfile
+🧠 sol 6.1·low · 🕒 25м · 🔄 now 💭 выполняет: pytest -q
+ ctx 160k/475k (34%) · 💾 80%
 🎯 Ship the profile page · 1.2M
 
 🤖 Субагенты 9 · 🟢 2 · 🟡 1 · ⚪ 6
@@ -350,7 +349,10 @@ text Telegram cannot parse is resent as plain text. Example:
  … и ещё 6
 
 📝 В процессе: Правит тесты статуса.
+<3-5 lines in all>
+
 ➡️ Дальше: прогнать e2e
+<2-4 lines in all>
 
 📈 лимит 41% нед. · сброс 20.01 09:00 UTC
 ```
@@ -375,6 +377,10 @@ text Telegram cannot parse is resent as plain text. Example:
 | `[pico] max_connections` | 50 | 1..90 |
 | `[pico] turn_timeout_seconds` | 0 | 0..86400, 0 = no limit |
 | `[mcp] port` | 18791 | 1024..65535, always bound to 127.0.0.1 |
+| `[mcp] project_files` | false | `true` lists `read_project_file` and `list_project_dir` for the consultant (read-only, confined, see Safety model) |
+| `[mcp] project_file_max_bytes` | 16384 | 1024..65536, output cap of one read or listing |
+| `[mcp] project_dir_max_entries` | 200 | 1..1000, entries of one listing |
+| `[mcp] project_file_deny_extra` | `[]` | extra name patterns to deny (up to 100, no `/`); the built-in table is never reduced |
 | `[status] timeout_seconds` | 300 | 30..3600 |
 | `[status] slots` | 2 | 1..8, each needs a dispatch rule in PicoClaw |
 | `[questions] agent_scan_seconds` | 20 | 5..600, period of the sweep for agent-message questions (at most 25 roots per sweep) |
@@ -392,7 +398,7 @@ cache and no mmap.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # about 650 tests, no network, fake daemon, fake Telegram, fake PicoClaw
+.venv/bin/python -m pytest -q          # about 940 tests, no network, fake daemon, fake Telegram, fake PicoClaw
 .venv/bin/python -m pytest -q -m e2e tests/e2e   # real PicoClaw binary, mock model, loopback only
 ```
 

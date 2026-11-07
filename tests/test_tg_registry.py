@@ -189,7 +189,8 @@ def test_one_message_in_the_control_topic_across_a_full_scenario(conn):
             await st.settle()
             sent_to_control = [p for p in fake.methods("sendMessage") if p.get("message_thread_id") == control]
             assert len(sent_to_control) == 1               # the registry itself, once, never anything else
-            assert len(st.control_messages()) == 1 and fake.pinned == [st.registry_message]
+            opening = next(i for i, m in fake.messages.items() if m["thread_id"] == topic)  # the consultant topic's first message
+            assert len(st.control_messages()) == 1 and fake.pinned == [st.registry_message, opening]
             assert [i for i, m in fake.messages.items() if m["thread_id"] == control] == [st.registry_message]
             assert fake.topic_named("📥 Inbox") == [] and len(fake.topics) == 2  # control + the consultant
     run(main())

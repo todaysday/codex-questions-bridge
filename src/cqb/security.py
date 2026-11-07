@@ -45,6 +45,34 @@ def redact(text: str) -> tuple[str, bool]:
     return out, out != text
 
 
+_PK_BEGIN = re.compile(r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+_PK_END = re.compile(r"-----END [A-Z0-9 ]*PRIVATE KEY(?: BLOCK)?-----")
+KEY_LINE = "[REDACTED PRIVATE KEY]"
+
+
+class PrivateKeyLines:
+    """Line-at-a-time twin of the private-key rule of redact(), for text read in pages.
+
+    A page that starts inside a PEM block would otherwise show the key body (it holds no marker).
+    Feed EVERY line of the file in order; `hides(line)` says whether this line belongs to a key block
+    (an unterminated block hides everything to the end, like redact()).
+    """
+
+    def __init__(self) -> None:
+        self._inside = False
+
+    def hides(self, line: str) -> bool:
+        if self._inside:
+            if _PK_END.search(line):
+                self._inside = False
+            return True
+        begin = _PK_BEGIN.search(line)
+        if begin is None:
+            return False
+        self._inside = _PK_END.search(line, begin.end()) is None
+        return True
+
+
 def _mask_assignment(m: re.Match[str]) -> str:
     if m.group(3).isdigit():  # max_tokens=4096 is configuration, not a credential
         return m.group(0)

@@ -299,3 +299,92 @@ def test_hook_imports_only_the_standard_library():
     imported = {a.name.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.Import) for a in n.names}
     imported |= {n.module.split(".")[0] for n in ast.walk(tree) if isinstance(n, ast.ImportFrom) and n.module}
     assert imported and imported <= set(sys.stdlib_module_names), imported - set(sys.stdlib_module_names)
+
+
+# --- project-file tools: main consultant sessions only, known argument names only ---------
+
+READ_FILE, LIST_DIR = "mcp_cqb_read_project_file", "mcp_cqb_list_project_dir"
+
+
+@pytest.mark.parametrize("tool,args", [(READ_FILE, {"path": "src/a.py", "offset_lines": 10, "max_lines": 5}),
+                                      (LIST_DIR, {"path": "src"}), (LIST_DIR, {})])
+def test_file_tools_are_pinned_to_the_root_for_the_main_consultant(bridge, tool, args):
+    got, _, _ = converse(bridge.url, [
+        call("hook.before_tool", tool=tool, args={**args, "root_id": "r2", "source_id": "evil"}, id=1),
+        call("hook.approve_tool", tool=tool, args={**args, "root_id": "r1", "source_id": "s1"}, id=2),
+        call("hook.approve_tool", tool=tool, args={**args, "root_id": "r2", "source_id": "s1"}, id=3),
+        call("hook.approve_tool", tool=tool, args=args, id=4),  # before_tool did not run: no root_id
+    ])
+    assert got[1]["result"]["action"] == "modify"
+    assert got[1]["result"]["call"]["arguments"] == {**args, "root_id": "r1", "source_id": "s1"}
+    assert got[2]["result"] == {"approved": True}
+    denied(got[3], "outside the consultant's scope")
+    denied(got[4], "outside the consultant's scope")
+
+
+@pytest.mark.parametrize("tool,extra", [(READ_FILE, "max_bytes"), (READ_FILE, "cwd"), (READ_FILE, "Path"), (READ_FILE, "path "),
+                                       (READ_FILE, "root"), (LIST_DIR, "offset_lines"), (LIST_DIR, "max_lines"),
+                                       (LIST_DIR, "recursive"), (LIST_DIR, "")])
+def test_file_tools_reject_argument_names_they_do_not_know(bridge, tool, extra):
+    ok = {"root_id": "r1", "source_id": "s1", "path": "x"}
+    got, _, _ = converse(bridge.url, [
+        call("hook.before_tool", tool=tool, args={"path": "x", extra: 1}, id=1),
+        call("hook.approve_tool", tool=tool, args={**ok, extra: 1}, id=2),
+    ])
+    denied(got[1], "unknown argument")
+    denied(got[2], "unknown argument")
+
+
+def test_file_tools_are_denied_to_everything_but_the_main_agent_in_a_consultant_session(bridge):
+    ok = {"root_id": "r1", "source_id": "s1", "path": "x"}
+    reqs, expect = [], {}
+    i = 0
+    for tool in (READ_FILE, LIST_DIR):
+        for method in ("hook.before_tool", "hook.approve_tool"):
+            for agent, reason in (("main", None), (None, "main consultant agent only"), ("evil", "may not use consultant tools"),
+                                  ("codex-status", "may not use consultant tools"), ("", "may not use consultant tools")):
+                i += 1
+                reqs.append(call(method, tool=tool, args=ok, agent=agent, id=i))
+                expect[i] = reason
+    got, _, _ = converse(bridge.url, reqs)
+    for n, reason in expect.items():
+        if reason is None:
+            assert got[n]["result"].get("approved") is True or got[n]["result"].get("action") == "modify", got[n]
+        else:
+            denied(got[n], reason)
+
+
+def test_status_slots_keep_exactly_their_four_tools_and_never_get_file_tools(bridge):
+    chat = f"pico:{SLOT}"
+    ok = {"root_id": "r7", "source_id": "s1", "path": "x"}
+    reqs, i = [], 0
+    for tool in (READ_FILE, LIST_DIR):
+        for method in ("hook.before_tool", "hook.approve_tool"):
+            for agent in ("codex-status", "main", None, "evil"):
+                i += 1
+                reqs.append(call(method, tool=tool, args=ok, chat=chat, agent=agent, id=i))
+    got, _, _ = converse(bridge.url, reqs)
+    for n in range(1, i + 1):
+        denied(got[n])
+        assert "available to the status agent" in got[n]["result"]["reason"] or "may not use status sessions" in got[n]["result"]["reason"]
+    for tool in ("get_thread_overview", "list_agents", "get_recent_events", "get_questions"):  # unchanged
+        got, _, _ = converse(bridge.url, [call("hook.approve_tool", tool=f"mcp_cqb_{tool}", args={"root_id": "r7", "source_id": "s1"},
+                                               chat=chat, agent="codex-status")])
+        assert got[1]["result"] == {"approved": True}
+
+
+def test_file_tools_fail_closed_for_unknown_sessions_and_a_dead_bridge(bridge):
+    ok = {"root_id": "r1", "source_id": "s1"}
+    got, _, _ = converse(bridge.url, [
+        call("hook.before_tool", tool=READ_FILE, args={"path": "x"}, chat="pico:cqb-" + "z" * 26, id=1),
+        call("hook.approve_tool", tool=LIST_DIR, args=ok, chat="telegram:1", id=2)])
+    denied(got[1], "unknown or closed consultant session")
+    denied(got[2], "not a consultant session")
+    got, _, _ = converse("http://127.0.0.1:9", [call("hook.before_tool", tool=READ_FILE, args={"path": "x"}, id=1)])
+    denied(got[1], "unavailable")
+
+
+def test_file_tool_denial_reasons_carry_no_secrets_or_paths(bridge):
+    got, _, _ = converse(bridge.url, [call("hook.before_tool", tool=READ_FILE, args={"path": "/etc/shadow", "x": 1}, id=1)])
+    denied(got[1])
+    assert "shadow" not in got[1]["result"]["reason"]

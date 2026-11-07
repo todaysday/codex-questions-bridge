@@ -50,6 +50,10 @@ class PicoConfig:
 @dataclass(frozen=True, slots=True)
 class McpConfig:
     port: int = 18791  # always bound to 127.0.0.1
+    project_files: bool = False  # read_project_file / list_project_dir: not listed and refused while False
+    project_file_max_bytes: int = 16384  # output cap of one read or listing, JSON-encoded bytes
+    project_dir_max_entries: int = 200
+    project_file_deny_extra: tuple[str, ...] = ()  # more deny patterns; the built-in table is never reduced
 
 
 @dataclass(frozen=True, slots=True)
@@ -117,8 +121,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
         pico=_pico(raw["pico"]) if "pico" in raw else None,
         status=_status(raw["status"]) if "status" in raw else StatusConfig(),
         questions=_questions(raw["questions"]) if "questions" in raw else QuestionsConfig(),
-        mcp=McpConfig(port=_int(_section(raw, "mcp", {"port"}), "mcp", "port", 18791, 1024, 65535)) if "mcp" in raw
-        else McpConfig(),
+        mcp=_mcp(raw["mcp"]) if "mcp" in raw else McpConfig(),
         codex=CodexConfig(
             socket=_text(codex, "codex", "socket"),
             source_id=_source_id(codex.get("source_id", "local")),
@@ -169,6 +172,25 @@ def _pico(raw: Any) -> PicoConfig:
         idle_seconds=_int(sec, "pico", "idle_seconds", 120, 10, 3600),
         max_connections=_int(sec, "pico", "max_connections", 50, 1, 90),
         turn_timeout_seconds=_int(sec, "pico", "turn_timeout_seconds", 0, 0, 86400),
+    )
+
+
+def _mcp(raw: Any) -> McpConfig:
+    sec = _section({"mcp": raw}, "mcp", {"port", "project_files", "project_file_max_bytes", "project_dir_max_entries",
+                                          "project_file_deny_extra"})
+    flag = sec.get("project_files", False)
+    if not isinstance(flag, bool):
+        raise ConfigError("[mcp] project_files must be true or false")
+    extra = sec.get("project_file_deny_extra", [])
+    ok = isinstance(extra, list) and len(extra) <= 100 and all(
+        isinstance(p, str) and 1 <= len(p) <= 100 and "/" not in p and "\0" not in p for p in extra)
+    if not ok:
+        raise ConfigError("[mcp] project_file_deny_extra must be a list (max 100) of name patterns without `/`")
+    return McpConfig(
+        port=_int(sec, "mcp", "port", 18791, 1024, 65535), project_files=flag,
+        project_file_max_bytes=_int(sec, "mcp", "project_file_max_bytes", 16384, 1024, 65536),
+        project_dir_max_entries=_int(sec, "mcp", "project_dir_max_entries", 200, 1, 1000),
+        project_file_deny_extra=tuple(extra),
     )
 
 

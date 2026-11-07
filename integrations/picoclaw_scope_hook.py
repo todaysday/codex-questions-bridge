@@ -16,7 +16,9 @@ Session id: context.inbound.chat_id == "pico:<session id>" (lowercase). Two kind
 through the same endpoint: a consultant's (`cqb-<hash>`, agent `main`) and a Status Agent slot
 (`cqb-status-<n>`, agent `codex-status`, bound to a root only while its /status request runs). A slot
 session may be served only by the codex-status agent and only with the four status tools; a consultant
-session only by `main`. A routed session that fell through to the wrong agent is therefore denied.
+session only by `main`. The two project-file tools (read-only files of the thread's project) are for a
+consultant session of the `main` agent only, never for a status slot, and take only the argument names
+listed in FILE_ARGS (anything else is denied). A routed session that fell through to the wrong agent is therefore denied.
 Denial reasons are shown to the model verbatim: they never contain tokens or session ids.
 """
 
@@ -31,7 +33,12 @@ import urllib.request
 from concurrent.futures import ThreadPoolExecutor
 
 SERVER = "cqb"  # tools.mcp.servers key; PicoClaw names tools mcp_<server>_<tool>
-TOOLS = frozenset(
+FILE_ARGS = {  # project-file tools and the only argument names they may carry (root_id/source_id are ours)
+    f"mcp_{SERVER}_read_project_file": frozenset({"root_id", "source_id", "path", "offset_lines", "max_lines"}),
+    f"mcp_{SERVER}_list_project_dir": frozenset({"root_id", "source_id", "path"}),
+}
+FILE_TOOLS = frozenset(FILE_ARGS)
+TOOLS = FILE_TOOLS | frozenset(
     f"mcp_{SERVER}_{name}"
     for name in ("get_thread_overview", "list_agents", "get_recent_events", "read_event", "get_questions")
 )
@@ -83,6 +90,8 @@ def scope_of(params, tool=None):
             raise Denied("this tool is not available to the status agent")
     elif agent is not None and agent != CONSULTANT_AGENT:
         raise Denied("this agent may not use consultant tools")
+    if tool in FILE_TOOLS and agent != CONSULTANT_AGENT:  # explicit `main`: no agent id is not good enough here
+        raise Denied("project files are available to the main consultant agent only")
     try:
         with _request("/internal/scope/" + sid) as r:
             found = json.loads(r.read(4096))
@@ -105,11 +114,19 @@ def check_tool(params):
     return tool
 
 
+def check_arguments(tool, args):
+    """Project-file tools reject any argument name they do not know."""
+    allowed = FILE_ARGS.get(tool)
+    if allowed is not None and set(args) - allowed:
+        raise Denied("unknown argument for this tool")
+
+
 def before_tool(params):
     tool = check_tool(params)
     source_id, root_id = scope_of(params, tool)
     args = params.get("arguments")
     args = dict(args) if isinstance(args, dict) else {}
+    check_arguments(tool, args)
     args["root_id"], args["source_id"] = root_id, source_id
     return {"action": "modify", "call": {**params, "arguments": args}}
 
@@ -120,6 +137,7 @@ def approve_tool(params):
     args = params.get("arguments")
     if not isinstance(args, dict) or args.get("root_id") != root_id or args.get("source_id") != source_id:
         raise Denied("arguments are outside the consultant's scope")
+    check_arguments(tool, args)
     return {"approved": True}
 
 

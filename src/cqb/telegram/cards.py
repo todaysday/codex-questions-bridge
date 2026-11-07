@@ -15,7 +15,7 @@ from cqb.services.registry import RegistryQuery
 from cqb.telegram.api import BotApi
 from cqb.telegram.armed import ArmedAnswers
 from cqb.telegram.card_post import CardPoster, card_parts
-from cqb.telegram.card_view import ANSWER_LIMIT, render_card
+from cqb.telegram.card_view import ANSWER_LIMIT, CONFIRM_PROMPT, confirm_keyboard, confirm_message, render_card
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import Reply
 from cqb.telegram.registry_view import thread_name
@@ -148,7 +148,11 @@ class QuestionCards:
             return None
         if len(text) > ANSWER_LIMIT:
             return Reply(f"Слишком длинный ответ (максимум {ANSWER_LIMIT} символов); карточка ждёт ответ")
-        return await self._stage_answer(q, text)
+        staged = await self._stage_answer(q, text)
+        if staged.alert:
+            return staged
+        keyboard = confirm_keyboard("send", "cancel", q.root_thread_id, q.question_id)
+        return Reply(confirm_message(text), keyboard=self._keys.bind(keyboard))  # the same buttons as under the card
 
     async def confirm(self, question_id: str) -> Reply:
         try:
@@ -156,6 +160,9 @@ class QuestionCards:
         except QuestionError as exc:
             await self.refresh_card(question_id)
             return Reply(str(exc), alert=True)
+        except Exception:
+            await self.refresh_card(question_id)  # the pressed key is used up: bind it again so the buttons stay usable
+            raise
         await self.refresh_card(question_id)
         return Reply("Отправлено в Codex; ждём подтверждения")
 
@@ -191,4 +198,4 @@ class QuestionCards:
             await self.refresh_card(q.question_id)
             return Reply(str(exc), alert=True)
         await self.refresh_card(q.question_id)
-        return Reply("Подтвердите отправку")
+        return Reply(CONFIRM_PROMPT)

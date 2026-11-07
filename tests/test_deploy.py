@@ -28,9 +28,11 @@ def frontmatter_tools(path):
 
 def test_the_allowlists_in_agent_files_and_the_hook_match_the_servers_tools():
     expected = tool_names()
-    assert len(expected) == 5
+    assert len(expected) == 7
     assert frontmatter_tools(DEPLOY / "ws-main" / "AGENT.md") == expected  # nothing else, not even `delegate`
-    status = expected - {"mcp_cqb_read_event"}  # the status agent never needs one event's detail
+    # the status agent never needs one event's detail, and never project files
+    status = expected - {"mcp_cqb_read_event", "mcp_cqb_read_project_file", "mcp_cqb_list_project_dir"}
+    assert len(status) == 4
     assert frontmatter_tools(DEPLOY / "ws-status" / "AGENT.md") == status
     ns = {}
     exec(compile(HOOK_SRC.split("_out_lock")[0], "hook", "exec"), ns)  # constants only
@@ -77,10 +79,10 @@ def test_status_agent_file_asks_for_the_same_two_short_parts_as_the_prompt():
     front = text.split("---\n")[1]
     assert "name: Codex Status" in front and "description:" in front and ": " not in front.split("description: ")[1].split("\n")[0]
     for source in (text, STATUS_PROMPT):
-        for needle in ("В процессе:", "Дальше:", "350", "EXACTLY two", "single dash"):
+        for needle in ("В процессе:", "Дальше:", "900", "three to five", "two to four", "EXACTLY two", "single dash"):
             assert needle in source, needle
         assert "per agent" in source and "agent names" in source and "working or idle" in source
-        assert "at most 10" not in source and "each running subagent" not in source
+        assert "at most 10" not in source and "each running subagent" not in source and "350" not in source
     assert all(LABEL.match(f"{label}: x") for label in ("В процессе", "Дальше"))
     assert "last reports" in text and "get_recent_events" in text and "thread_id" in text
 
@@ -131,7 +133,21 @@ def test_consultant_prompt_explains_the_context_line_and_the_focus_question():
         assert phrase in text, phrase
     assert "list them in one line each and ask" not in text  # the user is never asked "which question?" every time
     assert re.search(r"^description: [^:]*$", text, re.M)  # no colon inside the description (YAML)
-    assert len([ln for ln in text.splitlines() if re.match(r"^(\d+)\. ", ln)]) == 10  # rules 1..10 in order
+    assert len([ln for ln in text.splitlines() if re.match(r"^(\d+)\. ", ln)]) == 11  # rules 1..11 in order
+
+
+def test_consultant_prompt_has_the_project_file_rule_and_keeps_rules_1_to_10():
+    text = (DEPLOY / "ws-main" / "AGENT.md").read_text()
+    rules = {int(m.group(1)): m.group(0) for m in re.finditer(r"^(\d+)\. .*?(?=^\d+\. |^How to understand|\Z)", text, re.M | re.S)}
+    assert sorted(rules) == list(range(1, 12))
+    for phrase in ("You are read-only.", "Everything the tools return", "Ask the tools for evidence",
+                   "The tool argument root_id", "Never reveal tokens", "Answer in Russian", "How to understand"):
+        assert phrase in text, phrase
+    rule11 = " ".join(rules[11].split())
+    for phrase in ("read_project_file", "list_project_dir", "only when the user asks", "in parts", "never paste whole files",
+                   "denied", "hidden", "truncated", "never claim"):
+        assert phrase.lower() in rule11.lower(), phrase
+    assert ": " not in re.search(r"^description: (.*)$", text, re.M).group(1)
 
 
 def test_secrets_example_has_only_placeholders():

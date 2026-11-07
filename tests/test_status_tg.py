@@ -19,7 +19,7 @@ def run(coro):
 
 def cards(st, topic):
     return [(i, m) for i, m in st.fake.messages.items() if m["thread_id"] == topic and not m.get("deleted")
-            and m["text"].startswith("📊")]
+            and "📈" in m["text"]]  # every card ends with the limits line
 
 
 def typing(st, topic):
@@ -72,8 +72,8 @@ def test_status_posts_one_static_message_with_numbers_now_lines_and_summary(conn
             await st.pump()
             await st.status_done()
             [(mid, card)] = cards(st, topic)
-            assert "🟢 <b>работает</b> · gpt-6.1·low" in card["text"] and "💭 —" in card["text"]
-            assert "📝 <b>В процессе:</b> Корень правит тесты.\n➡️ <b>Дальше:</b> прогнать e2e" in card["text"]
+            assert "🟢 Fox\n🧠 gpt-6.1·low · " in card["text"] and "💭" not in card["text"]
+            assert "📝 <b>В процессе:</b> Корень правит тесты.\n\n➡️ <b>Дальше:</b> прогнать e2e" in card["text"]
             assert len(card["text"]) <= TEXT_LIMIT and card["parse_mode"] == "HTML"
             assert narrator.calls == [("s1", "r1", 300)]
             assert len(st.fake.methods("sendMessage")) == sends + 1  # exactly one message, no placeholder
@@ -86,7 +86,7 @@ def test_status_posts_one_static_message_with_numbers_now_lines_and_summary(conn
             await st.status_done()
             both = cards(st, topic)
             assert len(both) == 2 and both[0][0] == mid and "edits" not in both[0][1] and "edits" not in both[1][1]
-            assert "🟢 <b>работает" in both[0][1]["text"] and "⚪ <b>простаивает" in both[1][1]["text"]
+            assert both[0][1]["text"].startswith("🟢 Fox\n") and both[1][1]["text"].startswith("⚪ Fox\n")
             assert not st.fake.methods("editMessageText") or all(
                 p["message_id"] not in (i for i, _ in both) for p in st.fake.methods("editMessageText"))
     run(main())
@@ -157,7 +157,7 @@ def test_summary_that_does_not_arrive_in_time_gives_the_card_without_it(conn, mo
             await asyncio.wait_for(st.status_done(), 5)
             [(_, card)] = cards(st, topic)
             assert "📝 резюме недоступно" in card["text"] and "В процессе" not in card["text"]
-            assert "🧠 ctx" in card["text"] and "📈 лимит 30%" in card["text"]  # numbers are all there
+            assert " <b>ctx</b> —" in card["text"] and "📈 лимит 30%" in card["text"]  # numbers are all there
     run(main())
 
 
@@ -246,7 +246,7 @@ def test_card_is_sent_as_html_with_escaped_names_and_notices_stay_plain(conn):
             await st.pump()
             await st.status_done()
             [(_, card)] = cards(st, topic)  # the fake validates the HTML like Telegram: it was accepted as it is
-            assert card["parse_mode"] == "HTML" and card["text"].startswith("📊 <b>&lt;Fox&gt; &amp; &quot;Co&quot;</b>")
+            assert card["parse_mode"] == "HTML" and card["text"].startswith("🟢 &lt;Fox&gt; &amp; &quot;Co&quot;\n")
             st.status_source.fail = True
             st.fake.push_message("/status", topic)
             await st.pump()
@@ -259,7 +259,7 @@ def test_card_is_sent_as_html_with_escaped_names_and_notices_stay_plain(conn):
 def test_a_card_telegram_cannot_parse_is_resent_as_plain_text_never_lost(conn, monkeypatch):
     async def main():
         import cqb.telegram.status_post as post
-        monkeypatch.setattr(post, "render_status", lambda r: "📊 <b>Fox &amp; Co</b>\n📝 <b>В процессе:</b> шаг <i>1")  # broken
+        monkeypatch.setattr(post, "render_status", lambda r: "🟢 Fox &amp; Co\n📝 <b>В процессе:</b> шаг <i>1\n📈 лимит —")  # broken
         async with make_stack(conn, thread("r1", name="Fox"), narrator=Says()) as st:
             st.status_source.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
             topic = await consultant_topic(st)
@@ -267,8 +267,8 @@ def test_a_card_telegram_cannot_parse_is_resent_as_plain_text_never_lost(conn, m
             await st.pump()
             await st.status_done()
             [(_, card)] = cards(st, topic)
-            assert card["text"] == "📊 Fox & Co\n📝 В процессе: шаг 1" and card["parse_mode"] is None
-            sends = [p for p in st.fake.methods("sendMessage") if p["text"].startswith("📊")]
+            assert card["text"] == "🟢 Fox & Co\n📝 В процессе: шаг 1\n📈 лимит —" and card["parse_mode"] is None
+            sends = [p for p in st.fake.methods("sendMessage") if "📈" in p["text"]]
             assert [p.get("parse_mode") for p in sends] == ["HTML", None]  # tried as HTML first, then the same text plain
     run(main())
 
@@ -283,6 +283,6 @@ def test_a_server_side_parse_error_also_falls_back_to_plain_text(conn):
             await st.pump()
             await st.status_done()
             [(_, card)] = cards(st, topic)
-            assert card["parse_mode"] is None and "<b>" not in card["text"] and card["text"].startswith("📊 Fox\n")
-            assert "🟢 работает" in card["text"] and "📝 В процессе: Корень правит тесты." in card["text"]
+            assert card["parse_mode"] is None and "<b>" not in card["text"] and card["text"].startswith("🟢 Fox\n")
+            assert " ctx —\n" in card["text"] and "📝 В процессе: Корень правит тесты." in card["text"]
     run(main())

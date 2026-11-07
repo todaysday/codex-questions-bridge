@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 
 REPLY_MAX_CHARS = 12000  # three Telegram messages at most
 TYPING_SECONDS = 4.0  # Telegram shows "typing" for about 5 s per call
+TYPING_MAX_SECONDS = 3600.0  # safety stop only: replies have no time limit, but the indicator is cosmetic
 
 NOT_CONFIGURED = "Чат консультанта не настроен (нет секции [pico] или токенов)."
 UNAVAILABLE = "Консультант временно недоступен"
@@ -68,6 +69,9 @@ class ConsultantDialog(Protocol):
     def unavailable_reason(self) -> str:
         """Short clause (Russian, no ids or tokens) for why the last `submit` returned UNAVAILABLE."""
 
+    # Optional: `active(session_id) -> bool`, whether a turn is running or queued. When the dialog has it, the
+    # typing indicator also stops by itself once the session has nothing in flight (a delivery that never came).
+
 
 class TopicSink(Protocol):
     async def say(self, topic_id: int, text: str) -> None: ...
@@ -77,13 +81,14 @@ class TopicSink(Protocol):
 class ConsultantRelay:
     def __init__(
         self, dialog: ConsultantDialog | None, sink: TopicSink, *, typing_seconds: float = TYPING_SECONDS,
-        context: ContextLine | None = None,
+        context: ContextLine | None = None, typing_max: float = TYPING_MAX_SECONDS,
     ) -> None:
         self._dialog = dialog  # None: consultants are not configured
         self._context = context
         self._sink = sink
         self._typing_seconds = typing_seconds
-        self._pending: dict[int, list] = {}  # topic -> [turns not yet delivered, typing task]
+        self._typing_max = typing_max
+        self._pending: dict[int, list] = {}  # topic -> [turns not yet delivered, typing task, session key]
 
     async def relay(self, consultant: Consultant, text: str, lead: str | None = None) -> None:
         """Forward the owner's text. `lead` is a ready context line (a reply to a question card) that replaces the
@@ -96,15 +101,19 @@ class ConsultantRelay:
             return
 
         async def deliver(result: DialogResult) -> None:
-            self._leave(topic)
+            await self._leave(topic)
             await self._say(topic, present(result))
 
         if text.strip() != STOP:
             text = (lead if lead is not None else self._pending_line(consultant)) + text
-        self._enter(topic)  # typing starts before submit so a fast reply cannot race the task creation
-        outcome = self._dialog.submit(consultant.pico_session_key, text, deliver)
+        self._enter(topic, consultant.pico_session_key)  # before submit so a fast reply cannot race the task creation
+        try:
+            outcome = self._dialog.submit(consultant.pico_session_key, text, deliver)
+        except BaseException:
+            await self._leave(topic)  # no turn exists: typing must not outlive the failed call
+            raise
         if outcome in (Submit.QUEUE_FULL, Submit.UNAVAILABLE, Submit.STOPPED):
-            self._leave(topic)  # deliver will never run for these
+            await self._leave(topic)  # deliver will never run for these
         match outcome:
             case Submit.QUEUED:
                 await self._say(topic, QUEUED)
@@ -121,13 +130,14 @@ class ConsultantRelay:
             return ""
         return line + "\n" if line else ""
 
-    def _enter(self, topic: int) -> None:
-        entry = self._pending.setdefault(topic, [0, None])
+    def _enter(self, topic: int, session: str) -> None:
+        entry = self._pending.setdefault(topic, [0, None, session])
         entry[0] += 1
         if entry[1] is None:
-            entry[1] = asyncio.create_task(self._typing(topic), name="consultant-typing")
+            entry[1] = asyncio.create_task(self._typing(topic, session), name="consultant-typing")
 
-    def _leave(self, topic: int) -> None:
+    async def _leave(self, topic: int) -> None:
+        """One turn of the topic is over; with the last one the typing task is cancelled and awaited."""
         entry = self._pending.get(topic)
         if entry is None:
             return
@@ -136,13 +146,31 @@ class ConsultantRelay:
             del self._pending[topic]
             if entry[1] is not None:
                 entry[1].cancel()
+                await asyncio.gather(entry[1], return_exceptions=True)
 
-    async def _typing(self, topic: int) -> None:
-        """Keeps the typing indicator alive for as long as a turn is pending: no extra messages."""
-        while True:
-            with contextlib.suppress(Exception):  # cosmetic; a failed action must never stop the relay
-                await self._sink.typing(topic)
-            await asyncio.sleep(self._typing_seconds)
+    async def _typing(self, topic: int, session: str) -> None:
+        """Keeps the typing indicator alive for as long as a turn is pending: no extra messages. Besides `_leave`
+        it stops by itself when the dialog reports nothing in flight for the session, or after `typing_max`."""
+        loop = asyncio.get_running_loop()
+        started = loop.time()
+        try:
+            while True:
+                with contextlib.suppress(Exception):  # cosmetic; a failed action must never stop the relay
+                    await self._sink.typing(topic)
+                await asyncio.sleep(self._typing_seconds)
+                if loop.time() - started >= self._typing_max or not self._in_flight(session):
+                    return
+        finally:
+            entry = self._pending.get(topic)
+            if entry is not None and entry[1] is asyncio.current_task():
+                entry[1] = None  # stopped by itself: a later turn of this topic starts a new indicator
+
+    def _in_flight(self, session: str) -> bool:
+        probe = getattr(self._dialog, "active", None)
+        try:
+            return True if probe is None else bool(probe(session))
+        except Exception:
+            return True
 
     async def _say(self, topic: int, text: str) -> None:
         try:

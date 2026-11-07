@@ -221,7 +221,7 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
 
             # 6. Bridge commands are answered by the Bridge, never forwarded
             before = sum(1 for _ in open(tmp_path / "mock.jsonl"))
-            await ask(tg, fox, "/thread")
+            await ask(tg, fox, "/questions")
             await asyncio.sleep(1.5)
             assert sum(1 for _ in open(tmp_path / "mock.jsonl")) == before
 
@@ -246,11 +246,11 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
             n_fox = len(tg.live_messages(fox))
             tg.push_message("/status", fox)
             card = await reply_in(tg, fox, n_fox, 40)
-            assert card.startswith("📊 <b>FoxProfile</b>") and "💭" in card, card
+            assert card.startswith("⚪ FoxProfile\n🧠 ") and "💭" not in card.splitlines()[1], card
             assert "📝 <b>В процессе:</b> TOOLRESULT[" in card and "&quot;root_id&quot;:&quot;r1&quot;" in card and "OtherProject" not in card, card
             await asyncio.sleep(1.5)
             assert len(tg.live_messages(fox)) == n_fox + 1  # one message: no placeholder, nothing edited in later
-            assert all("edits" not in m for m in tg.live_messages(fox) if m["text"].startswith("📊"))
+            assert all("edits" not in m for m in tg.live_messages(fox) if "📈" in m["text"])
             asked = [e["body"] for e in mock_log()[seen_before:]]
             assert asked and {b["model"] for b in asked} == {"mock-status-model"}, [b["model"] for b in asked]
             assert sorted(t["function"]["name"] for t in asked[0]["tools"]) == sorted(

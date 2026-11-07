@@ -8,15 +8,22 @@ from cqb.telegram.fmt import TEXT_LIMIT, clip, hhmm, when
 from cqb.telegram.registry_view import CONSULTANT_MARK, thread_name
 
 LIST_LIMIT = 20
+THREAD_COMMAND_ENABLED = False  # /thread: disabled by owner request, may return later
+
+
+def _commands() -> str:
+    lines = ["/questions — неотвеченные вопросы этого треда."]
+    if THREAD_COMMAND_ENABLED:
+        lines.append("/thread — сведения о привязке.")
+    lines.append("/status — состояние треда, контекст, субагенты, лимиты.")
+    return "\n".join(lines)
 
 
 def render_opening(row: RegistryRow, source_id: str) -> str:
     return (
         f"Консультант: {thread_name(row)}\n"
         f"Codex source: {source_id} · thread: …{row.thread.thread_id[-8:]}\n\n"
-        "/questions — неотвеченные вопросы этого треда.\n"
-        "/thread — сведения о привязке.\n"
-        "/status — состояние треда, контекст, субагенты, лимиты.\n"
+        f"{_commands()}\n"
         "Диалог с моделью пока не подключён."
     )
 

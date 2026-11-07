@@ -12,6 +12,7 @@ from typing import Any
 
 from cqb.security import redact_json
 from cqb.services.context import ContextService, ToolError
+from cqb.services.project_files import ProjectFiles
 
 RESULT_MAX_BYTES = 96 * 1024  # last-resort guard; each tool is already bounded well below it
 
@@ -25,6 +26,7 @@ class Tool:
     description: str
     properties: dict[str, Any]
     handler: Callable[[dict[str, Any]], Awaitable[Any]]
+    listed: bool = True  # False: refused when called, absent from tools/list (feature flag off)
 
     def listing(self) -> dict[str, Any]:
         return {
@@ -35,7 +37,7 @@ class Tool:
         }
 
 
-def build_tools(ctx: ContextService) -> dict[str, Tool]:
+def build_tools(ctx: ContextService, files: ProjectFiles | None = None) -> dict[str, Tool]:
     def common(a: dict[str, Any]) -> tuple[Any, Any]:
         return a.get("root_id"), a.get("source_id")
 
@@ -57,6 +59,17 @@ def build_tools(ctx: ContextService) -> dict[str, Tool]:
     async def questions(a: dict[str, Any]) -> Any:
         return await ctx.questions(*common(a), number=a.get("number"))
 
+    async def read_file(a: dict[str, Any]) -> Any:
+        if files is None:
+            raise ToolError("disabled", "project file access is switched off")
+        return await files.read(a)
+
+    async def list_dir(a: dict[str, Any]) -> Any:
+        if files is None:
+            raise ToolError("disabled", "project file access is switched off")
+        return await files.listing(a)
+
+    files_on = files is not None and files.enabled
     tools = [
         Tool("get_thread_overview",
              "Name, state, model, last activity, subagent count and pending question count of the bound Codex thread.",
@@ -86,6 +99,22 @@ def build_tools(ctx: ContextService) -> dict[str, Tool]:
              {
                  "number": {"type": ["string", "integer"], "description": "Only this question: `Q3` or `3`."},
              }, questions),
+        Tool("read_project_file",
+             "Read one text file of the project (the bound thread's working directory), read-only. `path` is relative "
+             "to the project root. Returns lines as `N: text`, capped; `truncated` with `next_offset_lines` means "
+             "continue there. Secrets are redacted; symlinks, binary or huge files and secret-like names (.env, keys, "
+             ".git, ...) are refused.",
+             {
+                 "path": {"type": "string", "description": "Relative file path, e.g. src/app/main.py (required)."},
+                 "offset_lines": {"type": "integer", "description": "Lines to skip, default 0."},
+                 "max_lines": {"type": "integer", "description": "1..1000, default 300."},
+             }, read_file, listed=files_on),
+        Tool("list_project_dir",
+             "List ONE directory level of the project (no recursion): name, type (file, dir, symlink) and size, dirs "
+             "first, capped. Entries with secret-like names are not listed, only counted as `hidden`.",
+             {
+                 "path": {"type": "string", "description": "Relative directory path, default `.` (the project root)."},
+             }, list_dir, listed=files_on),
     ]
     return {t.name: t for t in tools}
 

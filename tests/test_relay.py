@@ -203,6 +203,71 @@ def test_a_failing_typing_action_or_reply_post_does_not_break_the_relay():
     run(main())
 
 
+def typing_tasks():
+    return [t for t in asyncio.all_tasks() if t.get_name() == "consultant-typing" and not t.done()]
+
+
+def test_typing_stops_by_itself_when_the_dialog_has_nothing_in_flight():
+    async def main():
+        class Lost:  # accepted the message, then the turn vanished without ever delivering
+            active_now = True
+
+            def submit(self, sid, text, deliver):
+                return Submit.ACCEPTED
+
+            def active(self, sid):
+                return self.active_now
+
+        dialog, sink = Lost(), Sink()
+        relay = ConsultantRelay(dialog, sink, typing_seconds=0.01)
+        await relay.relay(consultant(), "hi")
+        await asyncio.sleep(0.05)
+        assert typing_tasks() and len(sink.typed) >= 2
+        dialog.active_now = False
+        await wait_until(lambda: not typing_tasks())
+        n = len(sink.typed)
+        await asyncio.sleep(0.05)
+        assert len(sink.typed) == n
+        await relay.relay(consultant(), "again")  # a later turn of the same topic gets its own indicator
+        dialog.active_now = True
+        await asyncio.sleep(0.05)
+        assert typing_tasks() and len(sink.typed) > n
+    run(main())
+
+
+def test_typing_has_a_hard_upper_bound():
+    async def main():
+        class Never:
+            def submit(self, sid, text, deliver):
+                return Submit.ACCEPTED
+
+        sink = Sink()
+        await ConsultantRelay(Never(), sink, typing_seconds=0.01, typing_max=0.1).relay(consultant(), "hi")
+        await wait_until(lambda: not typing_tasks(), 2)
+        n = len(sink.typed)
+        await asyncio.sleep(0.05)
+        assert 2 <= n <= 20 and len(sink.typed) == n
+    run(main())
+
+
+def test_typing_does_not_outlive_a_submit_that_raises():
+    async def main():
+        class Broken:
+            def submit(self, sid, text, deliver):
+                raise RuntimeError("boom")
+
+        sink = Sink()
+        relay = ConsultantRelay(Broken(), sink, typing_seconds=0.01)
+        try:
+            await relay.relay(consultant(), "hi")
+        except RuntimeError:
+            pass
+        else:
+            raise AssertionError("the error must reach the caller")
+        assert relay._pending == {} and not typing_tasks()
+    run(main())
+
+
 # --- through the router and the real Telegram adapter ---------------------------------
 
 def test_router_forwards_only_registered_open_topics_to_the_dialog_and_replies_in_topic(conn):
@@ -221,7 +286,6 @@ def test_router_forwards_only_registered_open_topics_to_the_dialog_and_replies_i
             fake.push_message("hi", topic, user_id=STRANGER)
             fake.push_message("hi", topic, forwarded=True)
             fake.push_message("hi", topic, is_bot=True)
-            fake.push_message("/thread", topic)
             fake.push_message("/questions", topic)
             fake.push_message("/status", topic)
             await st.pump()
@@ -230,9 +294,10 @@ def test_router_forwards_only_registered_open_topics_to_the_dialog_and_replies_i
             key = st.consultant_dao.get("s1", "r1").pico_session_key
             fake.push_message("why option A?", topic)
             fake.push_message("/clear", topic)  # escaping is the gateway's job; the relay passes text through
+            fake.push_message("/thread", topic)  # disabled by owner request: any other slash text, forwarded to the consultant
             await st.pump()
             await wait_until(lambda: len(fake.live_messages(topic)) >= 6)
-            assert dialog.calls == [(key, "why option A?"), (key, "/clear")]
+            assert dialog.calls == [(key, "why option A?"), (key, "/clear"), (key, "/thread")]
             replies = [m["text"] for m in fake.live_messages(topic) if m["text"][:1] in "ab"]
             assert replies and all(len(t) <= 4096 for t in replies)  # chunked below the Telegram limit
             sent = fake.methods("sendMessage")

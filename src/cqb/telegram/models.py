@@ -104,7 +104,9 @@ class View:
 
 @dataclass(frozen=True, slots=True)
 class Reply:
-    """Outcome of a button press: shown to the user as a toast (or alert) on the button."""
+    """Outcome of a button press: shown to the user as a toast (or alert) on the button. For a typed answer it is a
+    message in the topic instead, and then `keyboard` (already bound) goes under it."""
 
     text: str | None = None
     alert: bool = False
+    keyboard: Keyboard = ()

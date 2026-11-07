@@ -32,15 +32,16 @@ def collect(svc, root="r1"):
 
 
 @pytest.mark.parametrize("state,icon,word", [
-    (R.WORKING, "🟢", "работает"), (R.WAITING_INPUT, "🟡", "ждёт ответа"),
-    (R.WAITING_APPROVAL, "🟡", "ждёт одобрения"), (R.IDLE, "⚪", "простаивает"),
-    (R.NOT_LOADED, "💤", "не загружен"), (R.ERROR, "🔴", "ошибка"),
+    (R.WORKING, "🟢", None), (R.WAITING_INPUT, "🟡", "ждёт ответа"),
+    (R.WAITING_APPROVAL, "🟡", "ждёт одобрения"), (R.IDLE, "⚪", None),
+    (R.NOT_LOADED, "💤", None), (R.ERROR, "🔴", None),
 ])
-def test_root_state_icon_and_word(state, icon, word):
+def test_root_state_icon_and_what_it_is_waiting_for(state, icon, word):
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1", state, updated=NOW - 5)
-    text = render_status(collect(svc))
-    assert f"{icon} <b>{word}</b>" in text.splitlines()[1]
+    lines = render_status(collect(svc)).splitlines()
+    assert lines[0] == f"{icon} Thread r1"  # the state is the icon only
+    assert (lines[1].endswith(f"💭 {word}")) if word else "💭" not in lines[1]
 
 
 @pytest.mark.parametrize("quiet,stalled", [(0, False), (599, False), (600, False), (601, True), (3600, True)])
@@ -51,7 +52,8 @@ def test_stalled_boundaries_use_updated_at(quiet, stalled):
     assert (report.state is R.STALLED) == stalled
     if stalled:
         assert report.quiet_minutes == quiet // 60
-        assert f"🟠 <b>тихо {'1ч' if quiet == 3600 else f'{quiet // 60}м'}</b>" in render_status(report)
+        lines = render_status(report).splitlines()
+        assert lines[0] == "🟠 Thread r1" and f"🔄 {'1ч' if quiet == 3600 else f'{quiet // 60}м'}" in lines[1]  # the quiet time
 
 
 def test_stalled_uses_the_latest_broadcast_and_never_applies_to_waiting_or_idle():
@@ -71,11 +73,11 @@ def test_turn_elapsed_only_for_an_active_thread_and_never_negative():
     src.turn_start = NOW - 754
     src.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
     report = collect(svc)
-    assert report.turn_elapsed_s == 754 and "ход 12м" in render_status(report)
+    assert report.turn_elapsed_s == 754 and "🕒 12м" in render_status(report)
     src.threads["r2"] = snapshot("r2", R.IDLE)
     src.activities["r2"] = Activity(False, NOW - 900, NOW - 800, None)
     report = collect(svc, "r2")
-    assert report.turn_elapsed_s is None and "ход" not in render_status(report).splitlines()[1]  # finished turn: no elapsed
+    assert report.turn_elapsed_s is None and "🕒" not in render_status(report).splitlines()[1]  # finished turn: no elapsed
     src.turn_start = NOW + 50  # clock skew
     assert collect(svc, "r1").turn_elapsed_s == 0
 
@@ -86,7 +88,7 @@ def test_context_and_cache_math_use_last_call_only():
     src.threads["r1"] = snapshot("r1", path="/p")
     report = collect(svc)
     assert report.usage.fill_percent == 6 and report.usage.cache_percent == 80
-    assert "🧠 ctx 29.5k/475k (6%) · 💾 кэш 80%" in render_status(report)
+    assert "\n <b>ctx</b> 29.5k/475k (6%) · 💾 80%\n" in render_status(report)
 
 
 def test_usage_edge_cases():
@@ -108,9 +110,9 @@ def test_missing_data_is_a_dash_never_invented():
     src.turn_start = None
     text = render_status(collect(svc))
     lines = text.splitlines()
-    assert lines[0] == "📊 <b>—</b>"
-    assert lines[1] == "🟢 <b>работает</b> · — · ход — · 🕒 только что"
-    assert "🧠 ctx — · 💾 кэш —" in text and "📈 лимит —" in text and "снимок" not in text
+    assert lines[0] == "🟢 —"
+    assert lines[1] == "🧠 — · 🔄 now"  # no turn start: no duration
+    assert lines[2] == " <b>ctx</b> —" and "📈 лимит —" in text and "снимок" not in text
     assert "🎯" not in text  # no goal: the line is skipped, not dashed
 
 

@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from cqb.domain.status import NEXT_MAX, SUMMARY_MAX, StatusSummary
+from cqb.domain.status import NEXT_MAX, PROGRESS_MAX, StatusSummary
 from cqb.pico.status_narrator import STATUS_PROMPT, PicoStatusNarrator, SlotPool, parse_summary, slot_names
 from cqb.services.relay import DialogResult, Outcome
 from cqb.services.scope import SessionScopes
@@ -50,7 +50,7 @@ def test_a_summary_goes_through_a_slot_with_the_fixed_prompt_and_the_root_scope(
         assert "root-7" in prompt and "{root_id}" not in prompt
         for tool in ("list_agents", "get_recent_events", "get_thread_overview", "get_questions"):
             assert tool in prompt
-        for rule in ("Russian", "EXACTLY two", "В процессе:", "Дальше:", "350", "не подтверждено", "Never quote secrets",
+        for rule in ("Russian", "EXACTLY two", "В процессе:", "Дальше:", "900", "не подтверждено", "Never quote secrets",
                      "untrusted", "no agent names"):
             assert rule in prompt
         assert dialog.scope_seen == [("cqb-status-1", ("s1", "root-7"))]  # bound during the call
@@ -168,8 +168,10 @@ WELL_FORMED = "В процессе: Правит тесты статуса, ча
 def test_a_well_formed_reply_is_split_into_progress_and_next_steps():
     assert parse_summary(WELL_FORMED) == StatusSummary(
         "Правит тесты статуса, часть уже зелёная.", "прогнать e2e и обновить README.")
-    multi = parse_summary("В процессе:\nпервая\nвторая\nтретья\nчетвёртая\nДальше:\n- раз\n- два\n- три")
-    assert multi == StatusSummary("первая\nвторая\nтретья", "раз\nдва")  # three and two lines at most
+    multi = parse_summary("В процессе:\nпервая\nвторая\nтретья\nчетвёртая\nпятая\nшестая\nДальше:\n- раз\n- два\n- три\n- четыре\n- пять")
+    assert multi == StatusSummary("первая\nвторая\nтретья\nчетвёртая\nпятая", "раз\nдва\nтри\nчетыре")  # five and four lines at most
+    short = parse_summary("В процессе:\nпервая\nвторая\nтретья\nДальше:\n- раз\n- два")
+    assert short == StatusSummary("первая\nвторая\nтретья", "раз\nдва")
     assert parse_summary("**В процессе:** идёт сборка\n**Дальше:** тесты") == StatusSummary("идёт сборка", "тесты")
     assert parse_summary("в процессе - не метка\nДАЛЬШЕ : x") == StatusSummary("в процессе - не метка", "x")
 
@@ -184,17 +186,21 @@ def test_a_malformed_reply_is_all_progress_up_to_the_limit_and_has_no_next_steps
     plain = parse_summary("Корень правит файлы.\nСубагент читает логи.")
     assert plain == StatusSummary("Корень правит файлы.\nСубагент читает логи.", None)
     long = parse_summary("слово " * 200)
-    assert len(long.progress) == SUMMARY_MAX and long.progress.endswith("…") and long.next_steps is None
+    assert len(long.progress) == PROGRESS_MAX == 650 and long.progress.endswith("…") and long.next_steps is None
     only_next = parse_summary("Дальше: раскатать")
     assert only_next == StatusSummary("—", "раскатать")
     assert parse_summary("Дальше: —") is None  # nothing at all
 
 
-def test_the_parts_share_the_total_limit():
-    out = parse_summary("В процессе: " + "а" * 400 + "\nДальше: " + "б" * 400)
+def test_each_part_has_its_own_cap_and_the_longer_summary_is_kept():
+    out = parse_summary("В процессе: " + "а" * 800 + "\nДальше: " + "б" * 800)
+    assert (PROGRESS_MAX, NEXT_MAX) == (650, 400)
     assert len(out.next_steps) == NEXT_MAX and out.next_steps.endswith("…")
-    assert len(out.progress) == SUMMARY_MAX - NEXT_MAX and out.progress.endswith("…")
-    assert len(out.progress) + len(out.next_steps) == SUMMARY_MAX
+    assert len(out.progress) == PROGRESS_MAX and out.progress.endswith("…")
+    detailed = "В процессе:\n" + "\n".join(f"Шаг {i}: " + "ж" * 100 for i in range(5)) + "\nДальше:\n" + "\n".join(
+        f"Пункт {i}: " + "з" * 60 for i in range(4))
+    out = parse_summary(detailed)
+    assert out.progress.count("\n") == 4 and out.next_steps.count("\n") == 3 and not out.progress.endswith("…")
 
 
 def test_empty_replies_are_no_summary():

@@ -63,6 +63,8 @@ class PicoHealth:
                     return f"PicoClaw /health answered {r.status}", f"{HEALTH_FAILING}, ответ {r.status}"
         except (aiohttp.ClientError, TimeoutError, OSError):
             return "PicoClaw gateway is not reachable", HEALTH_FAILING
+        except Exception as exc:  # a probe that cannot even run is a failed probe, never a dead liveness loop
+            return f"PicoClaw health probe failed ({type(exc).__name__})", HEALTH_FAILING
         age = self._clock() - (self._last_beat if self._last_beat is not None else self._started)
         if age > self._max_age:
             return "the PicoClaw scope hook process is silent (dead hook: restart the PicoClaw gateway)", HOOK_SILENT

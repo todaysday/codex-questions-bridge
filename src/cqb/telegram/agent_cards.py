@@ -17,6 +17,7 @@ from cqb.telegram.agent_card_view import render_agent_card
 from cqb.telegram.api import BotApi
 from cqb.telegram.armed import ArmedAnswers
 from cqb.telegram.card_post import CardPoster, card_parts
+from cqb.telegram.card_view import CONFIRM_PROMPT, confirm_keyboard, confirm_message
 from cqb.telegram.cards import MAX_DIRTY, RETRY_SECONDS
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import Reply
@@ -129,7 +130,11 @@ class AgentQuestionCards:
             return None
         if len(text.strip()) > ANSWER_MAX_CHARS:
             return Reply(f"Слишком длинный ответ (максимум {ANSWER_MAX_CHARS} символов); карточка ждёт ответ")
-        return await self._staged(q.agent_question_id, lambda: self._questions.answer_text(q.agent_question_id, text))
+        staged = await self._staged(q.agent_question_id, lambda: self._questions.answer_text(q.agent_question_id, text))
+        if staged.alert:
+            return staged
+        keyboard = confirm_keyboard("asend", "acancel", q.root_thread_id, q.agent_question_id)
+        return Reply(confirm_message(text), keyboard=self._keys.bind(keyboard))  # the same buttons as under the card
 
     async def confirm(self, agent_question_id: str) -> Reply:
         try:
@@ -171,4 +176,4 @@ class AgentQuestionCards:
             await self.refresh_card(agent_question_id)
             return Reply(str(exc), alert=True)
         await self.refresh_card(agent_question_id)
-        return Reply("Подтвердите отправку")
+        return Reply(CONFIRM_PROMPT)

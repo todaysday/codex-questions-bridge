@@ -203,3 +203,36 @@ def test_questions_defaults_bounds_and_example():
 def test_invalid_questions(questions, msg):
     with pytest.raises(ConfigError, match=msg):
         parse_config({**OK, "questions": questions})
+
+
+# --- [mcp] project files: off by default, fail-fast validation ---------------------------------
+
+def test_project_files_are_off_by_default_and_bounded():
+    c = parse_config(OK).mcp
+    assert (c.project_files, c.project_file_max_bytes, c.project_dir_max_entries, c.project_file_deny_extra) == (False, 16384, 200, ())
+    assert parse_config({**OK, "mcp": {"port": 19000}}).mcp.project_files is False  # a [mcp] section alone does not enable it
+    c = parse_config({**OK, "mcp": {"project_files": True, "project_file_max_bytes": 1024, "project_dir_max_entries": 1000,
+                                    "project_file_deny_extra": ["*.private", "notes"]}}).mcp
+    assert c.project_files is True and c.project_file_max_bytes == 1024 and c.project_dir_max_entries == 1000
+    assert c.project_file_deny_extra == ("*.private", "notes")
+    assert parse_config({**OK, "mcp": {"project_file_max_bytes": 65536}}).mcp.project_file_max_bytes == 65536
+
+
+@pytest.mark.parametrize("mcp", [
+    {"project_files": "yes"}, {"project_files": 1}, {"project_files": None},
+    {"project_file_max_bytes": 1023}, {"project_file_max_bytes": 65537}, {"project_file_max_bytes": "16384"},
+    {"project_file_max_bytes": True}, {"project_dir_max_entries": 0}, {"project_dir_max_entries": 1001},
+    {"project_file_deny_extra": "*.x"}, {"project_file_deny_extra": [1]}, {"project_file_deny_extra": [""]},
+    {"project_file_deny_extra": ["a/b"]}, {"project_file_deny_extra": ["x" * 101]}, {"project_file_deny_extra": ["x"] * 101},
+    {"project_file_deny_extra": ["a\0"]}, {"project_files_root": "/"}, {"project_file_token": "x"},
+])
+def test_invalid_project_file_settings_fail_fast(mcp):
+    with pytest.raises(ConfigError):
+        parse_config({**OK, "mcp": mcp})
+
+
+def test_example_config_documents_project_files_switched_off():
+    import pathlib
+    example = pathlib.Path(__file__).parent.parent / "config.example.toml"
+    assert load_config(str(example)).mcp == McpConfig(18791)
+    assert "project_files = false" in example.read_text()

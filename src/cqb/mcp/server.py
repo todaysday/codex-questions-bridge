@@ -132,7 +132,7 @@ class McpServer:
             case "ping":
                 return _ok(rid, {})
             case "tools/list":
-                return _ok(rid, {"tools": [t.listing() for t in self._tools.values()]})
+                return _ok(rid, {"tools": [t.listing() for t in self._tools.values() if t.listed]})
             case "tools/call":
                 return await self._call(rid, params)
         return _error(rid, -32601, "method not found")

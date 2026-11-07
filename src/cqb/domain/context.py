@@ -92,3 +92,37 @@ class QuestionList:
     root_id: str
     questions: tuple[QuestionInfo, ...]
     truncated: bool = False
+
+
+@dataclass(frozen=True, slots=True)
+class FileChunk:
+    """One page of a project text file: `N: text` lines, already redacted and within the byte budget."""
+
+    root_id: str
+    path: str
+    text: str
+    offset_lines: int
+    returned_lines: int
+    total_lines: int | None  # None when the scan stopped early (large file)
+    truncated: bool  # more lines follow; continue at next_offset_lines
+    next_offset_lines: int | None
+    lines_cut: bool  # some line was longer than the per-line cap (or the budget) and is shortened
+    redacted: bool
+    size: int
+
+
+@dataclass(frozen=True, slots=True)
+class DirEntryInfo:
+    name: str
+    type: str  # file | dir | symlink | other
+    size: int | None  # files only
+
+
+@dataclass(frozen=True, slots=True)
+class DirListing:
+    root_id: str
+    path: str
+    entries: tuple[DirEntryInfo, ...]  # one level, dirs first
+    hidden: int  # entries with denied names: not listed, only counted
+    truncated: bool
+    total: int  # visible entries seen (before the entry/byte caps)

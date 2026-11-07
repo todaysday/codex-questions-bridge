@@ -26,6 +26,9 @@ class FakeTopics:
         self.fail_create = False
         self.gone: set[int] = set()
         self.delay = 0.0
+        self.announced: list[tuple[int, str]] = []
+        self.fail_announce = False
+        self.events: list[str] = []  # announce / open, in the order they happened
 
     async def create_topic(self, name):
         if self.delay:
@@ -34,6 +37,12 @@ class FakeTopics:
             raise RuntimeError("boom")
         self.created.append(name)
         return 100 + len(self.created)
+
+    async def announce(self, topic_id, text):
+        self.events.append("announce")
+        if self.fail_announce:
+            raise RuntimeError("boom")
+        self.announced.append((topic_id, text))
 
     async def set_topic_closed(self, topic_id, closed):
         self.calls.append((topic_id, closed))
@@ -207,3 +216,38 @@ def test_on_open_fires_for_create_and_reopen_but_not_for_repeats_or_closing(env)
     threads.set_archive_state("s1", "r1", ArchiveState.ACTIVE, 6)
     run(svc.reconcile())  # reopening
     assert opened == ["r1", "r1"]
+
+
+def test_the_opening_message_is_sent_once_per_new_topic_and_before_the_open_listener(env, monkeypatch):
+    svc, topics, dao, threads, conn = env
+    svc._opening = lambda root: f"Консультант {root}"
+    svc._on_open = lambda root: topics.events.append("open")
+    run(svc.create("r1"))
+    run(svc.create("r1"))  # already open: nothing again
+    assert topics.announced == [(101, "Консультант r1")] and topics.events == ["announce", "open"]
+    threads.set_archive_state("s1", "r1", ArchiveState.ARCHIVED, 5)
+    run(svc.reconcile())
+    threads.set_archive_state("s1", "r1", ArchiveState.ACTIVE, 6)
+    run(svc.reconcile())  # reopening: the existing opening message stays, no second one
+    assert topics.announced == [(101, "Консультант r1")] and topics.events == ["announce", "open", "open"]
+
+
+def test_a_failed_opening_message_does_not_fail_or_block_the_creation(env):
+    svc, topics, dao, *_ = env
+    svc._opening = lambda root: "text"
+    svc._on_open = lambda root: topics.events.append("open")
+    topics.fail_announce = True
+    c = run(svc.create("r1"))
+    assert c.state is S.OPEN and topics.events == ["announce", "open"]
+
+
+def test_a_retried_persist_does_not_repeat_the_opening_message(env, monkeypatch):
+    svc, topics, dao, *_ = env
+    svc._opening = lambda root: "text"
+    real = dao.open
+    monkeypatch.setattr(dao, "open", lambda *a: (_ for _ in ()).throw(sqlite3.OperationalError("disk")))
+    with pytest.raises(ConsultantError):
+        run(svc.create("r1"))
+    monkeypatch.setattr(dao, "open", real)
+    run(svc.create("r1"))
+    assert len(topics.announced) == 1 and len(topics.created) == 1
