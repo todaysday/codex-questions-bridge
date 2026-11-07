@@ -15,12 +15,13 @@ HOOK = Path(__file__).resolve().parents[1] / "integrations" / "picoclaw_scope_ho
 TOKEN = "hook-test-token"
 SID = "cqb-" + "a" * 26
 OTHER_SID = "cqb-" + "b" * 26
+SLOT = "cqb-status-1"  # a Status Agent slot session
 TOOL = "mcp_cqb_get_recent_events"
 
 
 class FakeBridge:
     def __init__(self, delay=0.0):
-        self.scopes = {SID: ("s1", "r1"), OTHER_SID: ("s1", "r2")}
+        self.scopes = {SID: ("s1", "r1"), OTHER_SID: ("s1", "r2"), SLOT: ("s1", "r7")}
         self.requests: list[tuple[str, str, str]] = []  # method, path, authorization
         self.mode = "ok"
         self.delay = delay
@@ -190,7 +191,47 @@ def test_only_the_consultant_tools_and_agents_are_allowed(bridge):
     for i in (1, 2, 3, 4, 5):
         denied(got[i], "not available to the consultant")
     denied(got[6], "agent may not use")
-    assert got[7]["result"] == {"approved": True} and got[8]["result"] == {"approved": True}
+    denied(got[7], "agent may not use")  # the status agent has no business in a consultant session
+    assert got[8]["result"] == {"approved": True}
+
+
+def test_status_slot_sessions_map_through_the_same_endpoint_for_the_status_agent_only(bridge):
+    chat = f"pico:{SLOT}"
+    status_tools = ("get_thread_overview", "list_agents", "get_recent_events", "get_questions")
+    reqs = [call("hook.before_tool", tool=f"mcp_cqb_{t}", args={"root_id": "r1", "source_id": "x"}, chat=chat,
+                 agent="codex-status", id=i) for i, t in enumerate(status_tools, 1)]
+    got, _, _ = converse(bridge.url, reqs)
+    for i in range(1, 5):  # the model's own root is overwritten with the one bound to the slot
+        assert got[i]["result"]["call"]["arguments"] == {"root_id": "r7", "source_id": "s1"}
+    assert ("GET", f"/internal/scope/{SLOT}", f"Bearer {TOKEN}") in bridge.requests
+    ok = {"root_id": "r7", "source_id": "s1"}
+    got, _, _ = converse(bridge.url, [
+        call("hook.approve_tool", args=ok, chat=chat, agent="codex-status", id=1),
+        call("hook.approve_tool", args={**ok, "root_id": "r1"}, chat=chat, agent="codex-status", id=2),
+        call("hook.approve_tool", args=ok, chat=chat, agent="main", id=3),  # routing fell through to the consultant agent
+        call("hook.approve_tool", args=ok, chat=chat, agent=None, id=4),
+        call("hook.approve_tool", args=ok, chat=chat, agent="evil", id=5),
+        call("hook.approve_tool", tool="mcp_cqb_read_event", args=ok, chat=chat, agent="codex-status", id=6),
+        call("hook.before_tool", tool="mcp_cqb_read_event", args=ok, chat=chat, agent="codex-status", id=7),
+    ])
+    assert got[1]["result"] == {"approved": True}
+    denied(got[2], "outside the consultant's scope")
+    for i in (3, 4, 5):
+        denied(got[i], "may not use status sessions")
+    for i in (6, 7):
+        denied(got[i], "not available to the status agent")
+
+
+def test_unbound_or_unknown_status_slots_are_denied(bridge):
+    ok = {"root_id": "r7", "source_id": "s1"}
+    del bridge.scopes[SLOT]  # the request ended: the slot is no longer bound to a root
+    got, _, _ = converse(bridge.url, [
+        call("hook.before_tool", args=ok, chat=f"pico:{SLOT}", agent="codex-status", id=1),
+        call("hook.approve_tool", args=ok, chat="pico:cqb-status-9", agent="codex-status", id=2),
+        call("hook.approve_tool", args=ok, chat="pico:CQB-STATUS-1", agent="codex-status", id=3),  # ids are lowercased
+    ])
+    for i in (1, 2, 3):
+        denied(got[i], "unknown or closed consultant session")
 
 
 @pytest.mark.parametrize("mode", ["500", "garbage", "shape"])

@@ -53,6 +53,14 @@ class McpConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class StatusConfig:
+    """The /status snapshot. Independent of the consultant chat, which has no time limit."""
+
+    timeout_seconds: int = 300  # whole collect, Status Agent summary included; then the card goes out without it
+    slots: int = 2  # Status Agent sessions cqb-status-1..N (needs a dispatch rule each, see deploy/picoclaw)
+
+
+@dataclass(frozen=True, slots=True)
 class ConsultantTokens:
     pico: str = field(repr=False)
     mcp: str = field(repr=False)
@@ -65,6 +73,7 @@ class Config:
     telegram: TelegramConfig
     pico: PicoConfig | None = None
     mcp: McpConfig = McpConfig()
+    status: StatusConfig = StatusConfig()
 
 
 TOKEN_ENV = "CQB_TELEGRAM_TOKEN"
@@ -87,7 +96,7 @@ def load_config(path: str) -> Config:
 
 
 def parse_config(raw: dict[str, Any]) -> Config:
-    unknown = set(raw) - {"codex", "db", "telegram", "pico", "mcp"}
+    unknown = set(raw) - {"codex", "db", "telegram", "pico", "mcp", "status"}
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(sorted(unknown))}")
     codex = _section(raw, "codex", {"socket", "source_id", "poll_interval_seconds", "recency_days", "codex_home"})
@@ -98,6 +107,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
     })
     return Config(
         pico=_pico(raw["pico"]) if "pico" in raw else None,
+        status=_status(raw["status"]) if "status" in raw else StatusConfig(),
         mcp=McpConfig(port=_int(_section(raw, "mcp", {"port"}), "mcp", "port", 18791, 1024, 65535)) if "mcp" in raw
         else McpConfig(),
         codex=CodexConfig(
@@ -150,6 +160,14 @@ def _pico(raw: Any) -> PicoConfig:
         idle_seconds=_int(sec, "pico", "idle_seconds", 120, 10, 3600),
         max_connections=_int(sec, "pico", "max_connections", 50, 1, 90),
         turn_timeout_seconds=_int(sec, "pico", "turn_timeout_seconds", 0, 0, 86400),
+    )
+
+
+def _status(raw: Any) -> StatusConfig:
+    sec = _section({"status": raw}, "status", {"timeout_seconds", "slots"})
+    return StatusConfig(
+        timeout_seconds=_int(sec, "status", "timeout_seconds", 300, 30, 3600),
+        slots=_int(sec, "status", "slots", 2, 1, 8),
     )
 
 

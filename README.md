@@ -5,8 +5,9 @@ app-server daemon, inventories threads and captures live `request_user_input` qu
 It also runs the Telegram control UI: one pinned, self-updating thread registry message and manually
 created consultant topics, which also carry the question cards of their thread. Messages typed in a consultant topic go to a long-running PicoClaw
 gateway (the consultant) over its `pico` WebSocket channel; the consultant reads Codex history through a
-read-only MCP server inside the same process. `/status` (in a consultant topic) shows a deterministic status card
-(no LLM, separate from the consultant).
+read-only MCP server inside the same process. `/status` (in a consultant topic) posts a static status snapshot:
+deterministic numbers and `сейчас:` lines (no LLM) plus a short summary from a separate Status Agent that never
+reaches the consultant.
 Logs carry ids and counts, never question or message text. Design: `doc/Codex_Questions_Bridge_Design.md`.
 
 ## Run
@@ -19,8 +20,8 @@ Logs carry ids and counts, never question or message text. Design: `doc/Codex_Qu
 
 Read-only boundary: the app-server client refuses every method except `thread/list`,
 `thread/read`, `thread/loaded/list`, `thread/resume` (thread id only), `thread/unsubscribe` and the status reads
-`thread/turns/list`, `thread/goal/get`, `account/rateLimits/read` (the status card never resumes or subscribes);
-`thread/items/list` (paged history for the consultant's tools);
+`thread/turns/list`, `thread/goal/get`, `account/rateLimits/read` (the status snapshot never resumes or subscribes);
+`thread/items/list` (paged history for the consultant's tools, and the single newest item for a `сейчас:` line);
 the only other write is the JSON-RPC response to a captured question request, and only
 when the caller asks (`QuestionService.answer`). Secret questions are stored without text
 and can never be answered by the Bridge.
@@ -56,19 +57,49 @@ is open); without one the row just shows `❓`, and the card appears when a cons
 There is no Inbox topic; an old one in the group can simply be deleted by hand.
 
 Commands: `/threads` (control topic: re-render the message now; the command message is deleted if the bot may),
-`/questions` and `/thread` (consultant topic: that thread), `/status` (consultant topic: status card). Root context/cache come from the tail of the
+`/questions` and `/thread` (consultant topic: that thread), `/status` (consultant topic: status snapshot, see below). Root context/cache come from the tail of the
 rollout file (`[codex] codex_home`, default `/root/.codex`; read-only, path-checked). Live check:
 `cd /tmp && sudo -n /path/.venv/bin/python /path/scripts/smoke_status.py`. Consultants are created only by the `Создать консультанта` button.
 
 Layout: `telegram/` holds `api` (Bot API client), `poller`, `router` (authorization and dispatch),
-`control` (control topic, registry message), `cards` (question cards), `topics` (consultant topic port),
-`keys` (one-time callback ids), and the pure views `registry_view`, `card_view`, `consultant_view`.
+`control` (control topic, registry message), `cards` (question cards), `status_post` (the status snapshot),
+`topics` (consultant topic port), `keys` (one-time callback ids), and the pure views `registry_view`, `card_view`,
+`consultant_view`, `status_view`.
+
+## Status snapshot (`/status`)
+
+Only in a consultant topic (a thread without a consultant just offers `Создать консультанта` in the registry). One
+request produces ONE static message: it is never edited or refreshed, and earlier snapshots stay in the topic as
+history. While it is collected the topic shows only the typing indicator (refreshed every 4 s); the message is sent
+once, when everything is ready together:
+
+- numbers: state, model/effort, context/cache, turn time, goal, subagent counts (up to 8 lines), rate limit;
+- `сейчас:` for the root and every subagent line: what that thread does right now, built without an LLM from the
+  kind of the newest item of its running turn (`выполняет: <command head>`, `правит файлы (N)`, `вызывает server.tool`,
+  `пишет ответ`, `думает`, `запускает субагента`, `ждёт ответа`/`ждёт одобрения`, or the age of the last finished
+  turn, `—` when unknown). Two cheap read-only calls per thread (`thread/turns/list` limit 1 without items,
+  `thread/items/list` limit 1); a command head is redacted and cut to 80 characters; message text and command output
+  are never read;
+- a short Russian summary (what the root does, what each running subagent does, blockers) from the Status Agent.
+
+`[status] timeout_seconds` (default 300) bounds the whole collect. If the summary is not ready in time, or the Status
+Agent is unavailable (no `[pico]`, PicoClaw down, no free slot), the card is sent without it and says `резюме недоступно`;
+it never hangs. A second `/status` for the same thread while one is collecting answers `статус уже собирается`. The
+consultant chat is not affected and has no time limit.
+
+The Status Agent (`codex-status`) runs in its own routed pico session `cqb-status-1..N` (`[status] slots`, default 2),
+never in the consultant's. Each request takes a free slot (waiting within the deadline if all are busy), binds
+slot -> root in the Bridge for the duration of the call (the scope hook maps `pico:cqb-status-N` through the same
+`/internal/scope/` endpoint; unbound again afterwards, also on failure or timeout), sends a fixed task, waits for the
+final reply and releases the slot; at the deadline it sends `/stop`. Its reply is redacted and bounded before it enters
+the card and goes nowhere else. Slot sessions are stateless in PicoClaw v0.3.1, but they are never reused across roots
+as conversations; PicoClaw keeps appending session files under `ws-status/sessions/`, which need occasional cleanup.
 
 ## Memory and priority
 
 One process, no threads or workers; bounded queues, pages and previews; `gc.freeze()` after
 wiring; RSS is logged every 5 minutes (about 37 MiB at idle with 300 threads, mostly the
-aiohttp import). `deploy/cqb.service` sets `CPUWeight`, `MemoryMax`, and has `Nice=-10`
+aiohttp import; 41 MiB with the consultant chat and Status Agent wired, measured in the e2e). `deploy/cqb.service` sets `CPUWeight`, `MemoryMax`, and has `Nice=-10`
 (lower to `-20` for the highest priority) and `IOSchedulingClass=realtime` commented out.
 SQLite uses WAL, a 512 KiB page cache and no mmap.
 
@@ -117,14 +148,22 @@ unknown fields, so `config.json` cannot carry comments.
    gateway's environment and uses them to ask the Bridge which root a session may read.
 4. Model: the template points both agents at the OmniRoute combo through `model_list` (`api_base`
    `http://127.0.0.1:20129/v1`, model `Beam`, 1M context; `context_window` 1000000, summarization at 80%). Use a key
-   restricted to that combo, and an SSH tunnel if OmniRoute runs elsewhere. Set `codex-status` to a cheaper model if wanted.
+   restricted to that combo, and an SSH tunnel if OmniRoute runs elsewhere. Point `cqb-status` (the Status Agent's
+   `model_name`) at a cheaper model if wanted.
 5. Install `deploy/picoclaw/picoclaw-gateway.service` (own CPU/memory/task limits, hardening, `After=cqb.service` because
    PicoClaw connects to the Bridge's MCP server while it starts) and start the Bridge first. A dead hook process is never
    respawned by PicoClaw: the Bridge notices (heartbeat) and refuses consultant turns until the gateway is restarted.
    Never run `picoclaw agent` against live sessions.
 6. In `config.toml` add `[pico]` and `[mcp]` (see `config.example.toml`) and set `CQB_PICO_TOKEN`, `CQB_MCP_TOKEN`.
 
-The Status Agent narrative (`codex-status`, delegated or routed) is a later increment: its `ws-status/AGENT.md` is only a stub.
+Status Agent slots: the template's `agents.dispatch.rules` route the exact lower-cased session ids `cqb-status-1` and
+`cqb-status-2` to `codex-status` (and `[status] slots` defaults to 2). To add slots, add one rule per new id
+(`"chat": "direct:pico:cqb-status-3"`, ...) and raise `[status] slots`; PicoClaw reads the rules at start, so send
+`/reload` (a pico message, run by hand: the Bridge escapes `/reload` from users) or restart the gateway. A slot without
+a rule would fall through to `main`; the scope hook refuses every tool call of that session. `codex-status` may call
+only `list_agents`, `get_recent_events`, `get_thread_overview`, `get_questions` (its `AGENT.md` allowlist, enforced
+again by the hook). Keep the `description:` line of an `AGENT.md` free of `: ` (PicoClaw drops a file whose YAML
+frontmatter does not parse, allowlist included).
 
 End-to-end check with the real binary (needs the git-ignored `spike/` files; loopback only, kills what it starts):
 `.venv/bin/python -m pytest -q -m e2e tests/e2e`.

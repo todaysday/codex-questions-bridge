@@ -12,7 +12,7 @@ from cqb.codex.events import QuestionRequested, RequestResolved
 from cqb.domain.enums import ArchiveState
 from cqb.domain.enums import RunState
 from cqb.domain.models import QuestionItem, QuestionOption, Thread
-from cqb.domain.status import Descendants, GoalSummary, RateLimits, ThreadSnapshot
+from cqb.domain.status import Activity, Descendants, GoalSummary, RateLimits, ThreadSnapshot
 from cqb.services.consultants import ConsultantService
 from cqb.services.questions import QuestionService
 from cqb.services.live_state import LiveState
@@ -24,7 +24,7 @@ from cqb.telegram.cards import QuestionCards
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
 from cqb.telegram.router import Router, RouterConfig
-from cqb.telegram.status_card import StatusCards
+from cqb.telegram.status_post import StatusPoster
 from cqb.telegram.topics import TelegramTopics
 from fake_telegram import CHAT_ID, OWNER, TOKEN, FakeTelegram
 
@@ -53,6 +53,8 @@ class StatusSourceStub:
         self.children: dict[str, tuple[ThreadSnapshot, ...]] = {}
         self.more = False
         self.turn_start: int | None = None
+        self.activities: dict[str, Activity] = {}  # thread id -> what its latest turn says; absent = unreadable
+        self.item_reads: list[str] = []
         self.goals: dict[str, GoalSummary] = {}
         self.limits: RateLimits | None = RateLimits(30, NOW + 3600, 10080)
         self.fail = False
@@ -66,9 +68,14 @@ class StatusSourceStub:
         self.calls.append("descendants")
         return None if self.fail else Descendants(self.children.get(root_id, ()), self.more)
 
-    async def running_turn_start(self, thread_id):
+    async def activity(self, thread_id, with_item):
         self.calls.append("turn")
-        return self.turn_start
+        if with_item:
+            self.item_reads.append(thread_id)
+        found = self.activities.get(thread_id)
+        if found is None and self.turn_start is not None and thread_id == "r1":
+            return Activity(True, self.turn_start, None, None)
+        return found
 
     async def goal(self, thread_id):
         self.calls.append("goal")
@@ -114,7 +121,7 @@ def thread(tid, updated=NOW - 60, name=None, state=ArchiveState.ACTIVE, parent=N
 
 
 class Stack:
-    def __init__(self, conn, fake: FakeTelegram, token=TOKEN):
+    def __init__(self, conn, fake: FakeTelegram, token=TOKEN, narrator=None, summary_timeout=300):
         self.conn, self.fake = conn, fake
         self.clock = Clock()
         self.state = BotStateDao(conn)
@@ -126,8 +133,9 @@ class Stack:
         self.live = LiveState(
             clock=self.clock, on_working_flip=lambda t: self.registry.is_root(t) and self.publisher.request_refresh()
         )
-        self.status_service = StatusService(self.status_source, self.live, lambda path: None, "s1", clock=self.clock)
-        self.status_cards = StatusCards(self.api, self.state, self.status_service, CHAT_ID, "s1")
+        self.status_service = StatusService(
+            self.status_source, self.live, lambda path: None, "s1", narrator, self.clock, summary_timeout=summary_timeout)
+        self.status_cards = StatusPoster(self.api, self.status_service, CHAT_ID, "s1", typing_seconds=0.01)
         self.inventory = Recorder()
         self.consultant_dao = ConsultantDao(conn)
         self.question_dao = QuestionDao(conn)
@@ -169,6 +177,11 @@ class Stack:
         """Fetch pending updates and handle them (one polling round)."""
         offset = self.state.get_int("poll_offset") or 0
         await self.poller.process(await self.api.get_updates(offset, timeout=0))
+
+    async def status_done(self):
+        """Wait until every running status collect has posted (or failed)."""
+        while self.status_cards._running:
+            await asyncio.sleep(0.01)
 
     async def settle(self):
         """Apply coalesced registry refreshes and dirty cards, like the background loops would."""
@@ -217,13 +230,14 @@ class Stack:
 
 
 @contextlib.asynccontextmanager
-async def make_stack(conn, *threads):
+async def make_stack(conn, *threads, **kw):
     fake = FakeTelegram()
     await fake.start()
-    stack = Stack(conn, fake)
+    stack = Stack(conn, fake, **kw)
     try:
         await stack.start(*threads)
         yield stack
     finally:
+        await stack.status_cards.close()
         await stack.api.close()
         await fake.stop()

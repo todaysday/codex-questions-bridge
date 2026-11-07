@@ -147,3 +147,33 @@ def test_inbox_topic_name_is_no_longer_a_config_key():
     with pytest.raises(ConfigError, match="inbox_topic_name"):
         parse_config({**OK, "telegram": {**TG, "inbox_topic_name": "x"}})
     assert parse_config({**OK, "telegram": {**TG, "registry_refresh_seconds": 3600}}).telegram.registry_refresh_seconds == 3600
+
+
+# --- /status snapshot: [status] ------------------------------------------------------------
+
+from cqb.config import StatusConfig  # noqa: E402
+
+
+def test_status_defaults_and_overrides():
+    assert parse_config(OK).status == StatusConfig(timeout_seconds=300, slots=2)
+    assert parse_config({**OK, "status": {}}).status == StatusConfig(300, 2)
+    c = parse_config({**OK, "status": {"timeout_seconds": 30, "slots": 8}})
+    assert (c.status.timeout_seconds, c.status.slots) == (30, 8)
+    assert parse_config({**OK, "status": {"timeout_seconds": 3600, "slots": 1}}).status == StatusConfig(3600, 1)
+
+
+@pytest.mark.parametrize("status, msg", [
+    ({"timeout_seconds": 29}, "timeout_seconds"), ({"timeout_seconds": 3601}, "timeout_seconds"),
+    ({"timeout_seconds": 0}, "timeout_seconds"), ({"timeout_seconds": "300"}, "timeout_seconds"),
+    ({"timeout_seconds": True}, "timeout_seconds"), ({"slots": 0}, "slots"), ({"slots": 9}, "slots"),
+    ({"slots": 1.5}, "slots"), ({"typo": 1}, "unknown key"), ({"token": "x"}, "environment"),
+])
+def test_invalid_status(status, msg):
+    with pytest.raises(ConfigError, match=msg):
+        parse_config({**OK, "status": status})
+
+
+def test_example_config_documents_the_status_section():
+    import pathlib
+    example = pathlib.Path(__file__).parent.parent / "config.example.toml"
+    assert load_config(str(example)).status == StatusConfig(300, 2)

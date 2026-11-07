@@ -1,9 +1,13 @@
-"""/status in consultant topics: wiring, edit in place, errors. The control topic never gets a status card."""
+"""/status in consultant topics: one static snapshot message per request, posted once when everything is ready.
+The control topic never gets a status; a second request while one runs is answered, not started."""
 
 import asyncio
 
+import pytest
+
 from cqb.domain.enums import ArchiveState, RunState as R
 from cqb.telegram.fmt import TEXT_LIMIT
+from cqb.telegram.status_post import BUSY, UNAVAILABLE
 from test_tg_control import STRANGER
 from tg_stack import NOW, make_stack, snapshot, thread
 
@@ -17,46 +21,158 @@ def cards(st, topic):
             and m["text"].startswith("📊")]
 
 
+def typing(st, topic):
+    return [p for p in st.fake.methods("sendChatAction") if p.get("message_thread_id") == topic]
+
+
 async def consultant_topic(st, root="r1"):
     await st.router._create(root)
     return st.consultant_dao.get("s1", root).tg_topic_id
 
 
-def test_status_command_posts_one_card_and_edits_it_in_place(conn):
+class Says:
+    """A narrator that answers at once."""
+
+    def __init__(self, text="Корень правит тесты."):
+        self.text, self.calls = text, []
+
+    async def summarize(self, source_id, root_id, timeout):
+        self.calls.append((source_id, root_id, timeout))
+        return self.text
+
+
+class Gate:
+    """A narrator that waits until the test lets it answer (or raises / hangs)."""
+
+    def __init__(self, text="Готово.", fail=False):
+        self.open, self.text, self.fail, self.started = asyncio.Event(), text, fail, 0
+
+    async def summarize(self, source_id, root_id, timeout):
+        self.started += 1
+        await self.open.wait()
+        if self.fail:
+            raise RuntimeError("boom")
+        return self.text
+
+
+class Hangs:
+    async def summarize(self, source_id, root_id, timeout):
+        await asyncio.sleep(60)
+
+
+def test_status_posts_one_static_message_with_numbers_now_lines_and_summary(conn):
     async def main():
-        async with make_stack(conn, thread("r1", name="Fox")) as st:
+        narrator = Says()
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=narrator) as st:
             st.status_source.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5, name="Fox", model="gpt-6.1")
             topic = await consultant_topic(st)
+            sends = len(st.fake.methods("sendMessage"))
             st.fake.push_message("/status", topic)
             await st.pump()
+            await st.status_done()
             [(mid, card)] = cards(st, topic)
-            assert "🟢 работает · gpt-6.1" in card["text"] and len(card["text"]) <= TEXT_LIMIT
+            assert "🟢 работает · gpt-6.1" in card["text"] and "сейчас: —" in card["text"]
+            assert "Резюме:\nКорень правит тесты." in card["text"] and len(card["text"]) <= TEXT_LIMIT
+            assert narrator.calls == [("s1", "r1", 300)]
+            assert len(st.fake.methods("sendMessage")) == sends + 1  # exactly one message, no placeholder
             assert st.relay.got == []  # never relayed to the consultant
-            assert st.state.get("status.msg.r1") == f"{topic}:{mid}"
+            # a second request is a NEW message; the first is history and is never edited
             st.clock.now += 120
             st.status_source.threads["r1"] = snapshot("r1", R.IDLE, updated=NOW - 5, name="Fox")
             st.fake.push_message("/status@cqb_test_bot", topic)
             await st.pump()
-            [(mid2, card2)] = cards(st, topic)
-            assert mid2 == mid and card2["edits"] == 1 and "⚪ простаивает" in card2["text"]
+            await st.status_done()
+            both = cards(st, topic)
+            assert len(both) == 2 and both[0][0] == mid and "edits" not in both[0][1] and "edits" not in both[1][1]
+            assert "🟢 работает" in both[0][1]["text"] and "⚪ простаивает" in both[1][1]["text"]
+            assert not st.fake.methods("editMessageText") or all(
+                p["message_id"] not in (i for i, _ in both) for p in st.fake.methods("editMessageText"))
     run(main())
 
 
-def test_deleted_card_is_replaced_and_other_topics_get_their_own(conn):
+def test_nothing_is_posted_until_everything_is_ready_and_typing_is_refreshed(conn):
     async def main():
-        async with make_stack(conn, thread("r1", name="Fox")) as st:
-            st.status_source.threads["r1"] = snapshot("r1")
+        gate = Gate()
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=gate) as st:
+            st.status_source.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
+            topic = await consultant_topic(st)
+            before = len(st.fake.live_messages(topic))
+            st.fake.push_message("/status", topic)
+            await st.pump()  # returns at once: the collect runs in its own task and does not block polling
+            for _ in range(200):
+                if len(typing(st, topic)) >= 3:
+                    break
+                await asyncio.sleep(0.01)
+            assert len(typing(st, topic)) >= 3  # refreshed, not sent once
+            assert len(st.fake.live_messages(topic)) == before and "r1" in st.status_cards._running  # no placeholder
+            gate.open.set()
+            await st.status_done()
+            assert len(cards(st, topic)) == 1
+            sent = len(typing(st, topic))
+            await asyncio.sleep(0.05)
+            assert len(typing(st, topic)) == sent  # the indicator stops with the snapshot
+    run(main())
+
+
+def test_second_status_while_one_collects_is_answered_not_started(conn):
+    async def main():
+        gate = Gate()
+        async with make_stack(conn, thread("r1", name="Fox"), thread("r2", name="Owl"), narrator=gate) as st:
+            st.status_source.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
+            st.status_source.threads["r2"] = snapshot("r2", R.WORKING, updated=NOW - 5)
+            topic = await consultant_topic(st)
+            other = await consultant_topic(st, "r2")
+            st.fake.push_message("/status", topic)
+            await st.pump()
+            await asyncio.sleep(0.02)
+            st.fake.push_message("/status", topic)
+            await st.pump()
+            assert [m["text"] for m in st.fake.live_messages(topic)].count(BUSY) == 1
+            assert gate.started == 1  # no second collect for the same root
+            st.fake.push_message("/status", other)  # another root is independent
+            await st.pump()
+            await asyncio.sleep(0.02)
+            assert gate.started == 2 and BUSY not in [m["text"] for m in st.fake.live_messages(other)]
+            gate.open.set()
+            await st.status_done()
+            assert len(cards(st, topic)) == 1 and len(cards(st, other)) == 1
+            st.fake.push_message("/status", topic)  # finished: a new request works again
+            await st.pump()
+            await st.status_done()
+            assert len(cards(st, topic)) == 2
+    run(main())
+
+
+def test_summary_that_does_not_arrive_in_time_gives_the_card_without_it(conn, monkeypatch):
+    async def main():
+        import cqb.services.status as status_mod
+        monkeypatch.setattr(status_mod, "SUMMARY_GRACE", 0.05)
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=Hangs(), summary_timeout=0.1) as st:
+            st.status_source.threads["r1"] = snapshot("r1", R.IDLE, updated=NOW - 5, name="Fox")
             topic = await consultant_topic(st)
             st.fake.push_message("/status", topic)
             await st.pump()
-            [(old, _)] = cards(st, topic)
-            st.fake.delete_message(old)
-            st.clock.now += 10
+            await asyncio.wait_for(st.status_done(), 5)
+            [(_, card)] = cards(st, topic)
+            assert "резюме недоступно" in card["text"] and "Резюме:" not in card["text"]
+            assert "Контекст:" in card["text"] and "Лимит: 30%" in card["text"]  # numbers are all there
+    run(main())
+
+
+@pytest.mark.parametrize("failing", [True, False])
+def test_failing_or_missing_narrator_gives_the_card_with_the_unavailable_line(conn, failing):
+    async def main():
+        narrator = Gate(fail=True) if failing else None  # None: no [pico], the no-op narrator
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=narrator) as st:
+            st.status_source.threads["r1"] = snapshot("r1", R.IDLE, updated=NOW - 5)
+            if narrator is not None:
+                narrator.open.set()
+            topic = await consultant_topic(st)
             st.fake.push_message("/status", topic)
             await st.pump()
-            [(new, _)] = cards(st, topic)
-            assert new != old and st.state.get("status.msg.r1") == f"{topic}:{new}"
-            assert len(cards(st, topic)) == 1 and cards(st, st.control_topic) == []
+            await st.status_done()
+            [(_, card)] = cards(st, topic)
+            assert card["text"].count("резюме недоступно") == 1 and "boom" not in card["text"]
     run(main())
 
 
@@ -73,13 +189,14 @@ def test_registry_has_no_status_button_and_status_in_control_topic_posts_nothing
 
 def test_unavailable_data_is_reported_not_crashed(conn):
     async def main():
-        async with make_stack(conn, thread("r1", name="Fox")) as st:
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=Says()) as st:
             topic = await consultant_topic(st)
             st.status_source.fail = True
             st.fake.push_message("/status", topic)
             await st.pump()
-            assert any("Нет данных" in m["text"] for m in st.fake.live_messages(topic))
-            assert cards(st, topic) == [] and st.state.get("status.msg.r1") is None
+            await st.status_done()
+            assert any(UNAVAILABLE in m["text"] for m in st.fake.live_messages(topic))
+            assert cards(st, topic) == []
     run(main())
 
 

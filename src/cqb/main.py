@@ -26,6 +26,7 @@ from cqb.mcp.server import McpServer
 from cqb.mcp.tools import build_tools
 from cqb.pico.gateway import PicoGateway
 from cqb.pico.health import PicoHealth, health_url
+from cqb.pico.status_narrator import STATUS_PROMPT, PicoStatusNarrator
 from cqb.services.consultants import ConsultantService
 from cqb.services.context import ContextService
 from cqb.services.inventory import InventoryService
@@ -33,14 +34,15 @@ from cqb.services.live_state import LiveState
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
-from cqb.services.status import StatusService
+from cqb.services.scope import SessionScopes
+from cqb.services.status import StatusNarrator, StatusService
 from cqb.telegram.api import API_BASE, BotApi
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
-from cqb.telegram.status_card import StatusCards
 from cqb.telegram.router import Router, RouterConfig
+from cqb.telegram.status_post import StatusPoster
 from cqb.telegram.topics import TelegramTopics
 
 log = logging.getLogger("cqb")
@@ -80,6 +82,7 @@ async def run(
     telegram_base_url: str = API_BASE,
     rss_interval: float = RSS_LOG_SECONDS,
     consultant_tokens: ConsultantTokens | None = None,
+    status_prompt: str = STATUS_PROMPT,  # a test seam: the Status Agent's task text
 ) -> None:
     """Without a [pico] section (or its tokens) the bot runs and consultant topics say they are not configured."""
     if config.pico is not None and consultant_tokens is None:
@@ -126,24 +129,31 @@ async def run(
         )
         home = config.codex.codex_home
         reader = DaemonStatusReader(client)
-        status = StatusCards(
-            api, state,
-            StatusService(reader, live, lambda path: read_usage(path, home), source_id),
-            tg.chat_id, source_id,
-        )
         mcp: McpServer | None = None
+        narrator: StatusNarrator | None = None
         if config.pico is not None and consultant_tokens is not None:
             http = aiohttp.ClientSession()
             closers.append(http.close)
             health = PicoHealth(health_url(config.pico.url), http)
             gateway = PicoGateway(config.pico, consultant_tokens.pico, http, health)
             context = ContextService(consultant_dao, threads, question_dao, reader, HistoryReader(client), source_id)
+            scopes = SessionScopes(consultants.scope_for_session)
             mcp = McpServer(
-                consultant_tokens.mcp, build_tools(context), consultants.scope_for_session, health.beat,
-                port=config.mcp.port,
+                consultant_tokens.mcp, build_tools(context), scopes.lookup, health.beat, port=config.mcp.port,
+            )
+            narrator = PicoStatusNarrator(
+                gateway, scopes, config.pico.session_prefix, config.status.slots, status_prompt
             )
         else:
             log.info("consultant chat is not configured: no [pico] section")
+        status = StatusPoster(
+            api, StatusService(
+                reader, live, lambda path: read_usage(path, home), source_id, narrator,
+                summary_timeout=config.status.timeout_seconds,
+            ),
+            tg.chat_id, source_id,
+        )
+        closers.append(status.close)
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
             api, keys, topics, publisher, cards, consultants, tg_topics, registry, questions,

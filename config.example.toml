@@ -29,3 +29,8 @@ turn_timeout_seconds = 0               # 0 = no reply time limit (default); the 
 
 [mcp]
 port = 18791                           # 1024..65535; always bound to 127.0.0.1
+
+# The /status snapshot (consultant topics only). Works without [pico] too: the card then says `резюме недоступно`.
+[status]
+timeout_seconds = 300                  # 30..3600: the whole collect, Status Agent summary included; after this the card goes out without it
+slots = 2                              # 1..8: Status Agent sessions cqb-status-1..N; every slot needs a dispatch rule in PicoClaw's config.json (+ /reload)

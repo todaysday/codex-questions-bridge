@@ -86,9 +86,11 @@ def test_reader_against_the_daemon():
             assert {t.thread_id for t in kids.threads} == {"a1", "a2"} and not kids.more
             assert {t.state for t in kids.threads} == {R.WORKING, R.IDLE}
             assert (await reader.descendants("r1", 1)).more is True
-            assert await reader.running_turn_start("r1") == NOW - 90
-            assert await reader.running_turn_start("a1") is None  # last turn finished
-            assert await reader.running_turn_start("nope") is None
+            running = await reader.activity("r1", with_item=False)
+            assert (running.turn_running, running.started_at, running.item) == (True, NOW - 90, None)
+            finished = await reader.activity("a1", with_item=True)
+            assert (finished.turn_running, finished.item) == (False, None)  # last turn finished: no item read
+            assert await reader.activity("nope", with_item=True) is None
             goal = await reader.goal("r1")
             assert goal.objective.startswith("Ship the page xxx") and len(goal.objective) == 60 and goal.tokens_used == 5
             assert goal.token_budget is None and await reader.goal("a1") is None
@@ -148,7 +150,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
                 await wait_until(lambda: (e := live.get("a1")) is not None and e.usage is not None
                                  and (g := live.get("r1")) is not None and g.has_goal)
                 fake.goals["r1"] = {"objective": "Ship", "status": "active", "tokenBudget": 100, "tokensUsed": 10}
-                fake.turns["r1"] = [{"status": "inProgress", "startedAt": int(asyncio.get_running_loop().time())}]
+                fake.turns["r1"] = [{"id": "t1", "status": "inProgress", "startedAt": int(asyncio.get_running_loop().time())}]
                 report = await svc.collect("local", "r1")
                 text = render_status(report)
                 assert "Контекст: 51k / 200k (26%) · кэш 50%" in text  # root: rollout tail

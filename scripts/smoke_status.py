@@ -1,7 +1,7 @@
 """Read-only status card check against the real daemon (one thread picked by thread/list).
 
 Usage: cd /tmp && sudo -n /path/.venv/bin/python /path/scripts/smoke_status.py [SOCKET] [CODEX_HOME]
-Prints states, counts, model names and percentages only (no titles, goal text or paths).
+Prints states, counts, model names, percentages and item kinds only (no titles, goal text, paths or commands).
 """
 
 import asyncio
@@ -13,6 +13,14 @@ from cqb.codex.rollout_tail import read_usage
 from cqb.codex.status_reader import DaemonStatusReader
 from cqb.services.live_state import LiveState
 from cqb.services.status import StatusService
+
+
+def _now(activity) -> str:
+    """Kinds and flags only: never a command head, message text or output."""
+    if activity is None:
+        return "no data"
+    item = activity.item
+    return f"turn_running={activity.turn_running} item={(item.kind.value, item.finished) if item else None}"
 
 
 async def main(socket_path: str, home: str) -> int:
@@ -42,8 +50,9 @@ async def main(socket_path: str, home: str) -> int:
     print(f"goal={'yes:' + r.goal.status if r.goal else 'none'} "
           f"agents_total={r.agents_total} more={r.agents_more} working={r.agents_working} "
           f"waiting={r.agents_waiting} idle={r.agents_idle} lines={len(r.agents)}")
+    print(f"root now: {_now(r.activity)}")
     for a in r.agents[:3]:
-        print(f"  agent state={a.state.value} model={a.model} effort={a.effort} ctx={a.context_percent}")
+        print(f"  agent state={a.state.value} model={a.model} effort={a.effort} ctx={a.context_percent} now: {_now(a.activity)}")
     print(f"limits={r.limits}")
     return 0
 

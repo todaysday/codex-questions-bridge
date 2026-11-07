@@ -2,7 +2,7 @@
 
 from dataclasses import dataclass
 
-from cqb.domain.enums import RunState
+from cqb.domain.enums import ItemKind, RunState
 
 
 @dataclass(frozen=True, slots=True)
@@ -65,6 +65,26 @@ class RateLimits:
 
 
 @dataclass(frozen=True, slots=True)
+class ItemBrief:
+    """The newest item of a turn, reduced to its kind and a short detail: no message text, no output."""
+
+    kind: ItemKind
+    finished: bool
+    detail: str | None = None  # command head, `server.tool`, tool name or collab tool name
+    count: int | None = None  # files changed
+
+
+@dataclass(frozen=True, slots=True)
+class Activity:
+    """What the latest turn of a thread says about it right now (the 'now' line is derived from it)."""
+
+    turn_running: bool
+    started_at: int | None
+    completed_at: int | None
+    item: ItemBrief | None  # only read for a running turn, and only when asked for
+
+
+@dataclass(frozen=True, slots=True)
 class AgentLine:
     label: str
     model: str | None
@@ -72,6 +92,7 @@ class AgentLine:
     state: RunState
     context_percent: int | None
     last_activity: int | None
+    activity: Activity | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -93,4 +114,5 @@ class StatusReport:
     agents_idle: int
     agents: tuple[AgentLine, ...]  # already capped for display
     limits: RateLimits | None
-    narrative: str | None = None
+    activity: Activity | None = None  # the root's own 'now'
+    summary: str | None = None  # the Status Agent's text; None = unavailable

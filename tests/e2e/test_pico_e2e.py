@@ -22,6 +22,7 @@ import pytest
 from cqb.config import PicoConfig
 from cqb.pico.gateway import PicoGateway
 from cqb.pico.health import PicoHealth
+from cqb.pico.status_narrator import STATUS_PROMPT
 from cqb.services.relay import Outcome, Submit
 from fake_appserver import FakeAppServer, wait_until
 from fake_telegram import CHAT_ID, OWNER, TOKEN, FakeTelegram
@@ -60,8 +61,9 @@ def render_home(home: Path, pico_port: int, mock_port: int, mcp_port: int) -> No
     cfg["agents"]["defaults"]["workspace"] = str(home / "ws-main")
     for agent in cfg["agents"]["list"]:
         agent["workspace"] = str(home / ("ws-main" if agent["id"] == "main" else "ws-status"))
-    for model in cfg["model_list"]:
-        model.update(model="mock-model", api_base=f"http://127.0.0.1:{mock_port}/v1")
+    for model in cfg["model_list"]:  # the status agent has its own model name, so the mock log tells who asked
+        model.update(model="mock-status-model" if model["model_name"] == "cqb-status" else "mock-model",
+                     api_base=f"http://127.0.0.1:{mock_port}/v1")
     cfg["hooks"]["processes"]["scope"]["command"] = [str(VENV_PYTHON), "-u", str(HOOK)]
     server = cfg["tools"]["mcp"]["servers"]["cqb"]
     server["url"] = f"http://127.0.0.1:{mcp_port}/mcp"
@@ -127,7 +129,9 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
         env = {**os.environ, "CQB_PICO_TOKEN": PICO_TOKEN, "CQB_MCP_TOKEN": MCP_TOKEN, "HOME": str(tmp_path)}
         spec = {"socket": app.path, "db": str(tmp_path / "bridge.db"), "chat_id": CHAT_ID, "owner": OWNER,
                 "tg_token": TOKEN, "tg_base": tg.base_url, "mcp_port": mcp_port,
-                "pico_url": f"ws://127.0.0.1:{pico_port}/pico/ws"}
+                "pico_url": f"ws://127.0.0.1:{pico_port}/pico/ws",
+                # the mock model makes a tool call only when told to: the real task text plus that instruction
+                "status_prompt": STATUS_PROMPT + 'CALL_TOOL mcp_cqb_get_thread_overview {"root_id":"r2"}\n'}
         try:
             spawn([sys.executable, str(MOCK)], env={**env, "MOCK_PORT": str(mock_port), "MOCK_LOG": str(tmp_path / "mock.jsonl")})
             bridge = spawn([str(VENV_PYTHON), str(ROOT / "tests/e2e/run_bridge.py"), json.dumps(spec)],
@@ -152,6 +156,9 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
                 await asyncio.sleep(0.3)
             await wait_until(lambda: tg.topic_named("FoxProfile") and tg.topic_named("OtherProject"), 10)
             fox, other = tg.topic_named("FoxProfile")[0], tg.topic_named("OtherProject")[0]
+            await asyncio.sleep(2)
+            idle_rss = rss_mib(bridge.pid)
+            print(f"\nBridge idle RSS (two consultants, nothing running): {idle_rss:.1f} MiB")
 
             # 1. a message sent through the Bridge reaches the mock model, the reply comes back to the topic
             r = await ask(tg, fox, "hello fox")
@@ -230,6 +237,38 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
             assert "Task stopped" in stopped and asyncio.get_running_loop().time() - started < 5, stopped
             assert (await reply_in(tg, fox, n_before + 2)).startswith("ECHO[queued-one]")  # the queued message ran after
             assert any(p.get("message_thread_id") == fox and p["action"] == "typing" for p in tg.methods("sendChatAction"))
+
+            # 6c. /status: a snapshot posted once, its summary from the codex-status agent in its own routed slot session
+            def mock_log():
+                return [json.loads(line) for line in open(tmp_path / "mock.jsonl")]
+
+            seen_before = len(mock_log())
+            n_fox = len(tg.live_messages(fox))
+            tg.push_message("/status", fox)
+            card = await reply_in(tg, fox, n_fox, 40)
+            assert card.startswith("📊 Статус: FoxProfile") and "сейчас:" in card, card
+            assert "Резюме:\nTOOLRESULT[" in card and '"root_id":"r1"' in card and "OtherProject" not in card, card
+            await asyncio.sleep(1.5)
+            assert len(tg.live_messages(fox)) == n_fox + 1  # one message: no placeholder, nothing edited in later
+            assert all("edits" not in m for m in tg.live_messages(fox) if m["text"].startswith("📊"))
+            asked = [e["body"] for e in mock_log()[seen_before:]]
+            assert asked and {b["model"] for b in asked} == {"mock-status-model"}, [b["model"] for b in asked]
+            assert sorted(t["function"]["name"] for t in asked[0]["tools"]) == sorted(
+                f"mcp_cqb_{n}" for n in ("get_thread_overview", "list_agents", "get_recent_events", "get_questions"))
+            system = asked[0]["messages"][0]["content"]
+            assert "Codex status agent" in str(system)
+            users = [m for m in asked[0]["messages"] if m["role"] == "user"]
+            assert len(users) == 1 and "Status request for the Codex root thread r1" in str(users[0]["content"])
+            async with aiohttp.ClientSession() as http:  # the slot is unbound again once the request is over
+                got = await http.get(f"http://127.0.0.1:{mcp_port}/internal/scope/cqb-status-1",
+                                     headers={"Authorization": f"Bearer {MCP_TOKEN}"})
+                assert got.status == 404
+            # the consultant's own history is untouched: its next turn never saw the status request or its reply
+            after = await ask(tg, fox, "after-status")
+            assert "after-status" in after and "alpha-three" in after, after
+            assert "Status request" not in after and "TOOLRESULT" not in after and "Codex status" not in after, after
+            consultant_calls = [e["body"] for e in mock_log()[seen_before + len(asked):]]
+            assert {b["model"] for b in consultant_calls} == {"mock-model"}
 
             # 7. the read-only whitelist held and the Bridge stayed small
             assert set(app.methods()) <= {

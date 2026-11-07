@@ -12,8 +12,11 @@ on the same loopback MCP server with CQB_MCP_TOKEN, which the hook inherits from
 environment (PicoClaw passes its own environment to hook processes), so no token is stored in
 config.json for the hook. A background thread posts a heartbeat so Bridge can notice a dead hook.
 
-Session id: context.inbound.chat_id == "pico:<session id>" (lowercase); the same field is
-present for the delegated child agent (meta.AgentID codex-status), whose context.route is absent.
+Session id: context.inbound.chat_id == "pico:<session id>" (lowercase). Two kinds of session map to a root
+through the same endpoint: a consultant's (`cqb-<hash>`, agent `main`) and a Status Agent slot
+(`cqb-status-<n>`, agent `codex-status`, bound to a root only while its /status request runs). A slot
+session may be served only by the codex-status agent and only with the four status tools; a consultant
+session only by `main`. A routed session that fell through to the wrong agent is therefore denied.
 Denial reasons are shown to the model verbatim: they never contain tokens or session ids.
 """
 
@@ -32,7 +35,12 @@ TOOLS = frozenset(
     f"mcp_{SERVER}_{name}"
     for name in ("get_thread_overview", "list_agents", "get_recent_events", "read_event", "get_questions")
 )
-AGENTS = frozenset({"main", "codex-status"})  # agents allowed to call tools at all
+STATUS_PREFIX = "cqb-status-"  # Status Agent slot sessions: cqb-status-1..N
+STATUS_AGENT = "codex-status"
+STATUS_TOOLS = frozenset(
+    f"mcp_{SERVER}_{name}" for name in ("get_thread_overview", "list_agents", "get_recent_events", "get_questions")
+)
+CONSULTANT_AGENT = "main"
 SESSION = re.compile(r"^[a-z0-9][a-z0-9_-]{0,63}$")
 HTTP_TIMEOUT = 2.0
 WORKERS = 4
@@ -58,7 +66,7 @@ def _request(path, method="GET"):
     return urllib.request.urlopen(req, timeout=HTTP_TIMEOUT)
 
 
-def scope_of(params):
+def scope_of(params, tool=None):
     """(source_id, root_id) trusted for this call, or raise Denied."""
     inbound = ((params.get("context") or {}).get("inbound") or {})
     chat = inbound.get("chat_id")
@@ -68,7 +76,12 @@ def scope_of(params):
     if not SESSION.match(sid):
         raise Denied("not a consultant session")
     agent = (params.get("meta") or {}).get("AgentID")
-    if agent is not None and agent not in AGENTS:
+    if sid.startswith(STATUS_PREFIX):
+        if agent != STATUS_AGENT:
+            raise Denied("this agent may not use status sessions")
+        if tool not in STATUS_TOOLS:
+            raise Denied("this tool is not available to the status agent")
+    elif agent is not None and agent != CONSULTANT_AGENT:
         raise Denied("this agent may not use consultant tools")
     try:
         with _request("/internal/scope/" + sid) as r:
@@ -93,8 +106,8 @@ def check_tool(params):
 
 
 def before_tool(params):
-    check_tool(params)
-    source_id, root_id = scope_of(params)
+    tool = check_tool(params)
+    source_id, root_id = scope_of(params, tool)
     args = params.get("arguments")
     args = dict(args) if isinstance(args, dict) else {}
     args["root_id"], args["source_id"] = root_id, source_id
@@ -102,8 +115,8 @@ def before_tool(params):
 
 
 def approve_tool(params):
-    check_tool(params)
-    source_id, root_id = scope_of(params)
+    tool = check_tool(params)
+    source_id, root_id = scope_of(params, tool)
     args = params.get("arguments")
     if not isinstance(args, dict) or args.get("root_id") != root_id or args.get("source_id") != source_id:
         raise Denied("arguments are outside the consultant's scope")

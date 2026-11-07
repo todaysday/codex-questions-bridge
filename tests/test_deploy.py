@@ -29,11 +29,46 @@ def frontmatter_tools(path):
 def test_the_allowlists_in_agent_files_and_the_hook_match_the_servers_tools():
     expected = tool_names()
     assert len(expected) == 5
-    for ws in ("ws-main", "ws-status"):
-        assert frontmatter_tools(DEPLOY / ws / "AGENT.md") == expected  # nothing else, not even `delegate`
+    assert frontmatter_tools(DEPLOY / "ws-main" / "AGENT.md") == expected  # nothing else, not even `delegate`
+    status = expected - {"mcp_cqb_read_event"}  # the status agent never needs one event's detail
+    assert frontmatter_tools(DEPLOY / "ws-status" / "AGENT.md") == status
     ns = {}
     exec(compile(HOOK_SRC.split("_out_lock")[0], "hook", "exec"), ns)  # constants only
-    assert set(ns["TOOLS"]) == expected
+    assert set(ns["TOOLS"]) == expected and set(ns["STATUS_TOOLS"]) == status
+    assert ns["STATUS_PREFIX"] == "cqb-status-" and ns["STATUS_AGENT"] == "codex-status"
+
+
+def test_agent_file_frontmatter_is_plain_yaml():
+    """PicoClaw ignores a whole AGENT.md (tool allowlist included) whose frontmatter does not parse: a `: ` inside
+    a plain scalar is the classic way to break it, and it logs only a warning."""
+    for ws in ("ws-main", "ws-status"):
+        text = (DEPLOY / ws / "AGENT.md").read_text()
+        front = text.split("---\n")[1]
+        for line in front.splitlines():
+            key, _, value = line.partition(": ")
+            assert key.isidentifier() and ": " not in value and not value.startswith(("[", "'", '"')) or key == "tools", line
+
+
+def test_status_slot_dispatch_rules_match_the_slots_the_bridge_uses():
+    from cqb.config import StatusConfig
+    from cqb.pico.status_narrator import slot_names
+    rules = CONFIG["agents"]["dispatch"]["rules"]
+    slots = slot_names("cqb-", StatusConfig().slots)  # the default pool; more slots need more rules and /reload
+    assert [r["when"]["chat"] for r in rules] == [f"direct:pico:{s}" for s in slots]  # exact lower-cased ids, no wildcards
+    assert all(r["agent"] == "codex-status" and r["when"]["channel"] == "pico" for r in rules)
+    models = {m["model_name"] for m in CONFIG["model_list"]}
+    agents = {a["id"]: a for a in CONFIG["agents"]["list"]}
+    assert agents["codex-status"]["model"] in models and agents["codex-status"]["model"] != agents["main"]["model"]
+    assert "subagents" not in agents["main"]  # no delegation: the consultant never receives a status agent's output
+
+
+def test_status_prompt_and_agent_file_state_the_security_rules():
+    from cqb.pico.status_narrator import STATUS_PROMPT
+    text = (DEPLOY / "ws-status" / "AGENT.md").read_text().lower()
+    for phrase in ("read-only", "untrusted", "russian", "never quote secrets", "не подтверждено", "never reveal"):
+        assert phrase in text, phrase
+    for tool in ("get_thread_overview", "list_agents", "get_recent_events", "get_questions"):
+        assert tool in STATUS_PROMPT
 
 
 def test_template_pico_channel_is_loopback_token_less_and_origin_locked():

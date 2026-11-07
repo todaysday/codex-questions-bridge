@@ -1,6 +1,6 @@
 # Codex Questions Bridge — Technical Design
 
-**Version:** 0.6  
+**Version:** 0.7  
 **Date:** 2026-11-06  
 **Status:** Design / implementation-ready with explicitly identified integration spikes  
 **Runtime:** Codex Desktop / Codex App Server + PicoClaw + Telegram Forum Topics + one lightweight Bridge service
@@ -14,9 +14,9 @@
 3. **One private Telegram supergroup with forum topics.** One service topic, `📋 Треды Codex`, holding exactly one pinned message (there is no Inbox topic). When manually requested, one topic per consultant; question cards of a thread live in that thread's consultant topic.
 4. **Bridge is deterministic and contains no LLM.** It owns mappings, read-only Codex access, Telegram management, question lifecycle, cursors and security.
 5. **PicoClaw owns dialogs and model calls.** Each consultant has a persistent conversation scoped to its Telegram topic; it loads Codex context lazily through Bridge's read-only tools. PicoClaw has no Telegram channel here: Bridge owns the single Telegram bot and relays consultant messages to a long-running PicoClaw gateway over PicoClaw's `pico` WebSocket channel (§4.1).
-6. **`/status` invokes an ephemeral PicoClaw Status Agent.** It scans actual Codex log entries for the root thread and its descendants. Worker Codex agents are not asked to produce summaries and need no prompt changes.
-7. **Status is on demand, not periodic.** A no-change result is answered by Bridge without an LLM call; otherwise keep calls and retrieved bytes bounded.
-8. **Read-only is a hard boundary, not merely an instruction.** PicoClaw and Status Agent cannot edit repositories or Codex history through Bridge. Bridge's own app-server connection is limited to a method whitelist (list/read/resume/unsubscribe, the read-only status methods `thread/turns/list`, `thread/goal/get`, `account/rateLimits/read`, plus answering a captured question request); every other method is refused client-side.
+6. **`/status` is a static snapshot with a Status Agent summary.** Bridge collects numbers and `сейчас:` lines deterministically from the daemon; a PicoClaw Status Agent in its own routed pico session scans the root thread and its descendants through the read-only tools and writes a short summary. Worker Codex agents are not asked to produce summaries and need no prompt changes.
+7. **Status is on demand, not periodic, and one message per request.** The message is sent once, when numbers, `сейчас:` lines and the summary are all ready; it is never edited or refreshed. Keep calls and retrieved bytes bounded; the summary has a 5-minute deadline after which the card goes out without it.
+8. **Read-only is a hard boundary, not merely an instruction.** PicoClaw and Status Agent cannot edit repositories or Codex history through Bridge. Bridge's own app-server connection is limited to a method whitelist (list/read/resume/unsubscribe, the read-only status methods `thread/turns/list`, `thread/items/list`, `thread/goal/get`, `account/rateLimits/read`, plus answering a captured question request); every other method is refused client-side.
 9. **Bridge is a client of the existing shared Codex app-server daemon and receives live `request_user_input` requests.** Verified 2026-11-06 on Codex 0.164: every connection subscribed to the thread (including one that joins while the question is pending) gets the same request, and any of them can answer it. Telegram may capture, explain and answer, but shows an answer as delivered only after `serverRequest/resolved`; the first answer wins.
 10. **Archive/unarchive mirrors thread state.** Close/reopen existing consultant topics; preserve PicoClaw session and Telegram messages. Do not delete data when a thread is archived.
 11. **No cloud dependency beyond Telegram and chosen LLM provider.** Bridge, SQLite, Codex history and PicoClaw run on a host with access to the same Codex profile. Remote agents are explicitly configured as separate sources.
@@ -36,7 +36,7 @@ flowchart TD
     BR <-->|pico WebSocket: one WS per active session| PC[PicoClaw gateway]
     PC -->|Per-consultant persistent session| PS[(PicoClaw session store)]
     PC -->|Read-only MCP/tool queries| BR
-    PC -->|own routed pico session cqb-status-N, optional narrative| SA[Status Agent]
+    PC -->|own routed pico session cqb-status-N, summary for /status| SA[Status Agent]
     SA -->|Read-only, bounded tools| BR
 ```
 
@@ -54,10 +54,10 @@ flowchart TD
 | `question_inbox` | Captured questions, options, resolution states, card messages (in consultant topics), answers to the exact captured request | Free-form input into Codex |
 | `context_api` | Scoped read-only search/read/events tools, caps and redaction | Semantic reasoning and autonomous agent decisions |
 | `telegram_control` | `/threads`, callbacks, buttons, topic create/close/open, question cards | Consultant relay (see `pico_gateway`) |
-| `status_cursors` | Last successfully covered event per root and child | LLM progress interpretation |
+| `status_cursors` | (deferred) Last successfully covered event per root and child | LLM progress interpretation |
 | `pico_consultant` | Persistent Q&A dialog, choosing tools, delegation | Editing code or driving Codex work |
 | `pico_gateway` | Telegram consultant relay (registered topics only), per-session `pico` WebSocket, per-session serialization, slash-command escaping, interception of `/status` and other project commands, PicoClaw gateway supervision | Reasoning and model calls |
-| `codex_status` | Temporary log investigation and evidence-based synthesis | Persistent independent conversation or modifying Codex |
+| `codex_status` | Status snapshot: deterministic numbers and `сейчас:` lines, plus the Status Agent summary from its own routed slot session (`cqb-status-N`) | Persistent independent conversation, editing or refreshing a posted message, or modifying Codex |
 
 ## 2. Telegram UX and commands
 
@@ -123,8 +123,7 @@ Important distinction:
 Codex source: mac-codex-work · thread: 019…a9
 
 Можно обсуждать решения и уточнять вопросы Codex.
-/status — сводка по основному треду и его субагентам.
-/status 30m — за 30 минут; /status agents — только субагенты.
+/status — снимок: состояние треда, контекст, субагенты, лимиты, «сейчас» и резюме (одно сообщение).
 История Codex читается по необходимости и только на чтение.
 ```
 
@@ -163,15 +162,11 @@ An option button stages the choice (`decision_staged`) and asks for confirmation
 | Command/message | Effect | Default model expense |
 |---|---|---|
 | Free text / follow-up | Persistent consultant discusses design alternatives; may read Codex context | Consultant model + requested context |
-| `/status` | Overview since last *successful* status snapshot; all root descendants | Bridge-handled: no LLM if nothing changed; one ephemeral Status Agent call only if events changed; no consultant routing turn |
-| `/status 30m` | Events from a bounded time window, with overlap checks | Bridge-handled; Status Agent only if changed; no consultant routing turn |
-| `/status agents` | Only Codex child/descendant agents | Bridge-handled; Status Agent; no consultant routing turn |
-| `/status full` | Wider evidence window / more tool reads, still capped | Bridge-handled; Status Agent with larger caps, potentially more tokens |
-| `/status <agent>` | Inspect selected Codex child; resolve name/ID uniquely | Bridge-handled; Status Agent; no consultant routing turn |
+| `/status` | One static snapshot message of the bound root and all its descendants (consultant topic only): numbers, a `сейчас:` line per thread, and the Status Agent summary or `резюме недоступно`. Sent once when all of it is ready (typing indicator meanwhile), never edited; a second request while one collects answers `статус уже собирается` | Bridge-handled; `сейчас:` lines without an LLM; one Status Agent call per request in its own routed slot session; no consultant routing turn, nothing enters the consultant's context |
 | `/questions` | List unanswered questions of the bound Codex root | Deterministic, Bridge-handled; no LLM |
 | `/thread` | Show bound root ID, source, archive state, last activity | Deterministic, Bridge-handled; no LLM |
 
-**Command collision:** PicoClaw's built-in `/subagents` describes **PicoClaw** subagents, **not** Codex workers. Use `/status agents` for Codex workers. Because Bridge relays consultant text, PicoClaw's built-in slash commands (`/clear`, `/switch`, `/reload`, `/use`, `/subagents`, `/help`, `/stop`, ...) would be executed by PicoClaw before any hook and without the model, and `/new`, `/model`, `/reset` would reach the model as ordinary text. Bridge therefore escapes every relayed message that PicoClaw would treat as a command. Verified on v0.3.1 (mock model): a message is a command if its first whitespace token, after trimming Unicode whitespace, starts with `/` or `!` (case-insensitive, `/cmd@bot` accepted), so leading space/tab/newline/NBSP/U+3000 do **not** escape and `!clear` also executes. Bridge rule: if the text, after stripping Unicode whitespace and invisible chars (U+200B/200C/200D/2060/FEFF), starts with `/` or `!`, prepend the visible text `User says: `. PicoClaw handles 13 commands without the model (`start`, `help`, `stop`, `show`, `list`, `use`, `btw`, `switch`, `check`, `clear`, `context`, `subagents`, `reload`); `/status`, `/new`, `/model`, `/reset` and unknown commands reach the model verbatim, and `/btw` makes a tool-less model call with the full history. `/status` is a **project-defined command, not a stock PicoClaw feature**: PicoClaw passes it to the model, so Bridge intercepts and handles it deterministically, and answers it with the deterministic status card (§5.5); an optional narrative comes from a Status Agent in its own routed pico session and never reaches the consultant (§5.1).
+**Command collision:** PicoClaw's built-in `/subagents` describes **PicoClaw** subagents, **not** Codex workers. Codex workers are shown in `/status` (the `30m`, `agents`, `full` and `<agent>` variants are deferred). Because Bridge relays consultant text, PicoClaw's built-in slash commands (`/clear`, `/switch`, `/reload`, `/use`, `/subagents`, `/help`, `/stop`, ...) would be executed by PicoClaw before any hook and without the model, and `/new`, `/model`, `/reset` would reach the model as ordinary text. Bridge therefore escapes every relayed message that PicoClaw would treat as a command. Verified on v0.3.1 (mock model): a message is a command if its first whitespace token, after trimming Unicode whitespace, starts with `/` or `!` (case-insensitive, `/cmd@bot` accepted), so leading space/tab/newline/NBSP/U+3000 do **not** escape and `!clear` also executes. Bridge rule: if the text, after stripping Unicode whitespace and invisible chars (U+200B/200C/200D/2060/FEFF), starts with `/` or `!`, prepend the visible text `User says: `. PicoClaw handles 13 commands without the model (`start`, `help`, `stop`, `show`, `list`, `use`, `btw`, `switch`, `check`, `clear`, `context`, `subagents`, `reload`); `/status`, `/new`, `/model`, `/reset` and unknown commands reach the model verbatim, and `/btw` makes a tool-less model call with the full history. `/status` is a **project-defined command, not a stock PicoClaw feature**: PicoClaw passes it to the model, so Bridge intercepts and handles it deterministically, and answers it with the status snapshot (§5.5): deterministic numbers and `сейчас:` lines plus a summary from a Status Agent in its own routed pico session, which never reaches the consultant (§5.1). `/status` works only in a consultant topic; the registry never receives it.
 
 ## 3. Data sources and integration contracts
 
@@ -283,8 +278,8 @@ Operational requirements (from the spike):
 - **One WebSocket per active session**, held for the whole turn: replies go only to a connection attached with the same `session_id` and are lost otherwise (history keeps them). `max_connections` (default 100) counts across sessions. Treat a disconnect as a lost reply; ignore `message.create` frames with empty content (tool-call notices).
 - **Serialization per session:** a message sent while a turn is running is merged into that turn, so Bridge sends the next message only after the final reply / `typing.stop`.
 - **Supervision:** a dead hook process is not respawned until the gateway restarts, and `approve_tool` then denies every tool call. Bridge health-checks and restarts the gateway and treats this as an alarm (§11). Do not run the `picoclaw agent` CLI against live sessions (it shares session files without locking).
-- **Tool allowlist:** PicoClaw's default tools (`exec`, `write_file`, `edit_file`, `web_fetch`, `web_search`, `spawn`, `subagent`, `cron`, `install_skill`, `message`, `send_file`) must be disabled or denied for consultants. Verified on v0.3.1 (mock): 18 tools are exposed by default (also `append_file`, `find_skills`, `list_dir`, `load_image`, `read_file`, `reaction`, `mcp_history_read_history`); `tools.<name>.enabled=false` (plus `web` and `skills`) leaves only the MCP tool and `reaction`, because `reaction` and `delegate` have no config switch. The reliable mechanism is a per-agent allowlist in `<workspace>/AGENT.md` frontmatter, e.g. `tools: [mcp_history_read_history]` (the main agent additionally lists `delegate`), applied after a gateway restart. Without an allowlist a delegated agent inherits all global tools (`exec`, file writes). `delegate` is auto-registered once 2+ agents exist and is re-allowed for the main agent through its allowlist plus `subagents.allow_agents: ["codex-status"]` (§5.1).
-- **Direct routing of a pico session to `codex-status` (documented alternative, not used):** `agents.dispatch.rules` matches the lower-cased session id exactly (no wildcards), needs a pre-declared pool `status-1..N` and `/reload` for new rules, and routed non-default agents are stateless in v0.3.1 (history is read from the default agent's store, so `/clear` does not clear it and the agent's own session files grow without bound). Delegation is simpler and is the chosen path.
+- **Tool allowlist:** PicoClaw's default tools (`exec`, `write_file`, `edit_file`, `web_fetch`, `web_search`, `spawn`, `subagent`, `cron`, `install_skill`, `message`, `send_file`) must be disabled or denied for consultants. Verified on v0.3.1 (mock): 18 tools are exposed by default (also `append_file`, `find_skills`, `list_dir`, `load_image`, `read_file`, `reaction`, `mcp_history_read_history`); `tools.<name>.enabled=false` (plus `web` and `skills`) leaves only the MCP tool and `reaction`, because `reaction` and `delegate` have no config switch. The reliable mechanism is a per-agent allowlist in `<workspace>/AGENT.md` frontmatter, e.g. `tools: [mcp_history_read_history]` (the main agent additionally lists `delegate`), applied after a gateway restart. Without an allowlist a delegated agent inherits all global tools (`exec`, file writes). `delegate` is auto-registered once 2+ agents exist; the consultant's allowlist does not list it and the template carries no `subagents.allow_agents` (v0.7: status never runs through the consultant, §5.1).
+- **Direct routing of a pico session to `codex-status` (the chosen path since v0.5, built in v0.7):** `agents.dispatch.rules` matches the lower-cased session id exactly (no wildcards), needs a pre-declared pool `cqb-status-1..N` (one rule each) and `/reload` (or a gateway restart) when the pool grows, and routed non-default agents are stateless in v0.3.1 (history is read from the default agent's store, so `/clear` does not clear it and the agent's own session files grow without bound; they need occasional cleanup). The scope hook accepts a slot session only for agent `codex-status` and only with the four status tools, and maps it to a root through the same internal endpoint while the request runs. The `delegate` alternative (§5.1) is not used.
 - **Slash-command escaping and `/status`:** see §2.4; Bridge handles `/status` itself.
 - **Open items:** the Telegram message flow and concurrency at scale are to verify (§12.1). The real-model run through OmniRoute passed (§12.1 S0-B).
 
@@ -340,11 +335,11 @@ The `sufficient` branch above is conceptual (agent reasoning), not an extra Brid
 
 ### 5.1 Agent choice
 
-**Status is Bridge-handled and separate from the consultant** (v0.5). `/status` (typed in a consultant topic) and the registry button `ℹ️ Подробнее` (no consultant needed) produce a deterministic card from the daemon without any LLM (§5.5). The card, and anything derived from it, never goes into the consultant's context. An optional short narrative is produced by a **Status Agent**: a named PicoClaw agent `codex-status` with an inexpensive configurable model and a narrow read-only tool allowlist, running in its **own routed pico session**. It is not built yet; the Bridge only has a no-op `StatusNarrator` port, so the card code will not change when it arrives.
+**Status is Bridge-handled and separate from the consultant.** `/status` (typed in a consultant topic only) produces ONE static snapshot message (v0.7): deterministic numbers (§5.5), a `сейчас:` line for the root and every subagent line, and a short summary from a **Status Agent**, a named PicoClaw agent `codex-status` with an inexpensive configurable model and a narrow read-only tool allowlist, running in its **own routed pico session**. Nothing is posted until all of it is ready (the topic shows the typing indicator); the message is never edited and earlier snapshots stay as history. The snapshot, and anything derived from it, never goes into the consultant's context. The registry has no status button (it never receives status). The Bridge side is the `StatusNarrator` port; without `[pico]` (or when PicoClaw is down) it is a no-op and the card says `резюме недоступно`.
 
-**Decided (v0.5): a routed pico session, not `delegate`.** The Status Agent runs in its own pico session routed straight to `codex-status` through `agents.dispatch.rules` (exact lower-cased session ids, no wildcards), using a small pre-declared pool `cqb-status-1..2` (the Bridge picks a free one per request). Routed non-default agents are stateless in v0.3.1 (history is read from the default agent's store, so `/clear` does not clear it and the agent's own session files grow), which suits a one-shot narrative. Rules change only when the pool changes, and only then does the gateway need `/reload`. Its output is posted by the Bridge into the status message only; it is NOT returned to the consultant and the consultant is never invoked for a status. `delegate` is no longer used for status because it would route through the consultant's own turn and put the result into its context.
+**Decided (v0.5, built in v0.7): a routed pico session, not `delegate`.** The Status Agent runs in its own pico session routed straight to `codex-status` through `agents.dispatch.rules` (exact lower-cased session ids, no wildcards), using a small pre-declared pool `cqb-status-1..N` (`[status] slots`, default 2). A request takes a free slot (waiting within its deadline when all are busy), binds slot -> root in the Bridge's scope table for the duration of the call (the scope hook asks the same `/internal/scope/<session>` endpoint; the binding is removed afterwards, also on failure or timeout), sends a fixed English task (the root id, only the tools `list_agents`, `get_recent_events`, `get_thread_overview`, `get_questions`, at most about 10 short Russian lines, `не подтверждено` when unsure, no secrets), waits for the final reply by the pico end-of-turn rule within the remaining deadline and releases the slot; at the deadline Bridge sends `/stop` on that session and the summary is unavailable. Routed non-default agents are stateless in v0.3.1 (history is read from the default agent's store, so `/clear` does not clear it and the agent's own session files grow); slot sessions are nevertheless never reused across roots as conversations. Rules change only when the pool changes, and only then does the gateway need `/reload`. The reply is truncated (12 lines, 1200 characters) and redacted before it enters the card and goes nowhere else: it is NOT returned to the consultant and the consultant is never invoked for a status. `delegate` is not used for status because it would route through the consultant's own turn and put the result into its context.
 
-**Alternative (kept, verified on a mock model, S0-D, PicoClaw v0.3.1): `delegate`.** The main agent carries `subagents.allow_agents: ["codex-status"]` and `codex-status` is a separate agent with its own workspace, model and `AGENT.md` tool allowlist. The child receives only its task text, its own system prompt, its own model and its own tool allowlist, with a fresh context on every call (also across sessions) on an ephemeral session. Cost: one extra hop through the main agent's model, and the result lands in the main agent's context. Not yet tested: concurrent delegations.
+**Alternative (verified on a mock model, S0-D, PicoClaw v0.3.1; not used): `delegate`.** The main agent would carry `subagents.allow_agents: ["codex-status"]` and `codex-status` is a separate agent with its own workspace, model and `AGENT.md` tool allowlist. The child receives only its task text, its own system prompt, its own model and its own tool allowlist, with a fresh context on every call (also across sessions) on an ephemeral session. Cost: one extra hop through the main agent's model, and the result lands in the main agent's context. Not yet tested: concurrent delegations.
 
 Expected flow:
 
@@ -354,25 +349,27 @@ sequenceDiagram
     participant B as Bridge
     participant D as Codex daemon (read-only)
     participant S as Status Agent (own routed pico session, optional)
-    U->>B: /status or "ℹ️ Подробнее" (handled by Bridge, never relayed to the consultant)
-    B->>D: thread/read, thread/list(ancestorThreadId), thread/turns/list, thread/goal/get, account/rateLimits/read
-    D-->>B: stats (no resume, no subscription)
-    B->>B: rollout tail (token_count only) + live map fed by broadcasts
-    B-->>U: deterministic status card (one message per root, edited in place)
-    opt narrative enabled (later increment)
-        B->>S: bounded facts and evidence, routed session cqb-status-N
-        S-->>B: short narrative (never to the consultant)
-        B-->>U: card edited with the narrative line
+    U->>B: /status in a consultant topic (handled by Bridge, never relayed to the consultant)
+    B-->>U: typing indicator, refreshed every 4 s (no placeholder message)
+    par numbers and now lines (no LLM)
+        B->>D: thread/read, thread/list(ancestorThreadId), thread/turns/list, thread/items/list(limit 1), thread/goal/get, account/rateLimits/read
+        D-->>B: stats and the newest item of each running turn (no resume, no subscription)
+        B->>B: rollout tail (token_count only) + live map fed by broadcasts
+    and summary (own slot session, within the 5 min deadline)
+        B->>S: fixed task for root R, routed session cqb-status-N (slot bound to R)
+        S->>B: read-only tools for R only (scope hook)
+        S-->>B: short Russian summary (never to the consultant)
     end
+    B-->>U: ONE static message: numbers, now lines, summary (or `резюме недоступно`)
 ```
 
-*Decided: Bridge owns delivery, so Bridge itself commits the cursor deterministically by `report_id` and `read_until`; no LLM tool call is involved.*
+*Decided: Bridge owns delivery. (Cursors and reports, §5.2, are deferred: a v0.7 snapshot always reads current state and keeps no cursor.)*
 
-**Implementation note on zero-LLM:** Bridge intercepts `/status` deterministically before PicoClaw (PicoClaw would pass it to the model), so the card needs no LLM call. If `/status` were forwarded to PicoClaw instead, the consultant routing turn **would still cost tokens**.
+**Implementation note:** Bridge intercepts `/status` deterministically before PicoClaw (PicoClaw would pass it to the model), so numbers and `сейчас:` lines need no LLM call, and the only LLM call is the Status Agent's own. Because a snapshot can take minutes, it runs as its own task (polling and the consultant chat are never blocked), once per root at a time, with its own 5-minute timeout independent of the consultant chat (which has none). If `/status` were forwarded to PicoClaw instead, the consultant routing turn **would still cost tokens**.
 
 ### 5.2 Status read window and cursor algorithm
 
-*Applies to the optional narrative only (a later increment). The deterministic card (§5.5) is stateless: every `/status` reads the current state.*
+*Deferred. The v0.7 snapshot (§5.5) is stateless: every `/status` reads the current state, and the Status Agent looks at recent events through the tools without a cursor.*
 
 Statuses default to a **delta since the last successfully generated status for this Codex root**. For the first ever status: look at bounded recent history, e.g. last 60 minutes or up to 200 events across all agents. The limits are configurable; report truncation explicitly. `30m` overrides time origin; `full` increases caps but never removes them.
 
@@ -409,7 +406,7 @@ async def finish_status(report, scope):
 
 ### 5.3 What the Status Agent analyzes
 
-*Scope of the optional narrative agent (a later increment), running in its own routed session (§5.1); its output goes into the status message, never into the consultant's context. Plain `/status` only for now; the `30m`, `agents`, `full` and `<agent>` variants are deferred.*
+*Scope of the Status Agent (built in v0.7), running in its own routed slot session (§5.1); its output goes into the status message, never into the consultant's context. Plain `/status` only; the `30m`, `agents`, `full` and `<agent>` variants are deferred. Its tools are `list_agents`, `get_recent_events`, `get_thread_overview` and `get_questions`, at most about 8 calls.*
 
 Read actual events from **root and all spawned descendants**, e.g.:
 
@@ -473,16 +470,18 @@ Rules for the model:
 
 Follow-up `«Почему падают тесты?»` goes to **the persistent consultant**, which may search the specific events; it need not re-run `/status` or ask Codex root.
 
-### 5.5 Status card (v0.5, deterministic)
+### 5.5 Status snapshot (v0.5 numbers, v0.7 `сейчас:` lines and summary)
 
-Verified by the status card spike (§12.1, S0-E). The card is at most about 12 lines for the root plus one line per subagent (at most 8, then `+N ещё`) and never exceeds 4096 characters. Missing data is shown as `—`, never invented. One status message per root is edited in place in the topic where it was requested (its id is kept in `bot_state`; if it is gone, a new one is sent); the same root is collected at most once per 3 s. Bridge never resumes or subscribes to a thread for this (resume has side effects for threads with goals); the whitelist only gains `thread/turns/list`, `thread/goal/get` and `account/rateLimits/read`.
+Verified by the status card spike (§12.1, S0-E). The message is at most about 12 lines for the root plus two lines per subagent (the line and its `сейчас:` line; at most 8 subagents, then `+N ещё`) plus the summary (at most 12 lines, 1200 characters), and never exceeds 4096 characters. Missing data is shown as `—`, never invented. It is a snapshot: one NEW message per request in the topic where it was requested, never edited, with no placeholder and no state kept in `bot_state` (earlier snapshots stay as history). While collecting, the topic shows the typing indicator. The collect is bounded by `[status] timeout_seconds` (default 300, 30..3600): numbers and `сейчас:` lines take well under a second, the summary the rest; if it is not ready in time (or no Status Agent is configured or reachable) the card is sent without it with the line `резюме недоступно`. One collect per root at a time (a second `/status` answers `статус уже собирается`). Bridge never resumes or subscribes to a thread for this (resume has side effects for threads with goals); the whitelist only gains `thread/turns/list`, `thread/items/list`, `thread/goal/get` and `account/rateLimits/read`.
 
 | Stat | Source | Availability |
 |---|---|---|
 | State (🟢 работает, 🟡 ждёт ответа/одобрения, ⚪ простаивает, 💤 не загружен, 🔴 ошибка) | `thread/read` status and `activeFlags` (`waitingOnUserInput`, `waitingOnApproval`, `systemError`) | Always; works for unloaded threads; broadcasts `thread/status/changed` reach every connection without subscribing |
 | 🟠 `тихо N мин` (possibly stalled) | status `active`, no `waitingOn*` flag, and now − max(`updatedAt`, last status broadcast seen by Bridge) > 10 min | Heuristic; never uses `recencyAt` or `startedAt`; long commands are legitimate, hence the wording |
 | Model, reasoning effort | `Thread.model`, `Thread.reasoningEffort` | Always; the configured value, not per-turn telemetry |
-| Current turn elapsed | `thread/turns/list` (limit 1): `inProgress` and now − `startedAt` (`durationMs` is null while running) | Only while the thread is active |
+| Current turn elapsed | `thread/turns/list` (limit 1, `itemsView: notLoaded`): `inProgress` and now − `startedAt` (`durationMs` is null while running) | Only while the thread is active |
+| `сейчас:` (root and every subagent line) | The kind of the newest item of the running turn: `thread/turns/list` limit 1 without items, then `thread/items/list` with `turnId`, `limit 1`, `sortDirection desc` (verified on the real daemon 2026-11-06: ~5 ms each, ~600 bytes; `itemsView: summary` carries no items for a running turn and `full` ships the whole turn, 70 KB and 160 items). Command execution -> `выполняет: <command head>` (the `bash -lc` wrapper removed, redacted by `security.py`, cut to 80 characters), file change -> `правит файлы (N)`, MCP/dynamic tool -> `вызывает <server>.<tool>`, agent message -> `пишет ответ`, reasoning -> `думает`, collab spawn -> `запускает субагента` (other collab tools `ждёт субагентов` / `общается с субагентами`), web search -> `ищет в сети`; a finished item between two steps uses the past tense (`выполнил: …`); `ждёт ответа` / `ждёт одобрения` from the status flags without a read; idle or not loaded -> `ход завершён N мин назад` from the last turn's `completedAt`, else `—` | Never message text, user text or command output. At most the 8 lines shown are read, 4 at a time; a waiting subagent needs no read |
+| Summary | The Status Agent (§5.1), redacted and bounded | Within the deadline, else the line `резюме недоступно` |
 | Context fill `used / window (pct)` and cache hit % | Root: last `token_count` of the rollout tail (`last_token_usage.total_tokens` / `model_context_window`; `cached_input_tokens` / `input_tokens`). Subagent: broadcast `thread/tokenUsage/updated` into a bounded in-memory map | Root: always if the file is readable (daemon streams a root's usage only to subscribers). Subagent: from the moment Bridge started and saw a model call, else `—`. Never `total.*` (cumulative billing) |
 | Last activity | max(`updatedAt`, last broadcast seen) | `updatedAt` moves at item boundaries only |
 | Goal (objective cut to 60 chars, status, tokens used / budget) | `thread/goal/get`, `thread/goal/updated`/`cleared` | Line skipped when there is no goal |
@@ -776,11 +775,10 @@ token_env = "CQB_PICO_TOKEN"     # the token itself is never stored in this file
 session_prefix = "cqb-"
 
 [status]
-first_report_window_minutes = 60
-max_agents = 20
-max_events = 200
-max_bytes = 131072
-max_tool_calls = 15
+timeout_seconds = 300             # 30..3600; the whole collect, Status Agent summary included (v0.7)
+slots = 2                        # 1..8; Status Agent sessions cqb-status-1..N, one dispatch rule each (v0.7)
+# deferred (cursor design, §5.2): first_report_window_minutes = 60, max_agents = 20, max_events = 200,
+# max_bytes = 131072, max_tool_calls = 15
 
 [security]
 read_only = true
@@ -819,16 +817,19 @@ PicoClaw-specific configuration after verifying the installed schema:
   "agents": {
     "defaults": {"context_window": 1000000, "summarize_token_percent": 80, "summarize_message_threshold": 100000},
     "list": [
-      {"id": "main", "default": true, "workspace": "<home>/ws-main", "model": "<main model_name>",
-       "subagents": {"allow_agents": ["codex-status"]}},
+      {"id": "main", "default": true, "workspace": "<home>/ws-main", "model": "<main model_name>"},
       {"id": "codex-status", "name": "Codex Status", "workspace": "<home>/ws-status",
        "model": "<cheap status model_name>"}
-    ]
+    ],
+    "dispatch": {"rules": [
+      {"name": "status-slot-1", "agent": "codex-status", "when": {"channel": "pico", "chat": "direct:pico:cqb-status-1"}},
+      {"name": "status-slot-2", "agent": "codex-status", "when": {"channel": "pico", "chat": "direct:pico:cqb-status-2"}}
+    ]}
   }
 }
 ```
 
-This is only a **configuration fragment**. The keys shown (`allow_origins`, `tools.<name>.enabled`, `agents.list[].subagents.allow_agents`, `agents.list[].workspace/model`) were verified on PicoClaw v0.3.1 with a mock model (S0-B follow-ups, S0-D; the `agents.defaults.context_window` and `summarize_*` keys come from the v0.3.1 source and example config and are not yet tested at runtime) and **must be re-checked against any other installed version**; the `session.dimensions` fragment was not part of those checks. No secrets appear in it. Real PicoClaw config also requires working `model_list`, `agents.defaults.model_name` and per-agent `AGENT.md`; there is no `channel_list.telegram` entry, because Bridge owns Telegram. Notes:
+This is only a **configuration fragment**. The keys shown (`allow_origins`, `tools.<name>.enabled`, `agents.dispatch.rules`, `agents.list[].workspace/model`) were verified on PicoClaw v0.3.1 with a mock model (S0-B follow-ups, S0-D; the `agents.defaults.context_window` and `summarize_*` keys come from the v0.3.1 source and example config and are not yet tested at runtime) and **must be re-checked against any other installed version**; the `session.dimensions` fragment was not part of those checks. No secrets appear in it. Real PicoClaw config also requires working `model_list`, `agents.defaults.model_name` and per-agent `AGENT.md`; there is no `channel_list.telegram` entry, because Bridge owns Telegram. Notes:
 
 - The pico token is a secret: it goes into PicoClaw's `.security.yml` (`channel_list.pico.settings.token`, mode `0600`) and Bridge's own secret store, never into this JSON or Git. The channel does not start without a token.
 - `allow_from` must contain `"pico-user"` or `"*"`; a non-matching value silently drops all messages. Bind the gateway to loopback. Verified on v0.3.1: `allow_origins` unset, `[]` and `["*"]` accept every connection including one without `Origin`; a specific origin list rejects clients without an `Origin` (403); `[""]` accepts only clients with no or empty `Origin`, which blocks every browser while the Bridge connects. Use `"allow_origins": [""]` together with token auth and host `127.0.0.1` (this relies on source behaviour for the empty-string entry, which is undocumented; fallback `["*"]` with token plus loopback).
@@ -889,9 +890,9 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 | PicoClaw stopped | Bridge lists topics; no hallucinated consultation | `Consultant temporarily unavailable` |
 | PicoClaw gateway down / hook process died | Bridge detects it (`/health`, WS failure, `approve_tool` denials), restarts the gateway, raises an alarm; no consultant turns meanwhile | `Consultant temporarily unavailable` |
 | Read-only tool fails | Return typed error and partial coverage | Evidence incomplete |
-| Status agent exceeds byte/token cap | Return truncated report with coverage | `Partial: N/M workers` |
-| New events during status processing | Keep original high-water; next run picks up | No lost delta |
-| No new events | Bridge answers deterministically, no LLM call | No new logged activity |
+| Status Agent summary not ready within `[status] timeout_seconds`, no free slot, PicoClaw down or no `[pico]` | `/stop` on the slot session, slot and scope released; the card is sent without the summary | `резюме недоступно` |
+| `/status` while one is collecting for the same root | No second collect | `статус уже собирается` |
+| Status data unreadable (daemon down, thread unreadable) | One short message instead of a card; nothing is edited or retried | `Нет данных от демона Codex, повторите позже` |
 | Question captured but actual RPC unknown | Keep `captured`, not pending confirmed | Unverified prompt state |
 | Telegram answer selected | Stage, confirm, answer via shared daemon | `Sent`; `Answered` only after `serverRequest/resolved` |
 | Another client answers first | Close card on `serverRequest/resolved` | Answered elsewhere |
@@ -918,7 +919,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 | S1 Registry | Read-only inventory, Telegram control topic, no consultants automatically | 300–500 LOC | Existing root threads listed, account isolation, zero model calls |
 | S2 Consultant | Explicit create/open, topic binding, persistent PicoClaw session, archive/reopen | +300–550 LOC | One consultant per root, survives restart/archive |
 | S3 Context | Scoped lazy read/search and child discovery | +250–450 LOC | Read only bound root and descendants, pagination/truncation |
-| S4 Status | Bridge-handled deterministic status card (§5.5, done in v0.5); later: optional narrative from a Status Agent in its own routed pico session (not `delegate`), coverage, cursors, variants | +300–550 LOC | Accurate stats with `—` for missing data; narrative never reaches the consultant; no Codex worker prompts |
+| S4 Status | Bridge-handled status snapshot (§5.5): deterministic numbers (v0.5) and `сейчас:` lines, one static message per request, plus the Status Agent summary in its own routed pico slot session (not `delegate`, done in v0.7); later: coverage, cursors, variants | +300–550 LOC | Accurate stats with `—` for missing data; one message, posted once when everything is ready; summary never reaches the consultant; no Codex worker prompts |
 | S5 Questions | Capture, card states, consultant cross-reference, answer via shared daemon | +250–500 LOC | Pending state matches observed requests; delivery claimed only after `serverRequest/resolved` |
 | S6 Optional hardening | Concurrent-answer race handling; opt-in MCP ask only if needed | **TBD** | Exactly-once acknowledged answer and cancellation handling |
 
@@ -930,10 +931,10 @@ Estimates are **rough incremental LOC**, with reuse from PicoClaw/Telegram/Codex
 2. User clicks create twice rapidly. Exactly one consultant topic exists and both clicks link to it.
 3. User sends messages to consultants A and B. PicoClaw does not mix their histories, including after gateway restart.
 4. A consultant can explain a design question by reading a bounded relevant excerpt from its bound Codex root; cannot read a different source or arbitrary filesystem file.
-5. Parent Codex with nested subagents produces journal events. `/status agents` enumerates all depths and correctly distinguishes explicit completion from inferred inactivity.
+5. Parent Codex with nested subagents produces journal events. `/status` lists all depths (up to 8 lines, then `+N ещё`) with a `сейчас:` line each and the summary says what each running subagent does; it does not claim completion that was not observed (the `/status agents` variant is deferred).
 6. A failed test is followed by successful test rerun. Status says **last observed result** is success, while noting prior failure when relevant.
-7. Two consecutive `/status` calls with no events return no new activity from Bridge without any LLM call and without re-processing large logs; verified by token/call counters.
-8. An event arrives while status is being generated; the next status includes it and doesn't lose/duplicate the cursor range.
+7. Two `/status` calls in a row produce two separate messages, each posted once and never edited; a second call while the first still collects answers `статус уже собирается` without a second collect; `/status` outside a consultant topic does nothing.
+8. The Status Agent does not answer within `[status] timeout_seconds` (or is unavailable): the card is posted without it with `резюме недоступно`, the slot and its scope binding are released, and the consultant's session and history are untouched.
 9. Bridge restarts mid-status, during Telegram 429, and after topic creation: recovery without lost mapping or duplicated topic.
 10. Root Codex archived → consultant topic closed, session preserved; unarchived → same topic reopened.
 11. A subagent archives while root remains active → consultant topic stays open.
@@ -960,7 +961,7 @@ Cost factors:
 
 - **Inventory and topic operations:** deterministic, 0 LLM tokens.
 - **Normal consultant chat:** configured consultant model + retained PicoClaw dialog + requested Codex context.
-- **`/status`:** handled by Bridge (probe, 0 LLM tokens when nothing changed); if events changed, a temporary Status Agent + bounded log context, with no consultant routing turn. A subagent saves the persistent consultant's context, **not necessarily total tokens**; it can increase total calls. Measure actual costs.
+- **`/status`:** handled by Bridge; numbers and `сейчас:` lines cost 0 LLM tokens; the summary is one Status Agent turn (cheap model, bounded tool reads, at most about 8 calls) per request, with no consultant routing turn. It saves the persistent consultant's context, **not necessarily total tokens**; it can increase total calls. Measure actual costs.
 - **Polling:** local read I/O only; no LLM and no heartbeat prompting agents.
 - **Questions:** capture/notification zero LLM; discussion is on-demand. No LLM on button selection/copy.
 
@@ -979,7 +980,7 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 | Two Telegram bots in one group | **Dropped**: single Bridge-owned bot (§1); no bot-to-bot messaging |
 | Topic isolation | Bridge maps topic to a `pico` `session_id`; isolation and restart persistence verified on a mock model (S0-B); Telegram flow to verify |
 | PicoClaw `pico` channel semantics | Verified on v0.3.1 (mock): replies lost without an attached WS, same-session messages merged, built-in slash commands run before hooks; Bridge compensates (§4.1) |
-| PicoClaw named `delegate` and separate models | Verified on v0.3.1 (mock, S0-D) and kept as an alternative; v0.5 decision: the Status Agent runs in its own routed pico session (pool `cqb-status-1..2`, stateless in v0.3.1, `agents.dispatch.rules` plus `/reload` only when the pool changes) so its output never enters the consultant; routed-session narrative untested on a real model |
+| PicoClaw named `delegate` and separate models | Verified on v0.3.1 (mock, S0-D) and kept as an alternative; v0.5 decision, built in v0.7: the Status Agent runs in its own routed pico session (pool `cqb-status-1..N`, stateless in v0.3.1, `agents.dispatch.rules` plus `/reload` only when the pool changes) so its output never enters the consultant; verified end to end on the real PicoClaw binary with a mock model (model name, tool allowlist, hook scoping, consultant history untouched), untested on a real model |
 | `/status` as slash command | Project-defined; PicoClaw passes it to the model, so Bridge intercepts it; not built-in PicoClaw |
 | Running on another server | Needs remote read-only adapter or mounted Codex store; local-only assumption is invalid |
 
@@ -1008,3 +1009,4 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 - **v0.4 (2026-11-06):** Consistency pass after spike S0-B: /status flow and command costs aligned with the Bridge-owned gateway; stale two-bot wording removed. Bridge, not an LLM, commits the /status cursor. S0-B follow-ups (slash escape, default tools and `AGENT.md` allowlist, `allow_origins`) and S0-D (delegation to `codex-status`) verified on a mock model. Real-model run via OmniRoute passed (S0-B); hook on `request_user_input` verified (optional, Candidate A).
 - **v0.5 (2026-11-06):** Status card: deterministic stats (state, model, context/cache, subagents, limits) separate from the consultant; Status Agent narrative runs in its own pico session routed to codex-status and never reaches the consultant; root context/cache read from the rollout tail.
 - **v0.6 (2026-11-06):** Inbox topic removed; question cards live in the thread's consultant topic and rows show ❓; registry is one self-updating pinned message ordered by questions, working threads, activity; no refresh button.
+- **v0.7 (2026-11-06):** Status is a static snapshot posted once from a consultant topic when numbers, 'now' lines and the Status Agent summary are all ready (5 min timeout, one collect per thread); the Status Agent runs in its own routed pico session and never reaches the consultant.

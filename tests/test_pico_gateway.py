@@ -420,3 +420,60 @@ def test_health_detects_dead_gateway_and_silent_hook(caplog):
             assert not await h.check() and "not reachable" in h.reason
     caplog.set_level("INFO")
     arun(main())
+
+
+# --- ask: one request on a named session with its own deadline (the Status Agent's way in) ---------
+
+STATUS_SID = "cqb-status-1"
+
+
+def test_ask_returns_the_reply_of_one_request():
+    async def main():
+        async with stack() as (gw, fake, _):
+            r = await gw.ask(STATUS_SID, "what now", 5)
+            assert (r.outcome, r.text) == (Outcome.REPLY, "echo:what now") and fake.texts(STATUS_SID) == ["what now"]
+    arun(main())
+
+
+def test_ask_deadline_stops_the_turn_and_reports_timeout_whatever_the_config_says():
+    async def main():
+        async with stack(turn_timeout_seconds=0) as (gw, fake, _):  # consultants: no limit; this call: its own
+            fake.turn_delay = 5
+            r = await asyncio.wait_for(gw.ask(STATUS_SID, "slow", 0.3), 4)
+            assert r.outcome is Outcome.TIMEOUT
+            await wait_until(lambda: fake.texts(STATUS_SID)[-1:] == ["/stop"])
+            await wait_until(lambda: gw.open_sockets == 0)
+    arun(main())
+
+
+def test_ask_cancelled_by_the_caller_stops_the_abandoned_turn():
+    async def main():
+        async with stack() as (gw, fake, _):
+            fake.turn_delay = 5
+            task = asyncio.create_task(gw.ask(STATUS_SID, "slow", 60))
+            await wait_until(lambda: fake.texts(STATUS_SID) == ["slow"])
+            await asyncio.sleep(0.05)
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+            await wait_until(lambda: fake.texts(STATUS_SID)[-1:] == ["/stop"])
+    arun(main())
+
+
+def test_ask_on_a_foreign_session_or_a_dead_gateway_is_unavailable():
+    async def main():
+        async with stack() as (gw, fake, health):
+            assert (await gw.ask("other-" + "x" * 5, "hi", 1)).outcome is Outcome.UNAVAILABLE
+            health.ok = False
+            assert (await gw.ask(STATUS_SID, "hi", 1)).outcome is Outcome.UNAVAILABLE
+            assert fake.sent == []
+    arun(main())
+
+
+def test_consultant_turns_still_use_the_configured_timeout_not_the_ask_timeout():
+    async def main():
+        async with stack(turn_timeout_seconds=0.3) as (gw, fake, _):
+            fake.turn_delay = 5
+            inbox = Inbox()
+            gw.submit(SID, "x", inbox)
+            assert (await inbox.wait(1, 5))[0].outcome is Outcome.TIMEOUT
+    arun(main())

@@ -25,6 +25,9 @@ merge the next message into it or deliver its late reply to the new socket, so t
 first sends `/stop` on the fresh socket and waits for its confirmation); messages still queued behind it are kept and tried
 on a fresh connection (a few attempts with bounded backoff, then each is reported unavailable).
 
+`ask(session_id, text, timeout)` is the one-shot variant for the Status Agent: a single request on a named
+session with its own deadline (instead of `turn_timeout_seconds`), stopped like any timed-out turn.
+
 The owner can cancel a long turn: a message that is exactly `/stop` is the ONE deliberate
 exception to slash escaping. It is passed to PicoClaw unescaped (a built-in that stops the
 running turn without a model call). While a turn is in flight it is sent at once on that turn's
@@ -122,7 +125,7 @@ class ReplyAssembler:
 class _Session:
     sid: str
     ws: aiohttp.ClientWebSocketResponse | None = None
-    queue: deque[tuple[str, Deliver]] = field(default_factory=deque)
+    queue: deque[tuple[str, Deliver, float | None]] = field(default_factory=deque)
     worker: asyncio.Task[None] | None = None
     touched: float = 0.0
     inflight: bool = False  # a turn is waiting for its reply on `ws`
@@ -165,8 +168,10 @@ class PicoGateway:
     def open_sockets(self) -> int:
         return sum(1 for s in self._sessions.values() if s.ws is not None)
 
-    def submit(self, session_id: str, text: str, deliver: Deliver) -> Submit:
-        """Queue one user message for the session; never blocks, never sends concurrently."""
+    def submit(self, session_id: str, text: str, deliver: Deliver, timeout: float | None = None) -> Submit:
+        """Queue one user message for the session; never blocks, never sends concurrently.
+
+        `timeout` (seconds) bounds this turn's reply instead of `turn_timeout_seconds`; None = the config value."""
         if not _SESSION_ID.match(session_id) or not session_id.startswith(self._cfg.session_prefix):
             log.error("refusing a session id outside the %r namespace", self._cfg.session_prefix)
             return Submit.UNAVAILABLE
@@ -181,12 +186,37 @@ class PicoGateway:
         if len(s.queue) >= QUEUE_MAX:
             return Submit.QUEUE_FULL
         queued = s.busy
-        s.queue.append((escape_command(text), deliver))
+        s.queue.append((escape_command(text), deliver, timeout))
         s.touched = self._clock()
         self._sessions.move_to_end(session_id)
         if s.worker is None:
             s.worker = asyncio.create_task(self._work(s), name="pico-session")
         return Submit.QUEUED if queued else Submit.ACCEPTED
+
+    async def ask(self, session_id: str, text: str, timeout: float) -> DialogResult:
+        """One request on a named session, answered within `timeout` seconds: the Status Agent's way in.
+
+        At the deadline the turn is stopped like any timed-out turn (`/stop`, socket closed) and the result is
+        TIMEOUT. If the caller is cancelled the turn is stopped too, so nothing keeps running unobserved."""
+        done: asyncio.Future[DialogResult] = asyncio.get_running_loop().create_future()
+
+        async def deliver(result: DialogResult) -> None:
+            if not done.done():
+                done.set_result(result)
+
+        async def ignore(result: DialogResult) -> None:
+            return None
+
+        match self.submit(session_id, text, deliver, timeout=timeout):
+            case Submit.ACCEPTED | Submit.QUEUED:
+                try:
+                    return await done
+                except asyncio.CancelledError:
+                    self.submit(session_id, STOP, ignore)
+                    raise
+            case Submit.QUEUE_FULL:
+                return DialogResult(Outcome.BUSY)
+        return DialogResult(Outcome.UNAVAILABLE)
 
     async def run(self) -> None:
         """Liveness probe and idle sweeper; one loop for both."""
@@ -213,8 +243,8 @@ class PicoGateway:
     async def _work(self, s: _Session) -> None:
         try:
             while s.queue:
-                text, deliver = s.queue.popleft()
-                result = await self._turn(s, text)
+                text, deliver, timeout = s.queue.popleft()
+                result = await self._turn(s, text, timeout)
                 s.touched = self._clock()
                 try:
                     await deliver(result)
@@ -225,7 +255,7 @@ class PicoGateway:
             if s.ws is None and not s.queue:
                 self._sessions.pop(s.sid, None)
 
-    async def _turn(self, s: _Session, text: str) -> DialogResult:
+    async def _turn(self, s: _Session, text: str, timeout: float | None) -> DialogResult:
         ws = None
         for attempt in range(CONNECT_ATTEMPTS):
             try:
@@ -244,7 +274,7 @@ class PicoGateway:
         assert ws is not None
         s.inflight = True
         try:
-            return await self._await_reply(s, ws)
+            return await self._await_reply(s, ws, timeout)
         except asyncio.CancelledError:
             await self._drop(s)
             raise
@@ -284,10 +314,12 @@ class PicoGateway:
             await ws.send_json({"type": "message.send", "id": str(uuid.uuid4()), "session_id": s.sid,
                                 "payload": {"content": STOP}})
 
-    async def _await_reply(self, s: _Session, ws: aiohttp.ClientWebSocketResponse) -> DialogResult:
+    async def _await_reply(
+        self, s: _Session, ws: aiohttp.ClientWebSocketResponse, timeout: float | None = None
+    ) -> DialogResult:
         asm = ReplyAssembler()
         loop = asyncio.get_running_loop()
-        limit = self._cfg.turn_timeout_seconds  # 0 = no limit
+        limit = self._cfg.turn_timeout_seconds if timeout is None else timeout  # 0 = no limit
         deadline = loop.time() + limit if limit > 0 else None
         while True:
             remaining = deadline - loop.time() if deadline is not None else None

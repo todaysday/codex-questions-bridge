@@ -22,7 +22,9 @@ async def amain(spec: dict) -> None:
     tokens = ConsultantTokens(os.environ["CQB_PICO_TOKEN"], os.environ["CQB_MCP_TOKEN"])
     stop = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
-    await cqb_main.run(config, stop, token=spec["tg_token"], telegram_base_url=spec["tg_base"], consultant_tokens=tokens)
+    extra = {"status_prompt": spec["status_prompt"]} if "status_prompt" in spec else {}
+    await cqb_main.run(
+        config, stop, token=spec["tg_token"], telegram_base_url=spec["tg_base"], consultant_tokens=tokens, **extra)
 
 
 if __name__ == "__main__":

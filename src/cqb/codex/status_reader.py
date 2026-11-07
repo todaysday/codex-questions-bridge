@@ -5,16 +5,20 @@ so one missing stat cannot hide the others. Nothing here resumes or subscribes t
 """
 
 import logging
+import re
 from typing import Any, Protocol
 
 from cqb.codex.events import run_state
-from cqb.domain.status import Descendants, GoalSummary, RateLimits, ThreadSnapshot
+from cqb.domain.enums import ItemKind
+from cqb.domain.status import Activity, Descendants, GoalSummary, ItemBrief, RateLimits, ThreadSnapshot
 
 log = logging.getLogger(__name__)
 
 NAME_MAX = 60
 OBJECTIVE_MAX = 60
 WEEK_MINUTES = 10080
+DETAIL_MAX = 200  # command head as read; the status service redacts and cuts it further
+_SHELL_WRAPPER = re.compile(r"^(?:\S*/)?(?:bash|sh|zsh) -[a-z]*c ")
 
 
 class Caller(Protocol):
@@ -37,13 +41,29 @@ class DaemonStatusReader:
         threads = tuple(s for s in map(snapshot_from_wire, result.get("data") or []) if s is not None)
         return Descendants(threads, bool(result.get("nextCursor")))
 
-    async def running_turn_start(self, thread_id: str) -> int | None:
-        """Start time of the newest turn if it is still in progress (durationMs is null then)."""
-        result = await self._soft("thread/turns/list", {"threadId": thread_id, "limit": 1})
+    async def activity(self, thread_id: str, with_item: bool) -> Activity | None:
+        """The latest turn (no items: itemsView notLoaded) and, for a running one, its newest item.
+
+        Two cheap reads. `turns/list` with itemsView full would ship the whole turn (70 KB and 160 items
+        on a busy one); `items/list` with limit 1 descending ships one entry. Never resumes or subscribes.
+        """
+        result = await self._soft(
+            "thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "notLoaded"}
+        )
         turns = (result or {}).get("data") or []
-        if turns and turns[0].get("status") == "inProgress" and isinstance(turns[0].get("startedAt"), int):
-            return turns[0]["startedAt"]
-        return None
+        turn = turns[0] if turns and isinstance(turns[0], dict) else None
+        if turn is None:
+            return None
+        running = turn.get("status") == "inProgress"
+        item = None
+        if running and with_item and isinstance(turn.get("id"), str):
+            page = await self._soft(
+                "thread/items/list",
+                {"threadId": thread_id, "turnId": turn["id"], "limit": 1, "sortDirection": "desc"},
+            )
+            entries = (page or {}).get("data") or []
+            item = brief_from_item(entries[0].get("item")) if entries and isinstance(entries[0], dict) else None
+        return Activity(running, _int(turn.get("startedAt")), _int(turn.get("completedAt")), item)
 
     async def goal(self, thread_id: str) -> GoalSummary | None:
         result = await self._soft("thread/goal/get", {"threadId": thread_id})
@@ -94,6 +114,46 @@ def snapshot_from_wire(raw: dict[str, Any]) -> ThreadSnapshot | None:
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def brief_from_item(raw: Any) -> ItemBrief | None:
+    """Kind, finished flag and a short detail of a ThreadItem. Message and output text is never read."""
+    if not isinstance(raw, dict):
+        return None
+    finished = raw.get("status") not in (None, "inProgress")
+    match raw.get("type"):
+        case "commandExecution":
+            return ItemBrief(ItemKind.COMMAND, finished, _command_head(raw.get("command")))
+        case "fileChange":
+            changes = raw.get("changes")
+            return ItemBrief(ItemKind.FILES, finished, None, len(changes) if isinstance(changes, list) else None)
+        case "mcpToolCall":
+            return ItemBrief(ItemKind.TOOL, finished, _dotted(raw.get("server"), raw.get("tool")))
+        case "dynamicToolCall":
+            return ItemBrief(ItemKind.TOOL, finished, _dotted(raw.get("namespace"), raw.get("tool")))
+        case "agentMessage":
+            return ItemBrief(ItemKind.MESSAGE, finished)
+        case "reasoning":
+            return ItemBrief(ItemKind.REASONING, finished)
+        case "collabAgentToolCall":
+            tool = raw.get("tool") if isinstance(raw.get("tool"), str) else None
+            return ItemBrief(ItemKind.SPAWN if tool == "spawnAgent" else ItemKind.COLLAB, finished, tool)
+        case "webSearch":
+            return ItemBrief(ItemKind.WEB, finished)
+    return ItemBrief(ItemKind.OTHER, finished)
+
+
+def _command_head(command: Any) -> str | None:
+    if not isinstance(command, str):
+        return None
+    head = _SHELL_WRAPPER.sub("", " ".join(command.split()), count=1).strip("\"'")
+    return head[:DETAIL_MAX] or None
+
+
+def _dotted(prefix: Any, name: Any) -> str | None:
+    if not isinstance(name, str) or not name:
+        return None
+    return f"{prefix}.{name}" if isinstance(prefix, str) and prefix else name
 
 
 def _int(v: Any) -> int | None:

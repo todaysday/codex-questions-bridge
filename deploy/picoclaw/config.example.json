@@ -16,14 +16,19 @@
     "list": [
       {
         "id": "main", "default": true, "name": "Codex Consultant",
-        "workspace": "/var/lib/picoclaw/ws-main", "model": "cqb-main",
-        "subagents": {"allow_agents": ["codex-status"]}
+        "workspace": "/var/lib/picoclaw/ws-main", "model": "cqb-main"
       },
       {
         "id": "codex-status", "name": "Codex Status",
         "workspace": "/var/lib/picoclaw/ws-status", "model": "cqb-status"
       }
-    ]
+    ],
+    "dispatch": {
+      "rules": [
+        {"name": "status-slot-1", "agent": "codex-status", "when": {"channel": "pico", "chat": "direct:pico:cqb-status-1"}},
+        {"name": "status-slot-2", "agent": "codex-status", "when": {"channel": "pico", "chat": "direct:pico:cqb-status-2"}}
+      ]
+    }
   },
   "channel_list": {
     "pico": {

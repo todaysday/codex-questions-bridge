@@ -7,10 +7,10 @@ import pytest
 
 from cqb.codex.events import Connected, Disconnected, GoalChanged, ThreadStatusChanged, TokenUsageUpdated
 from cqb.domain.enums import RunState as R
-from cqb.domain.status import AgentLine, GoalSummary, RateLimits, StatusReport, UsageSnapshot
+from cqb.domain.status import Activity, AgentLine, GoalSummary, RateLimits, StatusReport, UsageSnapshot
 from cqb.services import status as status_mod
 from cqb.services.live_state import LiveState
-from cqb.services.status import NoNarrator, StatusService, StatusUnavailable
+from cqb.services.status import StatusService, StatusUnavailable
 from cqb.telegram.fmt import TEXT_LIMIT
 from cqb.telegram.status_view import ICON, render_status, tokens
 from tg_stack import NOW, Clock, StatusSourceStub, snapshot
@@ -73,12 +73,10 @@ def test_turn_elapsed_only_for_an_active_thread_and_never_negative():
     report = collect(svc)
     assert report.turn_elapsed_s == 754 and "ход 12 мин" in render_status(report)
     src.threads["r2"] = snapshot("r2", R.IDLE)
-    calls_before = src.calls.count("turn")
+    src.activities["r2"] = Activity(False, NOW - 900, NOW - 800, None)
     report = collect(svc, "r2")
-    assert report.turn_elapsed_s is None and src.calls.count("turn") == calls_before
-    assert "ход" not in render_status(report)
+    assert report.turn_elapsed_s is None and "ход" not in render_status(report).splitlines()[1]  # finished turn: no elapsed
     src.turn_start = NOW + 50  # clock skew
-    svc._recent.clear()
     assert collect(svc, "r1").turn_elapsed_s == 0
 
 
@@ -171,7 +169,7 @@ def test_subagent_counting_and_the_eight_line_cap():
     text = render_status(report)
     assert "Субагенты: 11 · 🟢 2 работают · 🟡 2 ждут · ⚪ 7 простаивают" in text
     assert text.count("\n •") == 8 and "+3 ещё" in text
-    assert len(text.splitlines()) <= 12 + 8
+    assert len(text.splitlines()) <= 14 + 2 * 8
 
 
 def test_more_pages_than_fetched_is_marked():
@@ -205,11 +203,9 @@ def test_goal_line_present_and_skipped_when_live_says_none():
     src.goals["r1"] = GoalSummary("Ship the profile page", "active", 12_300, 50_000)
     assert "Цель: Ship the profile page · активна · 12.3k / 50k ток." in render_status(collect(svc))
     run(live.handle(GoalChanged("r1", False)))
-    svc._recent.clear()
     calls = src.calls.count("goal")
     assert collect(svc).goal is None and src.calls.count("goal") == calls  # no daemon call needed
     run(live.handle(GoalChanged("r1", True)))
-    svc._recent.clear()
     assert collect(svc).goal is not None
 
 
@@ -235,49 +231,15 @@ def test_limits_rendering_weekly_primary_only():
     assert "Лимит: 30% (неделя) · сброс " in text
     src.limits = RateLimits(55, None, 300)
     svc._limits = None
-    svc._recent.clear()
     assert "Лимит: 55% (5 ч)" in render_status(collect(svc))
 
 
-def test_collect_is_rate_limited_per_root():
-    svc, src, _, clock = make()
-    src.threads["r1"] = snapshot("r1")
-    src.threads["r2"] = snapshot("r2")
-    a = collect(svc)
-    assert collect(svc) is a and src.calls.count("thread") == 1
-    collect(svc, "r2")
-    assert src.calls.count("thread") == 2
-    clock.now += 3
-    collect(svc)
-    assert src.calls.count("thread") == 3
-    for i in range(40):
-        src.threads[f"x{i}"] = snapshot(f"x{i}")
-        collect(svc, f"x{i}")
-    assert len(svc._recent) == status_mod.RECENT_MAX
-
-
-def test_narrator_default_is_a_noop_and_a_custom_one_is_shown_and_failures_are_ignored():
-    assert run(NoNarrator().narrate(None)) is None  # type: ignore[arg-type]
+def test_every_snapshot_reads_fresh_data():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
-    report = collect(svc)
-    assert report.narrative is None and render_status(report).count("\n") < 14
-
-    class Says:
-        async def narrate(self, report):
-            return "Идёт рефакторинг. " * 50
-
-    class Breaks:
-        async def narrate(self, report):
-            raise RuntimeError("boom")
-
-    svc2, src2, *_ = make(narrator=Says())
-    src2.threads["r1"] = snapshot("r1")
-    shown = collect(svc2)
-    assert len(shown.narrative) == status_mod.NARRATIVE_MAX and "Идёт рефакторинг" in render_status(shown)
-    svc3, src3, *_ = make(narrator=Breaks())
-    src3.threads["r1"] = snapshot("r1")
-    assert collect(svc3).narrative is None
+    collect(svc)
+    collect(svc)
+    assert src.calls.count("thread") == 2  # a static message per request: no cached report is ever re-posted
 
 
 def test_card_never_exceeds_the_telegram_limit():
@@ -285,7 +247,7 @@ def test_card_never_exceeds_the_telegram_limit():
     agents = tuple(AgentLine(long, long, long, R.WORKING, 99, NOW) for _ in range(8))
     report = StatusReport(
         NOW, long, R.STALLED, 99, long, long, 10**6, UsageSnapshot(10**9, 10**9, 10**9, 10**9), NOW,
-        GoalSummary(long, long, 10**9, 10**9), 10**4, True, 3, 3, 4, agents, RateLimits(100, NOW, 10080), long)
+        GoalSummary(long, long, 10**9, 10**9), 10**4, True, 3, 3, 4, agents, RateLimits(100, NOW, 10080), None, long)
     assert len(render_status(report)) <= TEXT_LIMIT
     assert set(ICON) == set(R)
 

@@ -63,14 +63,16 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
         await wait_until(lambda: "❓" not in registry()["text"])  # resolved: the marker is gone
         assert len(tg.live_messages(control())) == 1  # one registry message, nothing else, all along
 
-        # /status in the consultant topic: deterministic card from the (fake) daemon, never relayed
+        # /status in the consultant topic: one static snapshot from the (fake) daemon, never relayed
         tg.push_message("/status", fox)
         await wait_until(lambda: any("📊 Статус" in m["text"] for m in tg.live_messages(fox)))
         card = next(m["text"] for m in tg.live_messages(fox) if "📊 Статус" in m["text"])
         assert "FoxProfile" in card and "Лимит: 30% (неделя)" in card and "Субагенты: нет" in card
+        assert "сейчас:" in card and "резюме недоступно" in card  # no [pico]: the summary is unavailable, the rest is there
+        assert len([m for m in tg.live_messages(fox) if "📊 Статус" in m["text"]]) == 1  # one static message
         assert set(app.methods()) <= {"thread/list", "thread/read", "thread/resume", "thread/unsubscribe",
                                       "thread/loaded/list", "thread/goal/get", "thread/turns/list",
-                                      "account/rateLimits/read"}
+                                      "thread/items/list", "account/rateLimits/read"}
 
         stop.set()
         await asyncio.wait_for(task, 3)

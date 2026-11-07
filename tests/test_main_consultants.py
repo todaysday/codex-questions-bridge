@@ -14,7 +14,7 @@ from cqb.domain.models import Source, Thread
 from cqb.config import CodexConfig, Config, ConfigError, ConsultantTokens, DbConfig, McpConfig, PicoConfig, TelegramConfig
 from cqb.services.relay import NOT_CONFIGURED
 from fake_appserver import FakeAppServer, wait_until
-from fake_pico import FakePico
+from fake_pico import FakePico, create
 from fake_pico import TOKEN as PICO_TOKEN
 from fake_telegram import CHAT_ID, OWNER, TOKEN, FakeTelegram
 
@@ -101,6 +101,52 @@ def test_run_with_consultant_chat_replies_in_topic_and_serves_mcp(tmp_path):
             await asyncio.gather(task, return_exceptions=True)
             for s in (pico, app, tg):
                 await s.stop()
+    asyncio.run(main())
+
+
+def test_status_snapshot_gets_its_summary_from_a_slot_session_and_never_touches_the_consultant(tmp_path):
+    async def main():
+        seen = {}
+        port = free_port()
+        auth = {"Authorization": f"Bearer {MCP_TOKEN}"}
+
+        async def agent(sid, text):
+            async with aiohttp.ClientSession() as http:  # the scope hook's question, asked while the request runs
+                async with http.get(f"http://127.0.0.1:{port}/internal/scope/{sid}", headers=auth) as r:
+                    seen[sid] = (r.status, await r.json() if r.status == 200 else None)
+            await asyncio.sleep(0.3)  # the agent "works": the card must not be posted yet
+            return [create("Корень правит тесты.\nСубагент Ада читает логи.", "m1")]
+
+        app, tg, pico = FakeAppServer(), FakeTelegram(), FakePico(agent)
+        for srv in (app, tg, pico):
+            await srv.start()
+        app.add_thread("t1", 2_000_000_000, name="FoxProfile")
+        seed(str(tmp_path / "c.db"))
+        stop = asyncio.Event()
+        cfg = make_config(tmp_path, app.path, PicoConfig(url=pico.url, idle_seconds=60), port)
+        task = asyncio.create_task(cqb_main.run(
+            cfg, stop, token=TOKEN, telegram_base_url=tg.base_url, rss_interval=60,
+            consultant_tokens=ConsultantTokens(PICO_TOKEN, MCP_TOKEN)))
+        try:
+            topic = await create_consultant(tg, "FoxProfile")
+            tg.push_message("/status", topic)
+            await asyncio.sleep(0.15)
+            assert not any("Статус" in m["text"] for m in tg.live_messages(topic))  # nothing yet, no placeholder
+            await wait_until(lambda: any(p.get("message_thread_id") == topic for p in tg.methods("sendChatAction")))
+            await wait_until(lambda: any("📊 Статус" in m["text"] for m in tg.live_messages(topic)), 5)
+            card = next(m["text"] for m in tg.live_messages(topic) if "📊 Статус" in m["text"])
+            assert "Резюме:\nКорень правит тесты.\nСубагент Ада читает логи." in card and "резюме недоступно" not in card
+            assert list(pico.sockets) == ["cqb-status-1"] and pico.texts("cqb-status-1")[0].startswith("Status request")
+            assert seen == {"cqb-status-1": (200, {"source_id": "local", "root_id": "t1"})}  # bound during the call
+            async with aiohttp.ClientSession() as http:  # and unbound afterwards
+                async with http.get(f"http://127.0.0.1:{port}/internal/scope/cqb-status-1", headers=auth) as r:
+                    assert r.status == 404
+            assert [sid for sid, _ in pico.sent] == ["cqb-status-1"]  # no message ever reached the consultant's session
+        finally:
+            stop.set()
+            await asyncio.gather(task, return_exceptions=True)
+            for srv in (pico, app, tg):
+                await srv.stop()
     asyncio.run(main())
 
 

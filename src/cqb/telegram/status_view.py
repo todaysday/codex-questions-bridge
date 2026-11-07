@@ -2,8 +2,8 @@
 
 import time
 
-from cqb.domain.enums import RunState
-from cqb.domain.status import AgentLine, GoalSummary, RateLimits, StatusReport, UsageSnapshot
+from cqb.domain.enums import ItemKind, RunState
+from cqb.domain.status import Activity, AgentLine, GoalSummary, ItemBrief, RateLimits, StatusReport, UsageSnapshot
 from cqb.telegram.fmt import TEXT_LIMIT, clip, hhmm
 
 DASH = "—"
@@ -21,21 +21,31 @@ GOAL_WORD = {
     "active": "активна", "paused": "пауза", "blocked": "заблокирована", "usageLimited": "лимит использования",
     "budgetLimited": "лимит бюджета", "complete": "выполнена",
 }
+SUMMARY_UNAVAILABLE = "резюме недоступно"
+# (while the item runs, once it has finished): between two steps the newest item of a running turn is a finished one
+NOW_COMMAND = ("выполняет", "выполнил")
+NOW_FILES = ("правит файлы", "правил файлы")
+NOW_TOOL = ("вызывает", "вызывал")
+NOW_SPAWN = ("запускает субагента", "запускал субагента")
+NOW_COLLAB = ("общается с субагентами", "общался с субагентами")
+NOW_WAIT = ("ждёт субагентов", "ждал субагентов")
 ACTIVE = (RunState.WORKING, RunState.STALLED, RunState.WAITING_INPUT, RunState.WAITING_APPROVAL)
 
 
 def render_status(r: StatusReport) -> str:
     lines = [f"📊 Статус: {clip(r.title, 60) if r.title else DASH}", _root_line(r)]
+    lines.append(f"сейчас: {_now(r.state, r.activity, r.now)}")
     lines.append(f"Контекст: {_context(r.usage)}")
     lines.append(f"Активность: {_ago(r.last_activity, r.now)}")
     if r.goal:
         lines.append(_goal(r.goal))
     lines.append(_agents_header(r))
-    lines.extend(_agent_line(a, r.now) for a in r.agents)
+    for a in r.agents:
+        lines.append(_agent_line(a, r.now))
+        lines.append(f"   сейчас: {_now(a.state, a.activity, r.now)}")
     if r.agents_total is not None and r.agents_total > len(r.agents):
         lines.append(f"+{r.agents_total - len(r.agents)} ещё" + ("+" if r.agents_more else ""))
-    if r.narrative:
-        lines.append(clip(r.narrative, 300))
+    lines.append(f"Резюме:\n{r.summary}" if r.summary else SUMMARY_UNAVAILABLE)
     lines.append(f"Лимит: {_limits(r.limits)}")
     lines.append(f"снимок {hhmm(r.now)}")
     return clip("\n".join(lines), TEXT_LIMIT)
@@ -78,6 +88,40 @@ def _agent_line(a: AgentLine, now: int) -> str:
     ctx = f"{a.context_percent}%" if a.context_percent is not None else DASH
     return (f" • {clip(a.label, 24)} · {a.model or DASH} {a.effort or DASH} · {ICON[a.state]} · "
             f"ctx {ctx} · {_ago(a.last_activity, now)}")
+
+
+def _now(state: RunState, activity: Activity | None, now: int) -> str:
+    """What the thread does right now. Built from the kind of its newest item only, never from text."""
+    if state.is_waiting:
+        return WORD[state]
+    if activity is None:
+        return DASH
+    if not activity.turn_running:
+        return f"ход завершён {_ago(activity.completed_at, now)}" if activity.completed_at else DASH
+    return _item_phrase(activity.item) if activity.item else DASH
+
+
+def _item_phrase(item: ItemBrief) -> str:
+    done = int(item.finished)
+    match item.kind:
+        case ItemKind.COMMAND:
+            return f"{NOW_COMMAND[done]}: {item.detail}" if item.detail else NOW_COMMAND[done]
+        case ItemKind.FILES:
+            count = f" ({item.count})" if item.count is not None else ""
+            return NOW_FILES[done] + count
+        case ItemKind.TOOL:
+            return f"{NOW_TOOL[done]} {item.detail}" if item.detail else DASH
+        case ItemKind.MESSAGE:
+            return "пишет ответ"
+        case ItemKind.REASONING:
+            return "думает"
+        case ItemKind.SPAWN:
+            return NOW_SPAWN[done]
+        case ItemKind.COLLAB:
+            return (NOW_WAIT if item.detail == "wait" else NOW_COLLAB)[done]
+        case ItemKind.WEB:
+            return "ищет в сети"
+    return DASH
 
 
 def _limits(lim: RateLimits | None) -> str:

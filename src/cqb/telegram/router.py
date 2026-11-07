@@ -18,7 +18,7 @@ from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import CallbackQuery, Message, Reply, Update
 from cqb.telegram.registry_view import thread_name
-from cqb.telegram.status_card import StatusCards
+from cqb.telegram.status_post import BUSY as STATUS_BUSY, StatusPoster
 from cqb.telegram.topics import TelegramTopics
 
 log = logging.getLogger(__name__)
@@ -47,7 +47,7 @@ class Router:
         registry: RegistryQuery,
         questions: QuestionService,
         relay: ConsultantRelay,
-        status: StatusCards,
+        status: StatusPoster,
         source_id: str,
         request_poll: Callable[[], None],
         clock: Callable[[], float] = time.time,
@@ -133,9 +133,8 @@ class Router:
             qs = self._questions.open_questions(consultant.root_thread_id)
             await self._say(m, render_questions(qs, self._names()))
         elif command == "status":
-            error = await self._status.show(consultant.root_thread_id, m.thread_id)
-            if error:
-                await self._say(m, error)
+            if not self._status.request(consultant.root_thread_id, m.thread_id):
+                await self._say(m, STATUS_BUSY)
         elif command is None and m.reply_to_message_id is not None and (
             reply := await self._cards.stage_text(m.reply_to_message_id, m.text or "")
         ) is not None:
