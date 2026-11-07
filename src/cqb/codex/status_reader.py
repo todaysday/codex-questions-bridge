@@ -15,6 +15,7 @@ from cqb.domain.status import Activity, Descendants, GoalSummary, ItemBrief, Rat
 log = logging.getLogger(__name__)
 
 NAME_MAX = 60
+PAGE_SIZE = 100  # descendants per thread/list page
 OBJECTIVE_MAX = 60
 WEEK_MINUTES = 10080
 DETAIL_MAX = 200  # command head as read; the status service redacts and cuts it further
@@ -34,12 +35,27 @@ class DaemonStatusReader:
         return snapshot_from_wire(result["thread"]) if result and result.get("thread") else None
 
     async def descendants(self, root_id: str, limit: int) -> Descendants | None:
-        """All depths, one page; the ancestor filter is cheap, an unfiltered list takes seconds."""
-        result = await self._soft("thread/list", {"ancestorThreadId": root_id, "limit": limit})
-        if result is None:
-            return None
-        threads = tuple(s for s in map(snapshot_from_wire, result.get("data") or []) if s is not None)
-        return Descendants(threads, bool(result.get("nextCursor")))
+        """All depths, at most `limit` threads in pages of 100; the ancestor filter is cheap (state db only).
+
+        Pages are reduced to compact snapshots at once, so memory is bounded by `limit`. `more` says the
+        daemon holds further threads. A page that fails after the first one ends the read with `more` set.
+        """
+        threads: list[ThreadSnapshot] = []
+        cursor: str | None = None
+        for _ in range(-(-limit // PAGE_SIZE)):  # a daemon that keeps sending empty pages cannot loop us
+            size = min(PAGE_SIZE, limit - len(threads))
+            params: dict[str, Any] = {"ancestorThreadId": root_id, "limit": size, "useStateDbOnly": True}
+            if cursor:
+                params["cursor"] = cursor
+            result = await self._soft("thread/list", params)
+            if result is None:
+                return Descendants(tuple(threads), True) if threads else None
+            rows = result.get("data")
+            threads.extend(s for s in map(snapshot_from_wire, rows if isinstance(rows, list) else []) if s)
+            cursor = result.get("nextCursor") or None
+            if not cursor or len(threads) >= limit:
+                break
+        return Descendants(tuple(threads[:limit]), bool(cursor))
 
     async def activity(self, thread_id: str, with_item: bool) -> Activity | None:
         """The latest turn (no items: itemsView notLoaded) and, for a running one, its newest item.
@@ -100,6 +116,7 @@ class DaemonStatusReader:
 def snapshot_from_wire(raw: dict[str, Any]) -> ThreadSnapshot | None:
     try:
         name = raw.get("name") or " ".join((raw.get("preview") or "").split())
+        spawn = _thread_spawn(raw)
         return ThreadSnapshot(
             thread_id=raw["id"],
             parent_id=raw.get("parentThreadId"),
@@ -111,9 +128,19 @@ def snapshot_from_wire(raw: dict[str, Any]) -> ThreadSnapshot | None:
             name=name[:NAME_MAX] or None,
             updated_at=int(raw.get("updatedAt") or 0),
             path=raw.get("path") if isinstance(raw.get("path"), str) else None,
+            agent_path=spawn.get("agent_path") if isinstance(spawn.get("agent_path"), str) else None,
+            depth=_int(spawn.get("depth")),
         )
     except (KeyError, TypeError, ValueError):
         return None
+
+
+def _thread_spawn(raw: dict[str, Any]) -> dict[str, Any]:
+    """`source.subAgent.thread_spawn` of a thread; {} for a root ("cli" ...) or any unexpected shape."""
+    source = raw.get("source")
+    sub = source.get("subAgent") if isinstance(source, dict) else None
+    spawn = sub.get("thread_spawn") if isinstance(sub, dict) else None
+    return spawn if isinstance(spawn, dict) else {}
 
 
 def brief_from_item(raw: Any) -> ItemBrief | None:

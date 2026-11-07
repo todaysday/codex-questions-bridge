@@ -23,7 +23,7 @@ from cqb.services.live_state import LiveState
 
 log = logging.getLogger(__name__)
 
-AGENT_FETCH_LIMIT = 50
+AGENT_FETCH_LIMIT = 300  # three daemon pages; more shows as `300+`
 AGENT_LINES = 8
 STALL_SECONDS = 600
 LIMITS_TTL = 30
@@ -161,7 +161,7 @@ class StatusService:
     def _line(self, t: ThreadSnapshot, activity: Activity | None) -> AgentLine:
         live = self._live.get(t.thread_id)
         return AgentLine(
-            label=t.nickname or t.role or t.thread_id[:8], model=t.model, effort=t.effort, state=t.state,
+            label=t.title, depth=t.depth, model=t.model, effort=t.effort, state=t.state,
             context_percent=live.usage.fill_percent if live and live.usage else None,
             last_activity=self._last(t) or None, activity=activity,
         )
@@ -200,7 +200,7 @@ def _safe(activity: Activity | None) -> Activity | None:
 
 
 def _rank(state: RunState) -> int:
-    return 0 if state.is_waiting else 1 if state is RunState.WORKING else 2
+    return 0 if state is RunState.WORKING else 1 if state.is_waiting else 2
 
 
 async def _none() -> None:

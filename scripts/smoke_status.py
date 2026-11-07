@@ -30,8 +30,15 @@ async def main(socket_path: str, home: str) -> int:
         async with asyncio.timeout(30):
             while not client.connected:
                 await asyncio.sleep(0.1)
-            page = await client.call("thread/list", {"limit": 5, "sortKey": "updated_at"})
-            root = next((t for t in page.get("data", []) if not t.get("parentThreadId")), None)
+            page = await client.call("thread/list", {"limit": 5, "sortKey": "updated_at", "useStateDbOnly": True})
+            roots = [t for t in page.get("data", []) if not t.get("parentThreadId")]
+            root = None
+            for t in roots:  # the first root that has subagents shows the most
+                kids = await client.call("thread/list", {"ancestorThreadId": t["id"], "limit": 1, "useStateDbOnly": True})
+                if kids.get("data"):
+                    root = t
+                    break
+            root = root or next(iter(roots), None)
             if root is None:
                 print("no root thread found")
                 return 1

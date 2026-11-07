@@ -19,6 +19,20 @@ class ThreadSnapshot:
     name: str | None
     updated_at: int
     path: str | None
+    agent_path: str | None = None  # `source.subAgent.thread_spawn.agent_path`: "/root/<task>/<subtask>"
+    depth: int | None = None  # spawn depth, 1 = direct child of the root
+
+    @property
+    def title(self) -> str | None:
+        """What the Codex app shows: the humanized last segment of the agent path, else nickname, else role."""
+        return humanize_path(self.agent_path) or self.nickname or self.role
+
+
+def humanize_path(agent_path: str | None) -> str | None:
+    """Last path segment, underscores as spaces, first letter capitalized; None when nothing usable is left."""
+    segments = [s for s in (agent_path or "").split("/") if s.strip()]
+    words = " ".join(segments[-1].replace("_", " ").split()) if segments else ""
+    return words[:1].upper() + words[1:] or None
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,13 +100,14 @@ class Activity:
 
 @dataclass(frozen=True, slots=True)
 class AgentLine:
-    label: str
+    label: str | None  # display name; None = unknown
     model: str | None
     effort: str | None
     state: RunState
     context_percent: int | None
     last_activity: int | None
     activity: Activity | None = None
+    depth: int | None = None  # 2 and deeper are drawn as nested
 
 
 @dataclass(frozen=True, slots=True)

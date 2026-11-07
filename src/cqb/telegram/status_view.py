@@ -44,7 +44,7 @@ def render_status(r: StatusReport) -> str:
         lines.append(_agent_line(a, r.now))
         lines.append(f"   сейчас: {_now(a.state, a.activity, r.now)}")
     if r.agents_total is not None and r.agents_total > len(r.agents):
-        lines.append(f"+{r.agents_total - len(r.agents)} ещё" + ("+" if r.agents_more else ""))
+        lines.append(f"и ещё {r.agents_total - len(r.agents)}")
     lines.append(f"Резюме:\n{r.summary}" if r.summary else SUMMARY_UNAVAILABLE)
     lines.append(f"Лимит: {_limits(r.limits)}")
     lines.append(f"снимок {hhmm(r.now)}")
@@ -79,14 +79,17 @@ def _agents_header(r: StatusReport) -> str:
         return f"Субагенты: {DASH}"
     if r.agents_total == 0:
         return "Субагенты: нет"
-    plus = "+" if r.agents_more else ""
-    return (f"Субагенты: {r.agents_total}{plus} · 🟢 {r.agents_working} работают · "
-            f"🟡 {r.agents_waiting} ждут · ⚪ {r.agents_idle} простаивают")
+    counts = ((ICON[RunState.WORKING], r.agents_working, "работают"), ("🟡", r.agents_waiting, "ждут"),
+              (ICON[RunState.IDLE], r.agents_idle, "простаивают"))
+    parts = [f"Субагенты: {r.agents_total}{'+' if r.agents_more else ''}"]
+    parts += [f"{icon} {n} {word}" for icon, n, word in counts if n]
+    return " · ".join(parts)
 
 
 def _agent_line(a: AgentLine, now: int) -> str:
     ctx = f"{a.context_percent}%" if a.context_percent is not None else DASH
-    return (f" • {clip(a.label, 24)} · {a.model or DASH} {a.effort or DASH} · {ICON[a.state]} · "
+    nested = "↳ " if a.depth is not None and a.depth >= 2 else ""
+    return (f" • {nested}{clip(a.label or DASH, 32)} · {a.model or DASH} {a.effort or DASH} · {ICON[a.state]} · "
             f"ctx {ctx} · {_ago(a.last_activity, now)}")
 
 

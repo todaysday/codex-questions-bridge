@@ -55,11 +55,15 @@ class FakeAppServer:
 
     def add_thread(self, thread_id: str, updated_at: int, parent: str | None = None, archived: bool = False,
                    name: str | None = None, path: str | None = None, model: str = "gpt-6", effort: str = "low",
-                   nickname: str | None = None, role: str | None = None) -> None:
+                   nickname: str | None = None, role: str | None = None, agent_path: str | None = None,
+                   depth: int = 1) -> None:
+        spawn = {"parent_thread_id": parent, "depth": depth}
+        if agent_path:
+            spawn["agent_path"] = agent_path
         self.threads[thread_id] = {
             "id": thread_id, "name": name or f"thread {thread_id}", "preview": "p", "cwd": "/w",
             "updatedAt": updated_at, "status": {"type": "idle"},
-            "source": {"subAgent": {"thread_spawn": {"parent_thread_id": parent, "depth": 1}}} if parent else "cli",
+            "source": {"subAgent": {"thread_spawn": spawn}} if parent else "cli",
             "parentThreadId": parent, "model": model, "reasoningEffort": effort, "path": path,
             "agentNickname": nickname, "agentRole": role,
         }

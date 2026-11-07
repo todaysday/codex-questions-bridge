@@ -13,6 +13,7 @@ from cqb.codex.rollout_tail import read_usage
 from cqb.codex.status_reader import DaemonStatusReader, snapshot_from_wire
 from cqb.codex.stream import dispatch
 from cqb.domain.enums import RunState as R
+from cqb.domain.status import ThreadSnapshot
 from cqb.services.live_state import LiveState
 from cqb.services.status import StatusService
 from cqb.telegram.status_view import render_status
@@ -65,12 +66,86 @@ def test_snapshot_from_wire_tolerates_missing_fields():
     assert s.name == "many words here" and s.path is None and s.nickname == "Ada"
 
 
+def test_agent_path_and_depth_are_parsed_defensively():
+    def spawn(source):
+        return snapshot_from_wire({"id": "t", "source": source})
+    s = spawn({"subAgent": {"thread_spawn": {"agent_path": "/root/a_b/c_d", "depth": 2, "agent_nickname": "N"}}})
+    assert (s.agent_path, s.depth, s.title) == ("/root/a_b/c_d", 2, "C d")
+    for odd in ("cli", None, 5, [], {"subAgent": "review"}, {"subAgent": {"thread_spawn": "x"}},
+                {"subAgent": {"thread_spawn": {"agent_path": 7, "depth": "2"}}},
+                {"subAgent": {"thread_spawn": {"agent_path": None, "depth": True}}}):
+        s = spawn(odd)
+        assert (s.agent_path, s.depth) == (None, None), odd
+    assert snapshot_from_wire({"id": "t"}).agent_path is None
+
+
+def test_title_derivation_and_fallbacks():
+    def title(path, nick=None, role=None):
+        return ThreadSnapshot("t", None, R.IDLE, None, None, nick, role, None, 0, None, agent_path=path).title
+    assert title("/root/tl_008_oracle_run_lifecycle") == "Tl 008 oracle run lifecycle"
+    assert title("/root/x/ex_007_admission/") == "Ex 007 admission"  # trailing slash
+    assert title("/root/__a__b__") == "A b" and title("single") == "Single" and title("/root/éa_B") == "Éa B"
+    assert title("/root/mixed_CaSe_Words") == "Mixed CaSe Words"  # only the first letter changes
+    for odd in (None, "", "/", "///", "/ /  /", "/root/___"):
+        assert title(odd, "Nick", "role") == "Nick" and title(odd, None, "role") == "role", odd
+        assert title(odd) is None
+
+
+def test_descendants_pages_up_to_the_cap():
+    async def main():
+        async with connected_client() as (client, fake):
+            fake.add_thread("r1", NOW)
+            for i in range(250):
+                fake.add_thread(f"a{i:03}", NOW - i - 1, parent="r1", nickname=f"N{i}")
+            reader = DaemonStatusReader(client)
+            fake.calls.clear()
+            kids = await reader.descendants("r1", 300)
+            assert len(kids.threads) == 250 and not kids.more
+            lists = [p for m, p in fake.calls if m == "thread/list"]
+            assert [p["limit"] for p in lists] == [100, 100, 100]  # 250 rows: the third page ends the list
+            assert all(p["ancestorThreadId"] == "r1" and p["useStateDbOnly"] is True for p in lists)
+            assert [p.get("cursor") for p in lists] == [None, "100", "200"]
+            for i in range(250, 400):
+                fake.add_thread(f"a{i:03}", NOW - i - 1, parent="r1")
+            fake.calls.clear()
+            kids = await reader.descendants("r1", 300)
+            assert len(kids.threads) == 300 and kids.more is True
+            assert sum(m == "thread/list" for m in fake.methods()) == 3  # never a fourth page
+            assert len({t.thread_id for t in kids.threads}) == 300
+            assert [p["limit"] for m, p in fake.calls if m == "thread/list"] == [100, 100, 100]
+            fake.calls.clear()
+            kids = await reader.descendants("r1", 150)  # page sizes follow the remaining room
+            assert len(kids.threads) == 150 and kids.more is True
+            assert [p["limit"] for _, p in fake.calls] == [100, 50]
+    arun(main())
+
+
+def test_descendants_second_page_failure_keeps_what_was_read():
+    class Flaky:
+        def __init__(self):
+            self.n = 0
+
+        async def call(self, method, params=None):
+            self.n += 1
+            if self.n == 2:
+                raise RuntimeError("down")
+            return {"data": [{"id": f"a{i}", "status": {"type": "idle"}} for i in range(100)], "nextCursor": "c"}
+    kids = arun(DaemonStatusReader(Flaky()).descendants("r", 300))
+    assert len(kids.threads) == 100 and kids.more is True
+
+    class Dead:
+        async def call(self, method, params=None):
+            raise RuntimeError("down")
+    assert arun(DaemonStatusReader(Dead()).descendants("r", 300)) is None
+
+
 def test_reader_against_the_daemon():
     async def main():
         async with connected_client() as (client, fake):
             fake.add_thread("r1", NOW - 30, name="Root", model="gpt-6.1", effort="high", path="/x/r.jsonl")
             fake.add_thread("a1", NOW - 20, parent="r1", nickname="Ada", role="luna-low")
-            fake.add_thread("a2", NOW - 10, parent="a1", nickname="Bob")  # grandchild: any depth
+            fake.add_thread("a2", NOW - 10, parent="a1", nickname="Bob", agent_path="/root/ex_007/admission_check",
+                            depth=2)  # grandchild: any depth
             fake.add_thread("other", NOW)
             fake.threads["a1"]["status"] = {"type": "active", "activeFlags": []}
             fake.turns["r1"] = [{"status": "inProgress", "startedAt": NOW - 90}, {"status": "completed", "startedAt": 1}]
@@ -85,6 +160,10 @@ def test_reader_against_the_daemon():
             kids = await reader.descendants("r1", 50)
             assert {t.thread_id for t in kids.threads} == {"a1", "a2"} and not kids.more
             assert {t.state for t in kids.threads} == {R.WORKING, R.IDLE}
+            by_id = {t.thread_id: t for t in kids.threads}
+            assert (by_id["a2"].agent_path, by_id["a2"].depth, by_id["a2"].title) == (
+                "/root/ex_007/admission_check", 2, "Admission check")
+            assert (by_id["a1"].agent_path, by_id["a1"].depth, by_id["a1"].title) == (None, 1, "Ada")
             assert (await reader.descendants("r1", 1)).more is True
             running = await reader.activity("r1", with_item=False)
             assert (running.turn_running, running.started_at, running.item) == (True, NOW - 90, None)

@@ -165,10 +165,10 @@ def test_subagent_counting_and_the_eight_line_cap():
     report = collect(svc)
     assert (report.agents_total, report.agents_working, report.agents_waiting, report.agents_idle) == (11, 2, 2, 7)
     assert len(report.agents) == 8
-    assert [a.state for a in report.agents[:4]] == [R.WAITING_INPUT, R.WAITING_APPROVAL, R.WORKING, R.WORKING]
+    assert [a.state for a in report.agents[:4]] == [R.WORKING, R.WORKING, R.WAITING_INPUT, R.WAITING_APPROVAL]
     text = render_status(report)
     assert "Субагенты: 11 · 🟢 2 работают · 🟡 2 ждут · ⚪ 7 простаивают" in text
-    assert text.count("\n •") == 8 and "+3 ещё" in text
+    assert text.count("\n •") == 8 and "\nи ещё 3\n" in text and "+" not in text.split("Субагенты")[1].split("Резюме")[0]
     assert len(text.splitlines()) <= 14 + 2 * 8
 
 
@@ -178,7 +178,7 @@ def test_more_pages_than_fetched_is_marked():
     children(src, 9)
     src.more = True
     text = render_status(collect(svc))
-    assert "Субагенты: 9+" in text and "+1 ещё+" in text
+    assert "Субагенты: 9+" in text and "\nи ещё 1\n" in text and "ещё+" not in text
 
 
 def test_agent_line_label_context_from_broadcast_and_dashes():
@@ -194,7 +194,7 @@ def test_agent_line_label_context_from_broadcast_and_dashes():
     agent_lines = [x for x in lines if x.startswith(" •")]
     assert any(x.startswith(" • Lovelace · luna low · 🟢 · ctx 25%") for x in agent_lines)
     assert any(x.startswith(" • luna-high · — — · ⚪ · ctx —") for x in agent_lines)
-    assert any(x.startswith(" • abcdefgh ·") for x in agent_lines)
+    assert any(x.startswith(" • — ·") for x in agent_lines)  # no path, nickname or role: a dash, never an id
 
 
 def test_goal_line_present_and_skipped_when_live_says_none():
@@ -269,3 +269,70 @@ def test_live_map_is_bounded_oldest_first_and_cleared_on_reconnect():
     run(live.handle(ThreadStatusChanged("t1", False, False, R.IDLE)))
     run(live.handle(Connected()))
     assert len(live) == 0
+
+
+def header(report):
+    return next(x for x in render_status(report).splitlines() if x.startswith("Субагенты"))
+
+
+def test_zero_counts_are_not_shown_in_the_header():
+    svc, src, *_ = make()
+    src.threads["r1"] = snapshot("r1")
+    children(src, 4)
+    assert header(collect(svc)) == "Субагенты: 4 · ⚪ 4 простаивают"
+    kids = [dataclasses.replace(k, state=R.NOT_LOADED) for k in src.children["r1"]]
+    kids[0] = dataclasses.replace(kids[0], state=R.WORKING)
+    src.children["r1"] = tuple(kids)
+    assert header(collect(svc)) == "Субагенты: 4 · 🟢 1 работают · ⚪ 3 простаивают"
+    src.children["r1"] = tuple(dataclasses.replace(k, state=R.WAITING_INPUT) for k in kids)
+    assert header(collect(svc)) == "Субагенты: 4 · 🟡 4 ждут"
+    src.children["r1"] = ()
+    assert header(collect(svc)) == "Субагенты: нет"
+
+
+def test_the_cap_counts_and_shows_the_plus_only_in_the_header():
+    svc, src, *_ = make()
+    src.threads["r1"] = snapshot("r1")
+    children(src, 300)
+    src.more = True
+    report = collect(svc)
+    assert (report.agents_total, report.agents_more) == (300, True)
+    assert header(report) == "Субагенты: 300+ · ⚪ 300 простаивают"
+    assert "\nи ещё 292\n" in render_status(report)
+
+
+def test_the_eight_lines_are_working_then_waiting_then_most_recent():
+    svc, src, *_ = make()
+    src.threads["r1"] = snapshot("r1")
+    kids = [snapshot(f"i{i}", R.IDLE, updated=NOW - 10 * (i + 1), parent="r1", nickname=f"Idle{i}") for i in range(6)]
+    kids.append(snapshot("w_old", R.WORKING, updated=NOW - 5000, parent="r1", nickname="WorkOld"))
+    kids.append(snapshot("w_new", R.WORKING, updated=NOW - 20, parent="r1", nickname="WorkNew"))
+    kids.append(snapshot("q", R.WAITING_APPROVAL, updated=NOW - 4000, parent="r1", nickname="Waits"))
+    src.children["r1"] = tuple(kids)
+    labels = [a.label for a in collect(svc).agents]
+    assert labels == ["WorkNew", "WorkOld", "Waits", "Idle0", "Idle1", "Idle2", "Idle3", "Idle4"]
+
+
+def test_title_from_the_agent_path_and_the_depth_prefix():
+    svc, src, *_ = make()
+    src.threads["r1"] = snapshot("r1")
+    src.children["r1"] = (
+        snapshot("a1", R.WORKING, parent="r1", nickname="Faraday the 2nd", role="worker", depth=1,
+                 agent_path="/root/tl_008_oracle_known_lifecycle"),
+        snapshot("a2", R.WORKING, parent="r1", nickname="Ada", depth=2,
+                 agent_path="/root/tl_008_oracle_known_lifecycle/oracle_run_lifecycle"),
+        snapshot("a3", R.WORKING, parent="r1", nickname="Bob", role="worker", agent_path="//", depth=0),
+    )
+    text = render_status(collect(svc))
+    assert " • Tl 008 oracle known lifecycle · " in text
+    assert " • ↳ Oracle run lifecycle · " in text
+    assert " • Bob · " in text and "↳ Bob" not in text and "↳ Tl" not in text
+    assert "/root" not in text and "Faraday" not in text
+
+
+def test_long_title_is_clipped():
+    svc, src, *_ = make()
+    src.threads["r1"] = snapshot("r1")
+    src.children["r1"] = (snapshot("a1", parent="r1", agent_path="/root/" + "word_" * 20),)
+    line = next(x for x in render_status(collect(svc)).splitlines() if x.startswith(" •"))
+    assert "Word word" in line and "… ·" in line and len(line.split(" · ")[0]) <= 3 + 32
