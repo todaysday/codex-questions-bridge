@@ -13,8 +13,8 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.telegram.api import BotApi, TelegramError
 from cqb.telegram.consultant_view import render_opening, render_questions, render_thread
-from cqb.telegram.control import CONTROL, INBOX, ControlTopics, RegistryPublisher
-from cqb.telegram.inbox import InboxCards
+from cqb.telegram.cards import QuestionCards
+from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import CallbackQuery, Message, Reply, Update
 from cqb.telegram.registry_view import thread_name
@@ -41,7 +41,7 @@ class Router:
         keys: ActionKeys,
         topics: ControlTopics,
         publisher: RegistryPublisher,
-        inbox: InboxCards,
+        cards: QuestionCards,
         consultants: ConsultantService,
         consultant_topics: TelegramTopics,
         registry: RegistryQuery,
@@ -57,7 +57,7 @@ class Router:
         self._keys = keys
         self._topics = topics
         self._publisher = publisher
-        self._inbox = inbox
+        self._cards = cards
         self._consultants = consultants
         self._consultant_topics = consultant_topics
         self._registry = registry
@@ -105,23 +105,20 @@ class Router:
         command = self._command(m.text)
         if command == "":
             return  # addressed to another bot
-        kind = self._topics.kind_of(m.thread_id)
-        if kind == CONTROL:
+        if self._topics.is_control(m.thread_id):
             if command == "threads":
-                self._request_poll()
-                self._publisher.request_refresh(force=True)
-        elif kind == INBOX:
-            await self._inbox_message(m, command)
+                await self._threads_command(m)
         else:
             await self._consultant_message(m, command)
 
-    async def _inbox_message(self, m: Message, command: str | None) -> None:
-        if command == "questions":
-            await self._say(m, render_questions(self._questions.open_questions(), self._names()))
-        elif m.reply_to_message_id is not None and command is None:
-            reply = await self._inbox.stage_text(m.reply_to_message_id, m.text or "")
-            if reply and reply.text:
-                await self._say(m, reply.text)
+    async def _threads_command(self, m: Message) -> None:
+        """Re-render the one registry message now. The command message is removed if the bot may."""
+        self._request_poll()
+        await self._publisher.refresh(force=True)
+        try:
+            await self._api.delete_message(self._cfg.chat_id, m.message_id)
+        except TelegramError as exc:
+            log.debug("cannot delete the command message: %s", exc)
 
     async def _consultant_message(self, m: Message, command: str | None) -> None:
         assert m.thread_id is not None
@@ -139,6 +136,11 @@ class Router:
             error = await self._status.show(consultant.root_thread_id, m.thread_id)
             if error:
                 await self._say(m, error)
+        elif command is None and m.reply_to_message_id is not None and (
+            reply := await self._cards.stage_text(m.reply_to_message_id, m.text or "")
+        ) is not None:
+            if reply.text:  # a reply to a question card is never chat: it must not reach the model
+                await self._say(m, reply.text)
         else:
             await self._relay.relay(consultant, m.text or "")
 
@@ -196,41 +198,28 @@ class Router:
         """An expired or used key on a visible message: re-render it with fresh keys."""
         if message_id == self._publisher.message_id:
             self._publisher.request_refresh(force=True)
-        elif (q := self._questions.by_inbox_message(message_id)) is not None:
-            self._inbox.mark(q.question_id)
+        elif (q := self._questions.by_card_message(message_id)) is not None:
+            self._cards.mark(q.question_id)
 
     async def _dispatch(self, a: TelegramAction) -> Reply:
         match a.action:
             case "create":
                 return await self._create(a.root_thread_id or "")
-            case "status":
-                return await self._status_card(a.root_thread_id or "")
             case "page":
                 page, _, archived = (a.payload or "0:0").partition(":")
                 self._publisher.set_view(int(page), archived == "1")
-                self._publisher.request_refresh(force=True)
+                await self._publisher.refresh(force=True)  # edits the same message
                 return Reply()
-            case "refresh":
-                self._request_poll()
-                self._publisher.request_refresh(force=True)
-                return Reply("Обновляю")
             case "opt":
                 qid, _, index = (a.payload or "").rpartition(":")
-                return await self._inbox.stage(qid, int(index))
+                return await self._cards.stage(qid, int(index))
             case "send":
-                return await self._inbox.confirm(a.payload or "")
+                return await self._cards.confirm(a.payload or "")
             case "cancel":
-                return await self._inbox.cancel(a.payload or "")
+                return await self._cards.cancel(a.payload or "")
             case "other":
-                return self._inbox.other_hint()
+                return self._cards.other_hint()
         return Reply("Неизвестное действие")
-
-    async def _status_card(self, root: str) -> Reply:
-        topic = self._topics.topic_id(CONTROL)
-        if topic is None or self._registry.describe(root) is None:
-            return Reply("Тред не найден", alert=True)
-        error = await self._status.show(root, topic)
-        return Reply(error, alert=True) if error else Reply("Статус отправлен")
 
     async def _create(self, root: str) -> Reply:
         before = self._consultants.get(root)
@@ -244,5 +233,4 @@ class Router:
                 except TelegramError as exc:
                     log.warning("opening message failed: %s", exc)
         self._publisher.request_refresh()
-        self._inbox.mark_root(root)
         return Reply("Консультант уже создан" if known else "Консультант создан")

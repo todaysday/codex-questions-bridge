@@ -20,6 +20,7 @@ class FakeTelegram:
         self.messages: dict[int, dict[str, Any]] = {}
         self.callback_answers: list[dict[str, Any]] = []
         self.pinned: list[int] = []
+        self.deleted_user_messages: list[int] = []  # ids of pushed (user) messages the bot deleted
         self.errors: dict[str, list[tuple[int, dict[str, Any]]]] = {}  # method -> queued failures
         self.drop_next: dict[str, int] = {}  # method -> connections to drop before answering
         self._updates: list[dict[str, Any]] = []
@@ -78,7 +79,7 @@ class FakeTelegram:
     def push_message(
         self, text: str, thread_id: int | None, user_id: int = OWNER, chat_id: int | None = None,
         forwarded: bool = False, sender_chat: bool = False, reply_to: int | None = None, is_bot: bool = False,
-    ) -> None:
+    ) -> int:
         msg: dict[str, Any] = {
             "message_id": next(self._msg_ids), "chat": {"id": chat_id if chat_id is not None else self.chat_id},
             "from": {"id": user_id, "is_bot": is_bot}, "text": text,
@@ -92,6 +93,7 @@ class FakeTelegram:
         if sender_chat:
             msg["sender_chat"] = {"id": self.chat_id}
         self._push({"message": msg})
+        return msg["message_id"]
 
     def push_callback(self, data: str, message_id: int, user_id: int = OWNER, chat_id: int | None = None) -> str:
         qid = f"cbq{next(self._update_ids)}"
@@ -191,7 +193,10 @@ class FakeTelegram:
         return True
 
     async def m_deleteMessage(self, p: dict[str, Any]) -> bool:
-        self.delete_message(p["message_id"])
+        if p["message_id"] in self.messages:
+            self.delete_message(p["message_id"])
+        else:
+            self.deleted_user_messages.append(p["message_id"])
         return True
 
     async def m_createForumTopic(self, p: dict[str, Any]) -> dict[str, Any]:

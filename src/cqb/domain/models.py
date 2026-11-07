@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from cqb.domain.enums import ArchiveState, ConsultantState, QuestionLifecycle, VerificationSource
+from cqb.domain.enums import ArchiveState, ConsultantState, QuestionLifecycle, RunState, VerificationSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,6 +24,7 @@ class Thread:
     archive_state: ArchiveState
     archive_verified_at: int | None
     last_seen_at: int
+    run_state: RunState | None = None  # status from the last inventory poll; None: never reported
 
     @property
     def is_root(self) -> bool:
@@ -65,7 +66,7 @@ class Question:
     delivered_to_codex: bool
     created_at: int
     updated_at: int
-    inbox_message_id: int | None = None
+    card_message_id: int | None = None  # the question card in the consultant topic of the root
 
 
 @dataclass(frozen=True, slots=True)

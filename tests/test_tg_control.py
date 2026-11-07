@@ -24,19 +24,19 @@ def answer_for(st: Stack, query_id):
     return next((a for a in st.fake.callback_answers if a["callback_query_id"] == query_id), None)
 
 
-def test_service_topics_created_once_and_message_pinned(conn):
+def test_control_topic_created_once_message_pinned_and_no_inbox_topic(conn):
     async def main():
         async with make_stack(conn, thread("r1", name="FoxProfile")) as st:
             fake = st.fake
             assert fake.topic_named("📋 Треды Codex") == [st.control_topic]
-            assert fake.topic_named("📥 Inbox") == [st.inbox_topic]
+            assert fake.topic_named("📥 Inbox") == [] and len(fake.topics) == 1
             msg = st.registry_message
             assert fake.messages[msg]["thread_id"] == st.control_topic and fake.pinned == [msg]
             assert "FoxProfile" in fake.messages[msg]["text"]
             again = Stack(conn, fake)  # restart: ids come from bot_state
             await again.api.start()
             await again.topics.ensure()
-            assert len(fake.topics) == 2
+            assert len(fake.topics) == 1
             await again.api.close()
     run(main())
 
@@ -59,7 +59,7 @@ def test_registry_is_edited_only_when_content_changes(conn):
     run(main())
 
 
-def test_refresh_requests_are_coalesced_and_rate_limited(conn):
+def test_refresh_marks_are_coalesced_into_one_edit(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
             msg = st.registry_message
@@ -68,11 +68,51 @@ def test_refresh_requests_are_coalesced_and_rate_limited(conn):
                 st.publisher.request_refresh()
             await st.settle()
             assert st.fake.messages[msg]["edits"] == 1
-            st.publisher._min_edit = 0.15
-            t0 = time.monotonic()
-            await st.publisher.refresh(force=True)
-            await st.publisher.refresh(force=True)
-            assert time.monotonic() - t0 >= 0.13
+            await st.settle()  # nothing marked since: no pass at all
+            assert st.fake.messages[msg]["edits"] == 1
+    run(main())
+
+
+def test_running_publisher_makes_at_most_one_edit_per_interval(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", updated=NOW - 10)) as st:
+            msg, fake = st.registry_message, st.fake
+            st.publisher._interval = 0.3
+            worker = asyncio.create_task(st.publisher.run())
+            try:
+                await asyncio.sleep(0.05)  # no mark yet: no pass, no edit
+                assert fake.messages[msg].get("edits", 0) == 0
+                for i in range(6):  # a burst of real changes, each marked dirty
+                    st.threads.upsert_many([thread(f"n{i}", name=f"Burst {i}", updated=NOW - i)])
+                    st.publisher.request_refresh()
+                    await asyncio.sleep(0.02)
+                assert fake.messages[msg]["edits"] == 1  # the first mark is served at once...
+                assert "Burst 4" not in fake.messages[msg]["text"]  # ...the others wait for the window to end
+                await asyncio.sleep(0.4)
+                assert fake.messages[msg]["edits"] == 2 and "Burst 4" in fake.messages[msg]["text"]  # one edit
+                await asyncio.sleep(0.4)
+                assert fake.messages[msg]["edits"] == 2  # idle: no edits without marks
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
+    run(main())
+
+
+def test_unchanged_render_is_not_edited_even_when_marked_or_after_the_safety_period(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            msg, fake = st.registry_message, st.fake
+            st.publisher._safety = 0.05
+            st.publisher._interval = 0
+            st.clock.now += 120  # only the time header would differ
+            worker = asyncio.create_task(st.publisher.run())
+            try:
+                st.publisher.request_refresh()
+                await asyncio.sleep(0.25)  # several marked and periodic passes
+                assert fake.messages[msg].get("edits", 0) == 0 and not fake.methods("editMessageText")
+            finally:
+                worker.cancel()
+                await asyncio.gather(worker, return_exceptions=True)
     run(main())
 
 
@@ -107,7 +147,7 @@ def test_create_double_click_makes_exactly_one_topic(conn):
             q1 = click(st, msg, "Создать")
             q2 = click(st, msg, "Создать")
             await st.pump()
-            assert fake.topic_named("FoxProfile — User Access") and len(fake.topics) == 3  # 2 service + 1
+            assert fake.topic_named("FoxProfile — User Access") and len(fake.topics) == 2  # control + 1
             assert "создан" in answer_for(st, q1)["text"]
             assert "устарела" in answer_for(st, q2)["text"]  # the one-time key is used up
             topic = st.consultant_dao.get("s1", "r1").tg_topic_id
@@ -124,7 +164,7 @@ def test_concurrent_creates_from_two_batches_still_one_topic(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
             await asyncio.gather(st.router._create("r1"), st.router._create("r1"))
-            assert len(st.fake.methods("createForumTopic")) == 3
+            assert len(st.fake.methods("createForumTopic")) == 2  # control + one consultant
     run(main())
 
 
@@ -136,7 +176,7 @@ def test_callback_expiry_and_stale_buttons_heal_the_message(conn):
             st.clock.now += ACTION_TTL + 1
             await st.pump()
             assert "устарела" in answer_for(st, q)["text"]
-            assert st.consultant_dao.get("s1", "r1") is None and len(st.fake.topics) == 2
+            assert st.consultant_dao.get("s1", "r1") is None and len(st.fake.topics) == 1
             await st.settle()  # healed: re-rendered with fresh keys
             q = click(st, msg, "Создать")
             await st.pump()
@@ -148,11 +188,10 @@ def test_navigation_buttons_are_reusable_until_expiry(conn):
     async def main():
         async with make_stack(conn, thread("r1", name="Fox")) as st:
             msg = st.registry_message
-            st.status_source.threads["r1"] = snapshot("r1")
-            q1, q2 = click(st, msg, "Подробнее"), click(st, msg, "Подробнее")
+            q1, q2 = click(st, msg, "Архивные"), click(st, msg, "Архивные")  # navigation is not one-time
             await st.pump()
             for q in (q1, q2):
-                assert answer_for(st, q)["text"] == "Статус отправлен"
+                assert answer_for(st, q) is not None and answer_for(st, q).get("text") is None
     run(main())
 
 
@@ -164,17 +203,17 @@ def test_unauthorized_input_never_reaches_services(conn):
             await st.router._create("r1")
             topic = st.consultant_dao.get("s1", "r1").tg_topic_id
             await st.settle()
-            fake.push_callback(fake.button(msg, "Подробнее")["callback_data"], msg, user_id=STRANGER)
-            fake.push_callback(fake.button(msg, "Подробнее")["callback_data"], msg, chat_id=-100555)
+            fake.push_callback(fake.button(msg, "Архивные")["callback_data"], msg, user_id=STRANGER)
+            fake.push_callback(fake.button(msg, "Архивные")["callback_data"], msg, chat_id=-100555)
             fake.push_message("hi", topic, user_id=STRANGER)
             fake.push_message("hi", topic, chat_id=-100555)
             fake.push_message("hi", topic, forwarded=True)
             fake.push_message("hi", topic, sender_chat=True)
             fake.push_message("hi", topic, user_id=OWNER, is_bot=True)
             fake.push_message("/threads", st.control_topic, user_id=STRANGER)
-            fake.push_message("/questions", st.inbox_topic, user_id=STRANGER)
+            fake.push_message("/questions", topic, user_id=STRANGER)
             await st.pump()
-            assert st.relay.got == [] and st.inventory.polls == 0
+            assert st.relay.got == [] and st.inventory.polls == 0 and st.publisher.view() == (0, False)
             assert fake.callback_answers == []  # strangers get no confirmation at all
             assert st.router.rejected == 9
     run(main())
@@ -197,29 +236,44 @@ def test_commands_in_the_right_topics_and_relay_of_free_text(conn):
     async def main():
         async with make_stack(conn, thread("r1", name="Fox"), thread("r2", name="Other")) as st:
             fake = st.fake
-            await st.router._create("r1")
-            topic = st.consultant_dao.get("s1", "r1").tg_topic_id
-            fake.push_message("/threads", st.control_topic)
+            topic = await st.open_consultant("r1")
+            await st.settle()
+            edits_before = fake.messages[st.registry_message].get("edits", 0)
+            st.clock.now += 60  # the forced re-render shows a new time
+            cmd = fake.push_message("/threads", st.control_topic)
             fake.push_message("/thread@cqb_test_bot", topic)
             fake.push_message("/thread@other_bot", topic)
             fake.push_message("why option A?", topic)
             fake.push_message("/status", topic)
             fake.push_message("/questions", topic)
             await st.pump()
-            assert st.inventory.polls == 1 and st.publisher._force
+            assert st.inventory.polls == 1
+            assert fake.messages[st.registry_message]["edits"] == edits_before + 1  # /threads re-rendered it
+            assert fake.deleted_user_messages == [cmd]  # and removed the command message
             texts = [m["text"] for m in fake.live_messages(topic)]
             assert any(t.startswith("Тред: Fox\nid: r1") for t in texts)
             assert any(t == "Нет неотвеченных вопросов." for t in texts)
             assert st.relay.got == [("r1", "why option A?")]  # /status is handled by the Bridge, not relayed
             await st.ask("r2", "i1")
             await st.ask("r1", "i2", request_id=2)
-            fake.push_message("/questions", st.inbox_topic)
             fake.push_message("/questions", topic)
+            fake.push_message("/questions", st.control_topic)  # not a consultant topic: ignored
             await st.pump()
-            inbox = [m["text"] for m in fake.live_messages(st.inbox_topic) if m["text"].startswith("❓")]
-            assert len(inbox) == 1 and "Other" in inbox[0] and "Fox" in inbox[0]
             mine = [m["text"] for m in fake.live_messages(topic)][-1]
-            assert "Fox" in mine and "Other" not in mine
+            assert mine.startswith("❓") and "Fox" in mine and "Other" not in mine
+            assert len(st.control_messages()) == 1
+    run(main())
+
+
+def test_threads_command_survives_missing_delete_rights(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            st.fake.fail("deleteMessage", 400, "Bad Request: message can't be deleted")
+            st.clock.now += 60
+            st.fake.push_message("/threads", st.control_topic)
+            await st.pump()
+            assert st.inventory.polls == 1 and len(st.control_messages()) == 1
+            assert st.fake.messages[st.registry_message]["edits"] == 1  # still re-rendered
     run(main())
 
 

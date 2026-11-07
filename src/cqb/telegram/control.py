@@ -1,4 +1,7 @@
-"""Service topics and the single editable registry message (design section 2.1)."""
+"""The control topic and its single self-updating registry message (design section 2.1).
+
+Nothing but that one pinned message is ever posted into the control topic.
+"""
 
 import asyncio
 import logging
@@ -14,53 +17,55 @@ from cqb.telegram.registry_view import PAGE_SIZE, render_registry
 
 log = logging.getLogger(__name__)
 
-CONTROL = "control"
-INBOX = "inbox"
 MAX_MESSAGE_AGE = 6 * 3600  # re-render at least this often so callback ids never expire on screen
+SAFETY_SECONDS = 60  # periodic re-render in case an event was missed; unchanged content is not written
 
 
 class ControlTopics:
-    """Creates the two service topics once, remembers their ids, recreates a deleted one."""
+    """Creates the control topic once, remembers its id, recreates it when deleted by hand."""
 
-    def __init__(self, api: BotApi, state: BotStateDao, chat_id: int, control_name: str, inbox_name: str) -> None:
+    def __init__(self, api: BotApi, state: BotStateDao, chat_id: int, name: str) -> None:
         self._api = api
         self._state = state
         self._chat_id = chat_id
-        self._names = {CONTROL: control_name, INBOX: inbox_name}
+        self._name = name
 
     async def ensure(self) -> None:
-        for kind in (CONTROL, INBOX):
-            if self.topic_id(kind) is None:
-                await self._create(kind)
+        if self.topic_id() is None:
+            await self._create()
 
-    def topic_id(self, kind: str) -> int | None:
-        return self._state.get_int(f"topic.{kind}")
+    def topic_id(self) -> int | None:
+        return self._state.get_int("topic.control")
 
-    def kind_of(self, topic_id: int) -> str | None:
-        return next((k for k in (CONTROL, INBOX) if self.topic_id(k) == topic_id), None)
+    def is_control(self, topic_id: int) -> bool:
+        return self.topic_id() == topic_id
 
-    async def send(self, kind: str, text: str, keyboard: Keyboard | None = None) -> SentMessage:
-        """Post into a service topic; if the topic was deleted by hand, recreate it and retry once."""
-        topic = self.topic_id(kind)
+    async def send_registry(self, text: str, keyboard: Keyboard) -> SentMessage:
+        """The only post into the control topic; if the topic was deleted, recreate it and retry once."""
+        topic = self.topic_id()
         if topic is None:
-            topic = await self._create(kind)
+            topic = await self._create()
         try:
             return await self._api.send_message(self._chat_id, text, thread_id=topic, keyboard=keyboard)
         except BadRequest as exc:
             if not exc.gone:
                 raise
-        log.warning("service topic %s is gone; recreating", kind)
-        topic = await self._create(kind)
+        log.warning("control topic is gone; recreating")
+        topic = await self._create()
         return await self._api.send_message(self._chat_id, text, thread_id=topic, keyboard=keyboard)
 
-    async def _create(self, kind: str) -> int:
-        topic = await self._api.create_forum_topic(self._chat_id, self._names[kind])
-        self._state.set(f"topic.{kind}", topic.thread_id)
+    async def _create(self) -> int:
+        topic = await self._api.create_forum_topic(self._chat_id, self._name)
+        self._state.set("topic.control", topic.thread_id)
         return topic.thread_id
 
 
 class RegistryPublisher:
-    """Edits one pinned message; skips the edit when the rendered content did not change."""
+    """Edits one pinned message. Event-driven: callers mark it dirty, `run` coalesces the marks.
+
+    At most one pass per `interval` seconds, and no edit when the rendered content (without the
+    time header) is unchanged.
+    """
 
     def __init__(
         self,
@@ -72,7 +77,7 @@ class RegistryPublisher:
         chat_id: int,
         *,
         interval: float,
-        min_edit_interval: float = 3.0,
+        safety: float = SAFETY_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._api = api
@@ -82,31 +87,33 @@ class RegistryPublisher:
         self._query = query
         self._chat_id = chat_id
         self._interval = interval
-        self._min_edit = min_edit_interval
+        self._safety = safety
         self._clock = clock
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._force = False
-        self._last_write = float("-inf")
-        self._page = 0
-        self._archived = False
 
     @property
     def message_id(self) -> int | None:
         return self._state.get_int("registry.message_id")
 
+    def view(self) -> tuple[int, bool]:
+        """(page, archived) the pinned message currently shows; remembered across restarts."""
+        page, _, archived = (self._state.get("registry.view") or "0:0").partition(":")
+        return (int(page) if page.isdigit() else 0), archived == "1"
+
     def set_view(self, page: int, archived: bool) -> None:
-        self._page, self._archived = max(page, 0), archived
+        self._state.set("registry.view", f"{max(page, 0)}:{int(archived)}")
 
     def request_refresh(self, force: bool = False) -> None:
-        """Coalesces: any number of requests before the next pass cause one edit."""
+        """Marks the message dirty. Any number of marks before the next pass cause at most one edit."""
         self._force = self._force or force
         self._wake.set()
 
     async def run(self, before: Callable[[], Awaitable[object]] | None = None) -> None:
         while True:
             try:
-                await asyncio.wait_for(self._wake.wait(), self._interval)
+                await asyncio.wait_for(self._wake.wait(), self._safety)
             except TimeoutError:
                 pass
             force, self._force = self._force, False
@@ -119,15 +126,17 @@ class RegistryPublisher:
                 log.warning("registry refresh failed: %s", exc)
             except Exception:
                 log.exception("registry refresh failed")
+            await asyncio.sleep(self._interval)  # marks arriving meanwhile are served by the next pass
 
     async def refresh(self, force: bool = False) -> bool:
         """Returns True when Telegram was written to."""
         async with self._lock:
             now = int(self._clock())
-            page = self._query.page(self._page, PAGE_SIZE, self._archived)
-            if not page.rows and self._page > 0:
-                self._page = 0
-                page = self._query.page(0, PAGE_SIZE, self._archived)
+            page_no, archived = self.view()
+            page = self._query.page(page_no, PAGE_SIZE, archived)
+            if not page.rows and page_no > 0:
+                self.set_view(0, archived)
+                page = self._query.page(0, PAGE_SIZE, archived)
             view = render_registry(page, self._chat_id, now)
             digest = view.fingerprint()
             message_id = self.message_id
@@ -135,11 +144,10 @@ class RegistryPublisher:
             if not force and message_id is not None and fresh and digest == self._state.get("registry.hash"):
                 return False
             keyboard = self._keys.bind(view.keyboard)
-            await self._pace()
             if message_id is not None:
                 message_id = await self._edit(message_id, view.text, keyboard)
             if message_id is None:
-                sent = await self._topics.send(CONTROL, view.text, keyboard)
+                sent = await self._topics.send_registry(view.text, keyboard)
                 self._state.set("registry.message_id", sent.message_id)
                 await self._pin(sent.message_id)
             self._state.set("registry.hash", digest)
@@ -164,9 +172,3 @@ class RegistryPublisher:
             await self._api.pin_chat_message(self._chat_id, message_id)
         except TelegramError as exc:
             log.warning("cannot pin the registry message: %s", exc)
-
-    async def _pace(self) -> None:
-        wait = self._min_edit - (time.monotonic() - self._last_write)
-        if wait > 0:
-            await asyncio.sleep(wait)
-        self._last_write = time.monotonic()

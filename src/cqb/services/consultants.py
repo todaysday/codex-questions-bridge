@@ -59,6 +59,7 @@ class ConsultantService:
         chat_id: int,
         clock: Callable[[], float] = time.time,
         persist_delay: float = 0.2,
+        on_open: Callable[[str], None] | None = None,
     ) -> None:
         self._dao = consultants
         self._threads = threads
@@ -67,6 +68,7 @@ class ConsultantService:
         self._chat_id = chat_id
         self._clock = clock
         self._persist_delay = persist_delay
+        self._on_open = on_open  # root id of a consultant that just became open (created or reopened)
         self._locks: dict[str, list] = {}  # root -> [lock, users]; entries live only while in use
         self._created: dict[str, int] = {}  # root -> topic created but not yet persisted
 
@@ -117,6 +119,7 @@ class ConsultantService:
             self._created.pop(root_thread_id, None)
             opened = self._dao.get(self._source, root_thread_id)
             assert opened is not None
+            self._opened(root_thread_id)
             return opened
 
     async def reconcile(self) -> int:
@@ -149,7 +152,13 @@ class ConsultantService:
             return False
         state = ConsultantState.ARCHIVED if close else ConsultantState.OPEN
         self._dao.set_state(c.consultant_id, state, self._now())
+        if not close:
+            self._opened(c.root_thread_id)
         return True
+
+    def _opened(self, root_thread_id: str) -> None:
+        if self._on_open:
+            self._on_open(root_thread_id)
 
     async def _create_topic(self, row: Consultant, thread: Thread) -> int:
         try:

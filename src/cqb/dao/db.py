@@ -76,6 +76,10 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE questions ADD COLUMN inbox_message_id INTEGER;
     CREATE INDEX idx_question_inbox ON questions(inbox_message_id);
     """,
+    """
+    ALTER TABLE questions RENAME COLUMN inbox_message_id TO card_message_id;
+    ALTER TABLE codex_threads ADD COLUMN run_state TEXT;
+    """,
 )
 
 

@@ -153,7 +153,6 @@ def test_router_forwards_only_registered_open_topics_to_the_dialog_and_replies_i
             # never forwarded: service topics, unknown/general topics, other commands handled by the Bridge,
             # strangers, bots, forwarded messages
             fake.push_message("free text", st.control_topic)
-            fake.push_message("free text", st.inbox_topic)
             fake.push_message("free text", 9999)
             fake.push_message("free text", None)
             fake.push_message("hi", topic, user_id=STRANGER)

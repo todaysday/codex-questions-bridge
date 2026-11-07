@@ -1,4 +1,7 @@
-"""Thread list view: renders registry DTOs into (text, inline keyboard)."""
+"""Thread list view: renders registry DTOs into (text, inline keyboard).
+
+Row markers: ❓ a question is pending, ⚙️ the thread is working right now (both may apply).
+"""
 
 from cqb.domain.enums import ConsultantState
 from cqb.services.registry import RegistryPage, RegistryRow
@@ -14,7 +17,8 @@ CONSULTANT_MARK = {
     ConsultantState.ERROR: "⚠️",
     ConsultantState.CREATING: "⏳",
 }
-FRESH_SECONDS = 86400
+QUESTION_MARK = "❓"
+WORKING_MARK = "⚙️"
 
 
 def thread_name(row: RegistryRow) -> str:
@@ -28,14 +32,14 @@ def render_registry(page: RegistryPage, chat_id: int, now: int) -> View:
     lines: list[str] = []
     keyboard: list[tuple[Button, ...]] = []
     for n, row in enumerate(page.rows, start=1):
-        fresh = "🟢" if now - row.thread.updated_at < FRESH_SECONDS else "🟡"
-        extra = f" · ❓ {row.pending_questions}" if row.pending_questions else ""
+        marks = (QUESTION_MARK if row.pending_questions else "") + (WORKING_MARK if row.working else "")
         lines.append(
-            f"{n}. {fresh} {thread_name(row)}\n"
+            f"{n}. {marks + ' ' if marks else ''}{thread_name(row)}\n"
             f"   активность {when(row.thread.updated_at, now)} · "
-            f"консультант: {CONSULTANT_MARK[row.consultant_state]}{extra}"
+            f"консультант: {CONSULTANT_MARK[row.consultant_state]}"
         )
-        keyboard.append(_row_buttons(n, row, chat_id, page.archived))
+        if buttons := _row_buttons(n, row, chat_id, page.archived):
+            keyboard.append(buttons)
     if not page.rows:
         lines.append(f"Нет тредов за последние {page.recency_days} дн.")
     keyboard.append(_nav_buttons(page))
@@ -49,7 +53,6 @@ def _row_buttons(n: int, row: RegistryRow, chat_id: int, archived: bool) -> tupl
         buttons.append(Button(_label(f"{n}. 💬 Открыть"), url=link))
     elif not archived and row.consultant_state not in (ConsultantState.OPEN, ConsultantState.ARCHIVED):
         buttons.append(Button(_label(f"{n}. ➕ Создать консультанта"), ActionSpec("create", row.thread.thread_id)))
-    buttons.append(Button(_label(f"{n}. ℹ️ Подробнее"), ActionSpec("status", row.thread.thread_id)))
     return tuple(buttons)
 
 
@@ -58,7 +61,6 @@ def _nav_buttons(page: RegistryPage) -> tuple[Button, ...]:
     buttons: list[Button] = []
     if page.page > 0:
         buttons.append(Button("◀️", ActionSpec("page", payload=f"{page.page - 1}:{a}")))
-    buttons.append(Button("🔄 Обновить", ActionSpec("refresh")))
     if page.has_next:
         buttons.append(Button("▶️", ActionSpec("page", payload=f"{page.page + 1}:{a}")))
     other = "📋 Активные" if page.archived else "📦 Архивные"

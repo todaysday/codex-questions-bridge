@@ -66,14 +66,14 @@ class QuestionService:
     def open_count(self) -> int:
         return sum(self._questions.open_counts_by_root(self._source).values())
 
-    def open_without_card(self, limit: int = 50) -> list[Question]:
-        return self._questions.list_open_without_card(self._source, limit)
+    def postable_without_card(self, limit: int = 50) -> list[Question]:
+        return self._questions.list_postable(self._source, limit)
 
-    def bind_inbox_message(self, question_id: str, message_id: int | None) -> None:
-        self._questions.set_inbox_message(question_id, message_id)
+    def bind_card_message(self, question_id: str, message_id: int | None) -> None:
+        self._questions.set_card_message(question_id, message_id)
 
-    def by_inbox_message(self, message_id: int) -> Question | None:
-        return self._questions.find_by_inbox_message(message_id)
+    def by_card_message(self, message_id: int) -> Question | None:
+        return self._questions.find_by_card_message(message_id)
 
     async def handle(self, event: Event) -> None:
         match event:

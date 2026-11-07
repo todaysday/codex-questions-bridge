@@ -28,7 +28,6 @@ class DbConfig:
 class TelegramConfig:
     chat_id: int
     control_topic_name: str
-    inbox_topic_name: str
     allowed_user_ids: tuple[int, ...]
     registry_refresh_seconds: int
 
@@ -94,7 +93,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
     codex = _section(raw, "codex", {"socket", "source_id", "poll_interval_seconds", "recency_days", "codex_home"})
     db = _section(raw, "db", {"path"})
     tg = _section(raw, "telegram", {
-        "chat_id", "control_topic_name", "inbox_topic_name", "allowed_user_ids",
+        "chat_id", "control_topic_name", "allowed_user_ids",
         "registry_refresh_seconds",
     })
     return Config(
@@ -112,9 +111,8 @@ def parse_config(raw: dict[str, Any]) -> Config:
         telegram=TelegramConfig(
             chat_id=_chat_id(tg.get("chat_id")),
             control_topic_name=_topic_name(tg, "control_topic_name", "📋 Треды Codex"),
-            inbox_topic_name=_topic_name(tg, "inbox_topic_name", "📥 Inbox"),
             allowed_user_ids=_user_ids(tg.get("allowed_user_ids")),
-            registry_refresh_seconds=_int(tg, "telegram", "registry_refresh_seconds", 30, 5, 3600),
+            registry_refresh_seconds=_int(tg, "telegram", "registry_refresh_seconds", 5, 5, 3600),
         ),
     )
 

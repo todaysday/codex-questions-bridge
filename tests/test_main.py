@@ -15,7 +15,7 @@ QUESTION = [{"id": "pick", "header": "Storage", "question": "Where store setting
 def make_config(tmp_path, socket):
     return Config(
         CodexConfig(socket, "local", 30, 36500), DbConfig(str(tmp_path / "c.db")),
-        TelegramConfig(CHAT_ID, "📋 Треды Codex", "📥 Inbox", (OWNER,), 5),
+        TelegramConfig(CHAT_ID, "📋 Треды Codex", (OWNER,), 0.1)  # a short coalescing window keeps the test fast,
     )
 
 
@@ -30,35 +30,40 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
             make_config(tmp_path, app.path), stop, token=TOKEN, telegram_base_url=tg.base_url, rss_interval=60))
         check = db.connect(str(tmp_path / "c.db"))
         control = lambda: tg.topic_named("📋 Треды Codex")[0]  # noqa: E731
-        await wait_until(lambda: tg.topic_named("📋 Треды Codex") and tg.topic_named("📥 Inbox"))
+        await wait_until(lambda: tg.topic_named("📋 Треды Codex"))
+        assert tg.topic_named("📥 Inbox") == []  # there is no Inbox topic any more
         await wait_until(lambda: "thread/list" in app.methods())
         await wait_until(lambda: check.execute("SELECT archive_state FROM codex_threads").fetchone())
-        tg.push_message("/threads", control())  # the periodic refresh is slow; ask for it
+        tg.push_message("/threads", control())  # re-render now
         registry = lambda: next(m for m in tg.live_messages(control()))  # noqa: E731
         await wait_until(lambda: "FoxProfile" in registry()["text"] or False)
         assert tg.pinned
 
-        # a live question becomes an Inbox card; the owner answers from Telegram
+        # a live question without a consultant: no card anywhere, the registry row just shows the marker
         await app.ask("t1", "u1", "i1", QUESTION)
-        inbox = tg.topic_named("📥 Inbox")[0]
-        await wait_until(lambda: any("Where store settings?" in m["text"] for m in tg.live_messages(inbox)))
-        card_id = next(i for i, m in tg.messages.items() if m["thread_id"] == inbox)
-        tg.push_callback(tg.button(card_id, "B.")["callback_data"], card_id)
-        await wait_until(lambda: "Выбрано: B" in tg.messages[card_id]["text"])
-        tg.push_callback(tg.button(card_id, "Отправить")["callback_data"], card_id)
-        await wait_until(lambda: app.answers == [{"answers": {"pick": {"answers": ["B"]}}}])
-        await wait_until(lambda: "✅ Доставлено" in tg.messages[card_id]["text"])
+        await wait_until(lambda: "❓ FoxProfile" in registry()["text"])
+        assert not [m for m in tg.messages.values() if "Where store settings?" in m["text"]]
+        assert len(tg.live_messages(control())) == 1
 
-        # manual consultant creation from the registry
+        # manual consultant creation from the registry: the pending question's card appears in its topic
         reg_id = next(i for i, m in tg.messages.items() if m["thread_id"] == control())
         await wait_until(lambda: any("Создать" in b["text"] for b in tg.buttons(reg_id)))
         tg.push_callback(tg.button(reg_id, "Создать")["callback_data"], reg_id)
         await wait_until(lambda: tg.topic_named("FoxProfile"))
         assert check.execute("SELECT state FROM consultants").fetchone()[0] == "open"
         assert len(tg.topic_named("FoxProfile")) == 1
+        fox = tg.topic_named("FoxProfile")[0]
+        await wait_until(lambda: any("Where store settings?" in m["text"] for m in tg.live_messages(fox)))
+        card_id = next(i for i, m in tg.messages.items() if m["thread_id"] == fox and "Where store" in m["text"])
+        tg.push_callback(tg.button(card_id, "B.")["callback_data"], card_id)
+        await wait_until(lambda: "Выбрано: B" in tg.messages[card_id]["text"])
+        tg.push_callback(tg.button(card_id, "Отправить")["callback_data"], card_id)
+        await wait_until(lambda: app.answers == [{"answers": {"pick": {"answers": ["B"]}}}])
+        await wait_until(lambda: "✅ Доставлено" in tg.messages[card_id]["text"])
+        await wait_until(lambda: "❓" not in registry()["text"])  # resolved: the marker is gone
+        assert len(tg.live_messages(control())) == 1  # one registry message, nothing else, all along
 
         # /status in the consultant topic: deterministic card from the (fake) daemon, never relayed
-        fox = tg.topic_named("FoxProfile")[0]
         tg.push_message("/status", fox)
         await wait_until(lambda: any("📊 Статус" in m["text"] for m in tg.live_messages(fox)))
         card = next(m["text"] for m in tg.live_messages(fox) if "📊 Статус" in m["text"])

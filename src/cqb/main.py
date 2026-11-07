@@ -35,8 +35,8 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.services.status import StatusService
 from cqb.telegram.api import API_BASE, BotApi
+from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
-from cqb.telegram.inbox import InboxCards
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
 from cqb.telegram.status_card import StatusCards
@@ -96,12 +96,6 @@ async def run(
 
     client = AppServerClient(config.codex.socket)
     questions = QuestionService(client, question_dao, threads, source_id)
-    inventory = InventoryService(
-        client, threads, source_id,
-        poll_interval=config.codex.poll_interval_seconds,
-        recency_days=config.codex.recency_days,
-        on_waiting=questions.watch_thread,
-    )
     api = BotApi(token, base_url=telegram_base_url)
     closers: list[Callable[[], Awaitable[None]]] = [api.close]
     gateway: PicoGateway | None = None
@@ -109,15 +103,27 @@ async def run(
     try:
         me = await api.get_me()  # fails fast on a bad token
         keys = ActionKeys(ActionDao(conn), source_id)
-        registry = RegistryQuery(threads, consultant_dao, question_dao, source_id, config.codex.recency_days)
-        topics = ControlTopics(api, state, tg.chat_id, tg.control_topic_name, tg.inbox_topic_name)
+        # registry and publisher are bound below; the callback only runs on later broadcasts
+        live = LiveState(on_working_flip=lambda thread_id: registry.is_root(thread_id) and publisher.request_refresh())
+        registry = RegistryQuery(
+            threads, consultant_dao, question_dao, source_id, config.codex.recency_days, live=live
+        )
+        topics = ControlTopics(api, state, tg.chat_id, tg.control_topic_name)
         tg_topics = TelegramTopics(api, tg.chat_id)
-        consultants = ConsultantService(consultant_dao, threads, tg_topics, source_id, tg.chat_id)
         publisher = RegistryPublisher(
             api, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds
         )
-        inbox = InboxCards(api, topics, keys, questions, registry, tg.chat_id, publisher.request_refresh)
-        live = LiveState()
+        cards = QuestionCards(api, keys, questions, registry, tg.chat_id, publisher.request_refresh)
+        consultants = ConsultantService(
+            consultant_dao, threads, tg_topics, source_id, tg.chat_id, on_open=cards.mark_root
+        )
+        inventory = InventoryService(
+            client, threads, source_id,
+            poll_interval=config.codex.poll_interval_seconds,
+            recency_days=config.codex.recency_days,
+            on_waiting=questions.watch_thread,
+            on_change=publisher.request_refresh,
+        )
         home = config.codex.codex_home
         reader = DaemonStatusReader(client)
         status = StatusCards(
@@ -140,11 +146,11 @@ async def run(
             log.info("consultant chat is not configured: no [pico] section")
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
-            api, keys, topics, publisher, inbox, consultants, tg_topics, registry, questions,
+            api, keys, topics, publisher, cards, consultants, tg_topics, registry, questions,
             ConsultantRelay(gateway, tg_topics), status, source_id, inventory.poke,
         )
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
-        questions.subscribe(on_question=inbox.on_question, on_resolved=inbox.on_resolved)
+        questions.subscribe(on_question=cards.on_question, on_resolved=cards.on_resolved)
 
         if mcp is not None:
             await mcp.start()
@@ -163,7 +169,7 @@ async def run(
             asyncio.create_task(inventory.run(), name="inventory"),
             asyncio.create_task(poller.run(), name="telegram-poll"),
             asyncio.create_task(publisher.run(before=consultants.reconcile), name="registry"),
-            asyncio.create_task(inbox.run(), name="inbox"),
+            asyncio.create_task(cards.run(), name="cards"),
             *([asyncio.create_task(gateway.run(), name="pico-gateway")] if gateway else []),
             asyncio.create_task(
                 _log_rss(rss_interval, lambda: (consultants.open_count(), questions.open_count())), name="rss"

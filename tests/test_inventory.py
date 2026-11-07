@@ -2,7 +2,8 @@ import asyncio
 
 from conftest import connected_client
 from cqb.dao.threads import ThreadDao
-from cqb.domain.enums import ArchiveState
+from cqb.codex.events import ThreadArchiveChanged
+from cqb.domain.enums import ArchiveState, RunState
 from cqb.services.inventory import InventoryService
 
 NOW = 1_000_000
@@ -114,4 +115,24 @@ def test_poll_while_disconnected_raises_not_connected(conn):
     async def main():
         with pytest.raises(NotConnected):
             await make(AppServerClient("/nonexistent"), conn).poll_once()
+    asyncio.run(main())
+
+
+def test_poll_stores_the_run_state_and_reports_changes(conn):
+    async def main():
+        async with connected_client() as (client, fake):
+            fake.add_thread("root", NOW - 10)
+            fake.add_thread("busy", NOW - 20)
+            fake.threads["busy"]["status"] = {"type": "active", "activeFlags": []}
+            fake.add_thread("waits", NOW - 30)
+            fake.threads["waits"]["status"] = {"type": "active", "activeFlags": ["waitingOnUserInput"]}
+            changes = []
+            inv = make(client, conn, on_change=lambda: changes.append(1))
+            await inv.poll_once()
+            dao = ThreadDao(conn)
+            assert [dao.get("s1", t).run_state for t in ("root", "busy", "waits")] == [
+                RunState.IDLE, RunState.WORKING, RunState.WAITING_INPUT]
+            assert changes == [1]  # one notification per poll
+            await inv.handle(ThreadArchiveChanged("root", True))
+            assert changes == [1, 1] and dao.get("s1", "root").archive_state is ArchiveState.ARCHIVED
     asyncio.run(main())

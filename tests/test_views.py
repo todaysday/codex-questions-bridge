@@ -7,7 +7,7 @@ from cqb.domain.enums import ArchiveState, ConsultantState as S, QuestionLifecyc
 from cqb.domain.models import Question, QuestionItem, QuestionOption, Thread
 from cqb.services.registry import RegistryPage, RegistryRow
 from cqb.telegram.fmt import CALLBACK_LIMIT, TEXT_LIMIT, callback_key, topic_link
-from cqb.telegram.inbox_view import SECRET_NOTICE, render_card
+from cqb.telegram.card_view import SECRET_NOTICE, render_card
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import ActionSpec
 from cqb.telegram.registry_view import PAGE_SIZE, render_registry
@@ -26,10 +26,10 @@ def utc(monkeypatch):
     time.tzset()
 
 
-def row(n=1, state=None, topic=None, pending=0, name="FoxProfile — User Access", updated=NOW - 300):
+def row(n=1, state=None, topic=None, pending=0, name="FoxProfile — User Access", updated=NOW - 300, working=False):
     t = Thread("s1", f"thread-{n:04d}", f"thread-{n:04d}", None, "cli", name, "/w", updated,
                ArchiveState.ACTIVE, 1, 1)
-    return RegistryRow(t, state, topic, pending)
+    return RegistryRow(t, state, topic, pending, working)
 
 
 def page(rows, p=0, nxt=False, archived=False):
@@ -53,19 +53,36 @@ def test_registry_page_text_and_buttons():
         row(3, S.ERROR), row(4, S.ARCHIVED, 56),
     ], nxt=True), CHAT, NOW)
     assert view.header == f"📋 Активные треды Codex · обновлено {time.strftime('%H:%M', time.gmtime(NOW))}"
-    assert "1. 🟢 FoxProfile — User Access" in view.text
-    assert "консультант: —" in view.text and "консультант: ✅ · ❓ 2" in view.text
-    assert "🟡 AVIP" in view.text and "⚠️" in view.text and "🔒" in view.text
-    texts = [b.text for b in buttons(view)]
-    assert "1. ➕ Создать консультанта" in texts and "2. 💬 Открыть" in texts
-    assert "3. ➕ Создать консультанта" in texts  # an error is retried by a click
-    assert "4. 💬 Открыть" in texts and texts.count("2. ℹ️ Подробнее") == 1
+    assert "1. FoxProfile — User Access" in view.text
+    assert "консультант: —" in view.text and "2. ❓ AVIP" in view.text and "консультант: ✅" in view.text
+    assert "⚠️" in view.text and "🔒" in view.text
+    assert "🟢" not in view.text and "🟡" not in view.text  # the old freshness icons are gone
+    texts = [b.text for row_ in view.keyboard[:-1] for b in row_]
+    assert texts == ["1. ➕ Создать консультанта", "2. 💬 Открыть", "3. ➕ Создать консультанта", "4. 💬 Открыть"]
     opens = {b.text: b.url for b in buttons(view) if b.url}
     assert opens["2. 💬 Открыть"] == "https://t.me/c/1234567890/55"
     nav = [b.text for b in view.keyboard[-1]]
-    assert nav == ["🔄 Обновить", "▶️", "📦 Архивные"]
+    assert nav == ["▶️", "📦 Архивные"]  # no refresh button
     create = next(b for b in buttons(view) if b.text.startswith("1. ➕"))
     assert create.action == ActionSpec("create", "thread-0001")
+    assert not any(b.action and b.action.action in ("status", "refresh") for b in buttons(view))
+    assert not any("🔄" in b.text or "ℹ️" in b.text for b in buttons(view))
+
+
+def test_registry_row_markers_question_working_and_both():
+    view = render_registry(page([
+        row(1, pending=1), row(2, working=True), row(3, pending=2, working=True), row(4),
+    ]), CHAT, NOW)
+    lines = [ln for ln in view.text.splitlines() if ln[:2] in ("1.", "2.", "3.", "4.")]
+    assert lines[0].startswith("1. ❓ ") and "⚙️" not in lines[0]
+    assert lines[1].startswith("2. ⚙️ ") and "❓" not in lines[1]
+    assert lines[2].startswith("3. ❓⚙️ ")
+    assert lines[3].startswith("4. FoxProfile") and "❓" not in lines[3] and "⚙️" not in lines[3]
+
+
+def test_archived_row_without_consultant_has_no_buttons_and_no_empty_keyboard_row():
+    view = render_registry(page([row(1)], archived=True), CHAT, NOW)
+    assert len(view.keyboard) == 1 and all(len(r) > 0 for r in view.keyboard)  # only the navigation row
 
 
 def test_registry_pagination_and_archive_toggle():
@@ -118,68 +135,67 @@ def q(**kw):
     return Question(**{**base, **kw})
 
 
-def test_card_pending_has_option_buttons_and_consultant_button():
-    v = render_card(q(), "FoxProfile", row(1), CHAT)
+def test_card_pending_has_option_buttons():
+    v = render_card(q(), "FoxProfile")
     assert v.header == f"❓ FoxProfile · {time.strftime('%H:%M', time.gmtime(NOW))}"
     assert "request_user_input · q_1 · pending_confirmed" in v.text
     assert "Where store profile settings?" in v.text and "A. Existing table — reuse" in v.text
     texts = [b.text for b in buttons(v)]
-    assert texts == ["A. Existing table", "B. Separate table", "➕ Создать консультанта"]
+    assert texts == ["A. Existing table", "B. Separate table"]  # the card lives in the consultant topic
     assert buttons(v)[0].action == ActionSpec("opt", "thread-0001", "q_1:0")
 
 
-def test_card_other_and_linked_consultant():
-    v = render_card(q(items=(QuestionItem("a", "", "Name?", True, ()),)), "T", row(1, S.OPEN, 8), CHAT)
-    assert [b.text for b in buttons(v)] == ["✍️ Другое", "💬 Открыть консультанта"]
+def test_card_other_offers_reply_hint():
+    v = render_card(q(items=(QuestionItem("a", "", "Name?", True, ()),)), "T")
+    assert [b.text for b in buttons(v)] == ["✍️ Другое"]
     assert "ответьте на это сообщение" in v.text.lower()
-    assert buttons(v)[1].url == "https://t.me/c/1234567890/8"
 
 
 def test_card_secret_has_no_text_and_no_buttons():
     secret = q(is_secret=True, items=())
-    v = render_card(secret, "FoxProfile", row(1), CHAT)
+    v = render_card(secret, "FoxProfile")
     assert v.body == SECRET_NOTICE and v.keyboard == ()
     assert "Where" not in v.text and "q_1" not in v.text
 
 
 def test_card_staged_asks_for_confirmation():
-    v = render_card(q(lifecycle=L.DECISION_STAGED, staged={"a": ("Separate table",)}), "T", row(1), CHAT)
+    v = render_card(q(lifecycle=L.DECISION_STAGED, staged={"a": ("Separate table",)}), "T")
     assert "Выбрано: Separate table" in v.text and "Отправить этот ответ в Codex?" in v.text
     assert [b.text for b in buttons(v)][:2] == ["✅ Отправить в Codex", "↩️ Отмена"]
 
 
 def test_card_delivered_only_after_resolved():
     sent = q(lifecycle=L.DECISION_STAGED, staged={"a": ("A",)}, delivered_to_codex=True)
-    v = render_card(sent, "T", row(1), CHAT)
+    v = render_card(sent, "T")
     assert "ждём подтверждения" in v.text and "Доставлено" not in v.text
     assert not any(b.action and b.action.action in ("opt", "send") for b in buttons(v))
-    done = render_card(dataclasses.replace(sent, lifecycle=L.RESOLVED_OBSERVED), "T", row(1), CHAT)
+    done = render_card(dataclasses.replace(sent, lifecycle=L.RESOLVED_OBSERVED), "T")
     assert "✅ Доставлено" in done.text and done.keyboard == ()
 
 
 def test_card_answered_elsewhere_and_stale():
-    elsewhere = render_card(q(lifecycle=L.RESOLVED_OBSERVED), "T", row(1), CHAT)
+    elsewhere = render_card(q(lifecycle=L.RESOLVED_OBSERVED), "T")
     assert "отвечено в другом месте" in elsewhere.text and elsewhere.keyboard == ()
     assert "Доставлено" not in elsewhere.text
-    stale = render_card(q(lifecycle=L.EXPIRED_OR_STALE), "T", row(1), CHAT)
+    stale = render_card(q(lifecycle=L.EXPIRED_OR_STALE), "T")
     assert "устарел" in stale.text and stale.keyboard == ()
 
 
 def test_card_without_live_request_offers_no_answer_buttons():
-    v = render_card(q(lifecycle=L.CAPTURED), "T", row(1), CHAT)
+    v = render_card(q(lifecycle=L.CAPTURED), "T")
     assert not any(b.action and b.action.action == "opt" for b in buttons(v))
     assert "ответ пока невозможен" in v.text
 
 
 def test_card_multiple_items_is_read_only():
     items = tuple(QuestionItem(str(i), "", f"Q{i}?", False, (QuestionOption("A"),)) for i in range(2))
-    v = render_card(q(items=items), "T", row(1), CHAT)
+    v = render_card(q(items=items), "T")
     assert "ответьте в Codex" in v.text and not any(b.action.action == "opt" for b in buttons(v) if b.action)
 
 
 def test_card_limits_with_huge_question():
     opts = tuple(QuestionOption("L" * 500, "D" * 2000) for _ in range(40))
     huge = q(items=(QuestionItem("a", "H" * 900, "T" * 20000, True, opts),))
-    v = render_card(huge, "N" * 900, row(1), CHAT)
+    v = render_card(huge, "N" * 900)
     assert len(v.text) <= TEXT_LIMIT and all(len(b.text) <= 64 for b in buttons(v))
     assert len([b for b in buttons(v) if b.action.action == "opt" if b.action]) == 10

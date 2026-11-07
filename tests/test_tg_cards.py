@@ -1,9 +1,9 @@
-"""Inbox card flows with the real QuestionService (stub app-server client) and a fake Telegram."""
+"""Question card flows (cards live in the consultant topic) with the real QuestionService and a fake Telegram."""
 
 import asyncio
 
 from cqb.codex.events import TurnEnded
-from cqb.domain.enums import QuestionLifecycle as L
+from cqb.domain.enums import ArchiveState, QuestionLifecycle as L
 from cqb.domain.models import QuestionItem
 from tg_stack import make_stack, thread
 
@@ -22,7 +22,15 @@ def press(st, qid, part):
     return st.fake.push_callback(st.fake.button(st.card_of(qid), part)["callback_data"], st.card_of(qid))
 
 
+async def topic_of(st, root="r1"):
+    """The root's consultant topic; the consultant is created on first use."""
+    if st.consultant_dao.get("s1", root) is None:
+        await st.open_consultant(root)
+    return st.consultant_dao.get("s1", root).tg_topic_id
+
+
 async def posted(st, thread_id="r1", item_id="i1", **kw):
+    await topic_of(st, thread_id)
     await st.ask(thread_id, item_id, **kw)
     await st.settle()
     return st.qid_of(item_id)
@@ -33,7 +41,7 @@ def test_normal_question_stage_confirm_answer_then_resolved_card(conn):
         async with make_stack(conn, thread("r1", name="FoxProfile — User Access")) as st:
             qid = await posted(st)
             fake, card = st.fake, st.card_of(qid)
-            assert fake.messages[card]["thread_id"] == st.inbox_topic
+            assert fake.messages[card]["thread_id"] == st.consultant_dao.get("s1", "r1").tg_topic_id
             text = card_text(st, qid)
             assert text.startswith("❓ FoxProfile — User Access") and "Where store profile settings?" in text
             assert "A. Existing table" in text and "pending_confirmed" in text
@@ -147,8 +155,9 @@ def test_other_answer_by_replying_to_the_card(conn):
             await st.pump()
             assert any(a["callback_query_id"] == q and "Ответьте на сообщение" in a["text"]
                        for a in st.fake.callback_answers)
-            st.fake.push_message("my own option", st.inbox_topic, reply_to=card)
+            st.fake.push_message("my own option", await topic_of(st), reply_to=card)
             await st.pump()
+            assert st.relay.got == []  # a reply to a card is an answer, never consultant chat
             assert "Выбрано: my own option" in card_text(st, qid)
             press(st, qid, "Отправить в Codex")
             await st.pump()
@@ -157,35 +166,43 @@ def test_other_answer_by_replying_to_the_card(conn):
     run(main())
 
 
-def test_replies_are_ignored_for_unauthorized_secret_or_non_other_questions(conn):
+def test_replies_to_cards_are_answers_or_refused_but_never_chat(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
+            topic = await topic_of(st)
             plain = await posted(st, item_id="i1")
             secret = await posted(st, item_id="i2", secret=True, request_id=2)
             other = await posted(st, item_id="i3", items=OTHER_ITEM, request_id=3)
-            st.fake.push_message("x", st.inbox_topic, reply_to=st.card_of(plain))
-            st.fake.push_message("x", st.inbox_topic, reply_to=st.card_of(secret))
-            st.fake.push_message("x", st.inbox_topic, reply_to=st.card_of(other), user_id=999)
-            st.fake.push_message("x", st.inbox_topic, reply_to=5)
+            st.fake.push_message("x", topic, reply_to=st.card_of(plain))
+            st.fake.push_message("hunter2", topic, reply_to=st.card_of(secret))
+            st.fake.push_message("x", topic, reply_to=st.card_of(other), user_id=999)
             await st.pump()
             for qid in (plain, secret, other):
                 assert st.question_dao.get(qid).staged is None
-            st.fake.push_message("y" * 1500, st.inbox_topic, reply_to=st.card_of(other))
+            assert st.relay.got == []  # in particular the "secret" never reaches the consultant model
+            texts = [m["text"] for m in st.fake.live_messages(topic)]
+            assert any("Секретный ввод" in t for t in texts) and any("используйте кнопки" in t for t in texts)
+            st.fake.push_message("hello consultant", topic, reply_to=5)  # reply to something that is no card
+            await st.pump()
+            assert st.relay.got == [("r1", "hello consultant")]
+            st.fake.push_message("y" * 1500, topic, reply_to=st.card_of(other))
             await st.pump()
             assert st.question_dao.get(other).staged is None
-            assert "Слишком длинный" in st.fake.live_messages(st.inbox_topic)[-1]["text"]
+            assert "Слишком длинный" in st.fake.live_messages(topic)[-1]["text"]
     run(main())
 
 
 def test_cards_are_updated_by_the_background_worker_without_blocking_events(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
-            worker = asyncio.create_task(st.inbox.run())
+            await topic_of(st)
+            worker = asyncio.create_task(st.cards.run())
             try:
+                st.publisher._wake.clear()
                 await st.ask("r1", "i1")
                 for _ in range(100):
                     await asyncio.sleep(0.02)
-                    if st.question_dao.get(st.open_ids()[0]).inbox_message_id:
+                    if st.question_dao.get(st.open_ids()[0]).card_message_id:
                         break
                 qid = st.open_ids()[0]
                 assert "Where store profile settings?" in card_text(st, qid)
@@ -195,7 +212,7 @@ def test_cards_are_updated_by_the_background_worker_without_blocking_events(conn
                     if "другом месте" in card_text(st, qid):
                         break
                 assert "отвечено в другом месте" in card_text(st, qid)
-                assert st.publisher._wake.is_set()  # the registry is asked to refresh its pending counts
+                assert st.publisher._wake.is_set()  # the registry row loses its ❓
             finally:
                 worker.cancel()
                 await asyncio.gather(worker, return_exceptions=True)
@@ -205,17 +222,17 @@ def test_cards_are_updated_by_the_background_worker_without_blocking_events(conn
 def test_question_captured_before_telegram_was_up_gets_its_card_at_startup(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
-            st.questions.subscribe()  # the card hook missed this one (no marking)
-            st.inbox.mark = lambda qid: None  # simulate Telegram down: nothing marked
+            await topic_of(st)
+            st.cards.mark = lambda qid: None  # simulate Telegram down: nothing marked
             await st.ask("r1", "i1")
             qid = st.open_ids()[0]
             assert st.card_of(qid) is None
-            del st.inbox.mark
-            worker = asyncio.create_task(st.inbox.run())
+            del st.cards.mark
+            worker = asyncio.create_task(st.cards.run())
             try:
                 for _ in range(100):
                     await asyncio.sleep(0.02)
-                    if st.question_dao.get(qid).inbox_message_id:
+                    if st.question_dao.get(qid).card_message_id:
                         break
                 assert st.card_of(qid) is not None
             finally:
@@ -230,25 +247,76 @@ def test_deleted_card_is_posted_again_while_open_but_not_when_finished(conn):
             qid = await posted(st)
             old = st.card_of(qid)
             st.fake.delete_message(old)
-            await st.inbox.refresh_card(qid)
+            await st.cards.refresh_card(qid)
             assert st.card_of(qid) != old and "Where" in card_text(st, qid)
             gone = st.card_of(qid)
             st.fake.delete_message(gone)
             await st.resolve("r1")
-            await st.inbox.refresh_card(qid)
+            await st.cards.refresh_card(qid)
             assert st.card_of(qid) == gone  # nothing actionable to repost
     run(main())
 
 
-def test_card_creates_consultant_button_and_switches_to_open_link(conn):
+def test_no_open_consultant_means_no_card_and_a_question_mark_in_the_registry(conn):
     async def main():
         async with make_stack(conn, thread("r1", name="Fox")) as st:
-            qid = await posted(st)
-            press(st, qid, "Создать консультанта")
-            await st.pump()
+            before = len(st.fake.methods("sendMessage"))
+            await st.ask("r1", "i1")
             await st.settle()
-            topic = st.consultant_dao.get("s1", "r1").tg_topic_id
-            assert st.fake.button(st.card_of(qid), "Открыть консультанта")["url"].endswith(f"/{topic}")
+            qid = st.qid_of("i1")
+            assert st.card_of(qid) is None and len(st.fake.methods("sendMessage")) == before  # nothing anywhere
+            assert "❓ Fox" in st.fake.messages[st.registry_message]["text"]
+            assert len(st.control_messages()) == 1  # no alert next to the registry
+            await st.resolve("r1")
+            await st.settle()
+            assert st.card_of(qid) is None and len(st.fake.methods("sendMessage")) == before
+            assert "❓" not in st.fake.messages[st.registry_message]["text"]
+    run(main())
+
+
+def test_pending_cards_are_posted_when_a_consultant_is_created_later(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), thread("r2", name="Other")) as st:
+            await st.ask("r1", "i1")
+            await st.ask("r1", "i2", request_id=2)
+            await st.ask("r2", "i3", request_id=3)
+            await st.resolve("r1", request_id=2)  # already finished: no card for it
+            await st.settle()
+            assert [st.card_of(st.qid_of(i)) for i in ("i1", "i2", "i3")] == [None] * 3
+            topic = await st.open_consultant("r1")
+            await st.settle()
+            assert "Where store profile settings?" in card_text(st, st.qid_of("i1"))
+            assert st.fake.messages[st.card_of(st.qid_of("i1"))]["thread_id"] == topic
+            assert st.card_of(st.qid_of("i2")) is None and st.card_of(st.qid_of("i3")) is None
+            assert len(st.control_messages()) == 1
+    run(main())
+
+
+def test_cards_follow_the_consultant_state_archived_gets_none_reopened_gets_them(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox")) as st:
+            topic = await topic_of(st)
+            st.threads.set_archive_state("s1", "r1", ArchiveState.ARCHIVED, 1)
+            await st.consultants.reconcile()  # the consultant (and its topic) is closed
+            assert st.fake.topics[topic]["closed"] is True
+            before = len(st.fake.methods("sendMessage"))
+            await st.ask("r1", "i1")
+            await st.settle()
+            assert st.card_of(st.qid_of("i1")) is None and len(st.fake.methods("sendMessage")) == before
+            st.threads.set_archive_state("s1", "r1", ArchiveState.ACTIVE, 2)
+            await st.consultants.reconcile()  # reopened: the pending question gets its card in the same topic
+            await st.settle()
+            assert st.fake.messages[st.card_of(st.qid_of("i1"))]["thread_id"] == topic
+    run(main())
+
+
+def test_card_of_an_unfinished_consultant_is_not_posted_while_creating(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            st.consultant_dao.reserve("s1", "r1", -1001234567890, "k", 1)  # CREATING: no topic yet
+            await st.ask("r1", "i1")
+            await st.settle()
+            assert st.card_of(st.qid_of("i1")) is None
     run(main())
 
 

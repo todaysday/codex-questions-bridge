@@ -150,6 +150,7 @@ def thread_from_wire(raw: dict[str, Any], source_id: str, now: int) -> Thread:
         archive_state=ArchiveState.UNKNOWN,
         archive_verified_at=None,
         last_seen_at=now,
+        run_state=run_state(raw["status"]) if isinstance(raw.get("status"), dict) else None,
     )
 
 

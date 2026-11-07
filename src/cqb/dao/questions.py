@@ -105,21 +105,24 @@ class QuestionDao:
             (lifecycle.value, now, question_id),
         )
 
-    def set_inbox_message(self, question_id: str, message_id: int | None) -> None:
+    def set_card_message(self, question_id: str, message_id: int | None) -> None:
         self._conn.execute(
-            "UPDATE questions SET inbox_message_id=? WHERE question_id=?", (message_id, question_id)
+            "UPDATE questions SET card_message_id=? WHERE question_id=?", (message_id, question_id)
         )
 
-    def find_by_inbox_message(self, message_id: int) -> Question | None:
+    def find_by_card_message(self, message_id: int) -> Question | None:
         row = self._conn.execute(
-            "SELECT * FROM questions WHERE inbox_message_id=?", (message_id,)
+            "SELECT * FROM questions WHERE card_message_id=?", (message_id,)
         ).fetchone()
         return _to_question(row) if row else None
 
-    def list_open_without_card(self, source_id: str, limit: int = 50) -> list[Question]:
+    def list_postable(self, source_id: str, limit: int = 50) -> list[Question]:
+        """Open questions without a card whose root has an open consultant topic to post it in."""
         rows = self._conn.execute(
-            f"SELECT * FROM questions WHERE source_id=? AND inbox_message_id IS NULL "
-            f"AND lifecycle IN ({_OPEN}) ORDER BY created_at LIMIT ?",
+            f"SELECT q.* FROM questions q JOIN consultants c ON c.source_id=q.source_id "
+            f"AND c.root_thread_id=q.root_thread_id AND c.state='open' AND c.tg_topic_id IS NOT NULL "
+            f"WHERE q.source_id=? AND q.card_message_id IS NULL AND q.lifecycle IN ({_OPEN}) "
+            f"ORDER BY q.created_at LIMIT ?",
             (source_id, limit),
         )
         return [_to_question(r) for r in rows]
@@ -182,5 +185,5 @@ def _to_question(r: sqlite3.Row) -> Question:
         delivered_to_codex=bool(r["delivered_to_codex"]),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
-        inbox_message_id=r["inbox_message_id"],
+        card_message_id=r["card_message_id"],
     )

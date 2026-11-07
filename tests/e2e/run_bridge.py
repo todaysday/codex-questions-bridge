@@ -15,7 +15,7 @@ from cqb.config import CodexConfig, Config, ConsultantTokens, DbConfig, McpConfi
 async def amain(spec: dict) -> None:
     config = Config(
         CodexConfig(spec["socket"], "local", 30, 36500), DbConfig(spec["db"]),
-        TelegramConfig(spec["chat_id"], "📋 Треды Codex", "📥 Inbox", (spec["owner"],), 5),
+        TelegramConfig(spec["chat_id"], "📋 Треды Codex", (spec["owner"],), 5),
         pico=PicoConfig(url=spec["pico_url"], idle_seconds=spec.get("idle", 120)), mcp=McpConfig(port=spec["mcp_port"]),
     )
     import os

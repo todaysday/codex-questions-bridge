@@ -2,10 +2,10 @@
 
 A single-process asyncio service that connects as an extra client to the shared Codex
 app-server daemon, inventories threads and captures live `request_user_input` questions.
-It also runs the Telegram control UI: a pinned thread registry, an Inbox with question cards,
-and manually created consultant topics. Messages typed in a consultant topic go to a long-running PicoClaw
+It also runs the Telegram control UI: one pinned, self-updating thread registry message and manually
+created consultant topics, which also carry the question cards of their thread. Messages typed in a consultant topic go to a long-running PicoClaw
 gateway (the consultant) over its `pico` WebSocket channel; the consultant reads Codex history through a
-read-only MCP server inside the same process. `/status` (and the registry button `ℹ️ Подробнее`) shows a deterministic status card
+read-only MCP server inside the same process. `/status` (in a consultant topic) shows a deterministic status card
 (no LLM, separate from the consultant).
 Logs carry ids and counts, never question or message text. Design: `doc/Codex_Questions_Bridge_Design.md`.
 
@@ -45,15 +45,24 @@ is the only Bot API wire code (one shared aiohttp session).
 5. Check without side effects: `CQB_TELEGRAM_TOKEN=... .venv/bin/python scripts/smoke_telegram.py config.toml`
    (calls only getMe, getChat, getChatMember).
 
-Commands: `/threads` (control topic: refresh now), `/questions` (Inbox: all; consultant topic: that thread),
-`/thread` (consultant topic), `/status` (consultant topic: status card; the registry
-button `ℹ️ Подробнее` posts the same card into the control topic). Root context/cache come from the tail of the
+The control topic `📋 Треды Codex` holds exactly one message (pinned, edited in place, never anything else posted by
+the bot). It has no refresh button: it is marked dirty by events (a question appears or resolves, a root starts or stops
+working, the thread list, its order or an archive state changes, a consultant is created, closed or reopened) and edited
+at most once per `registry_refresh_seconds` (default 5), and not at all when the rendered content is unchanged
+(a safety re-render runs every minute). Rows: `❓` a question is pending, `⚙️` the thread is working right now (status
+`active` without a waiting flag; live broadcast first, then the status of the last inventory poll); order: questions,
+working, then last activity. A question card is posted only in the consultant topic of its thread (when that consultant
+is open); without one the row just shows `❓`, and the card appears when a consultant is created or reopened.
+There is no Inbox topic; an old one in the group can simply be deleted by hand.
+
+Commands: `/threads` (control topic: re-render the message now; the command message is deleted if the bot may),
+`/questions` and `/thread` (consultant topic: that thread), `/status` (consultant topic: status card). Root context/cache come from the tail of the
 rollout file (`[codex] codex_home`, default `/root/.codex`; read-only, path-checked). Live check:
 `cd /tmp && sudo -n /path/.venv/bin/python /path/scripts/smoke_status.py`. Consultants are created only by the `Создать консультанта` button.
 
 Layout: `telegram/` holds `api` (Bot API client), `poller`, `router` (authorization and dispatch),
-`control` (service topics, registry message), `inbox` (question cards), `topics` (consultant topic port),
-`keys` (one-time callback ids), and the pure views `registry_view`, `inbox_view`, `consultant_view`.
+`control` (control topic, registry message), `cards` (question cards), `topics` (consultant topic port),
+`keys` (one-time callback ids), and the pure views `registry_view`, `card_view`, `consultant_view`.
 
 ## Memory and priority
 

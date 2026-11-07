@@ -2,7 +2,7 @@ import sqlite3
 from collections.abc import Iterable
 
 from cqb.dao.db import transaction
-from cqb.domain.enums import ArchiveState
+from cqb.domain.enums import ArchiveState, RunState
 from cqb.domain.models import Source, Thread
 
 
@@ -37,7 +37,7 @@ class ThreadDao:
                 self._conn.execute(
                     "INSERT INTO codex_threads(source_id, thread_id, root_thread_id, "
                     "parent_thread_id, source_kind, display_name, cwd, updated_at, "
-                    "archive_state, archive_verified_at, last_seen_at) VALUES (?,?,?,?,?,?,?,?,?,?,?) "
+                    "archive_state, archive_verified_at, last_seen_at, run_state) VALUES (?,?,?,?,?,?,?,?,?,?,?,?) "
                     "ON CONFLICT(source_id, thread_id) DO UPDATE SET "
                     "root_thread_id=excluded.root_thread_id, parent_thread_id=excluded.parent_thread_id, "
                     "source_kind=excluded.source_kind, display_name=excluded.display_name, "
@@ -45,11 +45,13 @@ class ThreadDao:
                     "archive_state=CASE WHEN excluded.archive_state='unknown' THEN archive_state "
                     "ELSE excluded.archive_state END, "
                     "archive_verified_at=CASE WHEN excluded.archive_state='unknown' THEN archive_verified_at "
-                    "ELSE excluded.archive_verified_at END",
+                    "ELSE excluded.archive_verified_at END, "
+                    "run_state=COALESCE(excluded.run_state, run_state)",
                     (
                         t.source_id, t.thread_id, t.root_thread_id, t.parent_thread_id,
                         t.source_kind, t.display_name, t.cwd, t.updated_at,
                         t.archive_state.value, t.archive_verified_at, t.last_seen_at,
+                        t.run_state.value if t.run_state else None,
                     ),
                 )
 
@@ -75,7 +77,7 @@ class ThreadDao:
         if since is not None:
             sql += " AND updated_at>=?"
             args.append(since)
-        sql += " ORDER BY updated_at DESC LIMIT ? OFFSET ?"
+        sql += " ORDER BY updated_at DESC, thread_id LIMIT ? OFFSET ?"
         args += [limit, offset]
         return [_to_thread(r) for r in self._conn.execute(sql, args)]
 
@@ -101,4 +103,5 @@ def _to_thread(r: sqlite3.Row) -> Thread:
         archive_state=ArchiveState(r["archive_state"]),
         archive_verified_at=r["archive_verified_at"],
         last_seen_at=r["last_seen_at"],
+        run_state=RunState(r["run_state"]) if r["run_state"] else None,
     )

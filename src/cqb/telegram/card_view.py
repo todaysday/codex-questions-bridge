@@ -1,10 +1,9 @@
-"""Inbox card view. Secret requests render a notice only: no text, no buttons."""
+"""Question card view (posted in the consultant topic). Secret requests render a notice only: no text, no buttons."""
 
-from cqb.domain.enums import ConsultantState, QuestionLifecycle as L
+from cqb.domain.enums import QuestionLifecycle as L
 from cqb.domain.models import Question, QuestionItem
-from cqb.services.registry import RegistryRow
-from cqb.telegram.fmt import BUTTON_TEXT_LIMIT, TEXT_LIMIT, clip, hhmm, topic_link
-from cqb.telegram.models import ActionSpec, Button, Keyboard, View
+from cqb.telegram.fmt import BUTTON_TEXT_LIMIT, TEXT_LIMIT, clip, hhmm
+from cqb.telegram.models import ActionSpec, Button, View
 
 QUESTION_LIMIT = 1500
 OPTION_LABEL_LIMIT = 100
@@ -18,15 +17,14 @@ SECRET_NOTICE = (
 OTHER_HINT = "Или ответьте на это сообщение своим текстом."
 
 
-def render_card(q: Question, thread_name: str, consultant: RegistryRow | None, chat_id: int) -> View:
+def render_card(q: Question, thread_name: str) -> View:
     header = f"❓ {clip(thread_name, 80)} · {hhmm(q.created_at)}"
     if q.is_secret:
         return View(header, SECRET_NOTICE)
     parts = [f"request_user_input · {q.question_id} · {q.lifecycle.value}"]
     parts += [_item_text(i, n if len(q.items) > 1 else None) for n, i in enumerate(q.items, start=1)]
     parts.append(_status(q))
-    keyboard = [*_answer_rows(q), *_consultant_row(q, consultant, chat_id)]
-    return View(header, clip("\n\n".join(p for p in parts if p), TEXT_LIMIT - 200), tuple(keyboard))
+    return View(header, clip("\n\n".join(p for p in parts if p), TEXT_LIMIT - 200), tuple(_answer_rows(q)))
 
 
 def _item_text(item: QuestionItem, n: int | None) -> str:
@@ -83,15 +81,6 @@ def _answer_rows(q: Question) -> list[tuple[Button, ...]]:
     if item.is_other:
         rows.append((Button("✍️ Другое", ActionSpec("other", root, q.question_id)),))
     return rows
-
-
-def _consultant_row(q: Question, row: RegistryRow | None, chat_id: int) -> Keyboard:
-    if q.lifecycle in (L.RESOLVED_OBSERVED, L.EXPIRED_OR_STALE):
-        return ()
-    if row is not None and row.consultant_state in (ConsultantState.OPEN, ConsultantState.ARCHIVED):
-        link = topic_link(chat_id, row.topic_id) if row.topic_id else None
-        return ((Button("💬 Открыть консультанта", url=link),),) if link else ()
-    return ((Button("➕ Создать консультанта", ActionSpec("create", q.root_thread_id)),),)
 
 
 def _letter(idx: int) -> str:

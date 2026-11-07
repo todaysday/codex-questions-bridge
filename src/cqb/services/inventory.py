@@ -35,6 +35,7 @@ class InventoryService:
         poll_interval: float,
         recency_days: int,
         on_waiting: Callable[[str], Awaitable[None]] | None = None,
+        on_change: Callable[[], None] | None = None,
         clock: Callable[[], float] = time.time,
         page_size: int = PAGE_SIZE,
         max_pages: int = MAX_PAGES,
@@ -45,6 +46,7 @@ class InventoryService:
         self._interval = poll_interval
         self._recency = recency_days * 86400
         self._on_waiting = on_waiting
+        self._on_change = on_change  # threads, their order or archive state may have changed
         self._clock = clock
         self._page_size = page_size
         self._max_pages = max_pages
@@ -74,12 +76,18 @@ class InventoryService:
         elif isinstance(event, ThreadArchiveChanged):
             state = ArchiveState.ARCHIVED if event.archived else ArchiveState.ACTIVE
             self._threads.set_archive_state(self._source, event.thread_id, state, int(self._clock()))
+            self._changed()
 
     async def poll_once(self) -> int:
         seen = 0
         for archived in (False, True):
             seen += await self._poll_list(archived)
+        self._changed()
         return seen
+
+    def _changed(self) -> None:
+        if self._on_change:
+            self._on_change()
 
     async def _poll_list(self, archived: bool) -> int:
         state = ArchiveState.ARCHIVED if archived else ArchiveState.ACTIVE

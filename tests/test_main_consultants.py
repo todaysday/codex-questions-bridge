@@ -30,7 +30,7 @@ def free_port():
 def make_config(tmp_path, socket_path, pico=None, mcp_port=0):
     return Config(
         CodexConfig(socket_path, "local", 30, 36500), DbConfig(str(tmp_path / "c.db")),
-        TelegramConfig(CHAT_ID, "📋 Треды Codex", "📥 Inbox", (OWNER,), 5), pico=pico, mcp=McpConfig(mcp_port),
+        TelegramConfig(CHAT_ID, "📋 Треды Codex", (OWNER,), 5), pico=pico, mcp=McpConfig(mcp_port),
     )
 
 

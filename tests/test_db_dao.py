@@ -1,3 +1,4 @@
+import dataclasses
 import sqlite3
 
 import pytest
@@ -6,7 +7,7 @@ from cqb.dao import db
 from cqb.dao.actions import ActionDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import ThreadDao
-from cqb.domain.enums import ArchiveState, QuestionLifecycle, VerificationSource
+from cqb.domain.enums import ArchiveState, ConsultantState, QuestionLifecycle, RunState, VerificationSource
 from cqb.domain.models import Question, QuestionItem, QuestionOption, TelegramAction, Thread
 
 
@@ -125,9 +126,28 @@ def test_migration_2_upgrades_a_v1_database_in_place(tmp_path):
     c.execute("INSERT INTO codex_sources VALUES ('s1','S1','app_server',1)")
     QuestionDao(c).insert_if_new(question())
     assert db.migrate(c) == len(db.MIGRATIONS) >= 2
-    assert QuestionDao(c).get("q1").inbox_message_id is None  # existing rows survive
+    assert QuestionDao(c).get("q1").card_message_id is None  # existing rows survive
     tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
     assert {"consultants", "bot_state"} <= tables
+
+
+def test_migration_3_renames_the_card_column_and_adds_run_state(tmp_path):
+    c = db.connect(str(tmp_path / "v2.db"))
+    for version in range(2):
+        c.executescript(f"BEGIN;\n{db.MIGRATIONS[version]}\nPRAGMA user_version = {version + 1};\nCOMMIT;")
+    c.execute("INSERT INTO codex_sources VALUES ('s1','S1','app_server',1)")
+    c.execute("INSERT INTO codex_threads VALUES ('s1','t1','t1',NULL,'cli','n','/w',100,'active',1,1)")
+    QuestionDao(c).insert_if_new(question("a"))
+    c.execute("UPDATE questions SET inbox_message_id=77 WHERE question_id='a'")  # a card posted before the upgrade
+    assert db.migrate(c) == len(db.MIGRATIONS) >= 3
+    assert "inbox_message_id" not in {r[1] for r in c.execute("PRAGMA table_info(questions)")}
+    dao = QuestionDao(c)
+    assert dao.get("a").card_message_id == 77 and dao.find_by_card_message(77).question_id == "a"
+    assert ThreadDao(c).get("s1", "t1").run_state is None  # old rows: not reported yet
+    ThreadDao(c).upsert_many([dataclasses.replace(thread("t1"), run_state=RunState.WORKING)])
+    ThreadDao(c).upsert_many([thread("t1")])  # a poll without status keeps the known one
+    assert ThreadDao(c).get("s1", "t1").run_state is RunState.WORKING
+    assert db.migrate(c) == len(db.MIGRATIONS)  # idempotent
 
 
 def test_threads_recency_window(conn):
@@ -177,16 +197,25 @@ def test_consultant_dao_uniqueness_and_states(conn):
         dao.reserve("s1", "ghost", -100, "k", 1)  # FK to codex_threads
 
 
-def test_question_inbox_helpers(conn):
+def test_question_card_helpers(conn):
+    from cqb.dao.consultants import ConsultantDao
+    ThreadDao(conn).upsert_many([thread("r1"), thread("r2")])
     dao = QuestionDao(conn)
     dao.insert_if_new(question("a", tool_use_id="a", root_thread_id="r1"))
     dao.insert_if_new(question("b", tool_use_id="b", root_thread_id="r1"))
     dao.insert_if_new(question("c", tool_use_id="c", root_thread_id="r2"))
     assert dao.open_counts_by_root("s1") == {"r1": 2, "r2": 1}
-    assert {q.question_id for q in dao.list_open_without_card("s1")} == {"a", "b", "c"}
-    dao.set_inbox_message("a", 77)
-    assert dao.find_by_inbox_message(77).question_id == "a" and dao.get("a").inbox_message_id == 77
-    assert {q.question_id for q in dao.list_open_without_card("s1")} == {"b", "c"}
+    assert dao.list_postable("s1") == []  # no consultant anywhere: nothing can be posted
+    consultants = ConsultantDao(conn)
+    one = consultants.reserve("s1", "r1", -100, "k1", 1)
+    assert dao.list_postable("s1") == []  # still creating
+    consultants.open(one.consultant_id, 5, 2)
+    assert {q.question_id for q in dao.list_postable("s1")} == {"a", "b"}  # only r1 has an open topic
+    dao.set_card_message("a", 77)
+    assert dao.find_by_card_message(77).question_id == "a" and dao.get("a").card_message_id == 77
+    assert {q.question_id for q in dao.list_postable("s1")} == {"b"}
+    consultants.set_state(one.consultant_id, ConsultantState.ARCHIVED, 3)
+    assert dao.list_postable("s1") == []  # closed consultants get no new cards
     dao.stage("a", {"a": ("A",)}, 5)
     dao.unstage("a", QuestionLifecycle.PENDING_CONFIRMED, 6)
     got = dao.get("a")

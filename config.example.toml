@@ -15,8 +15,7 @@ path = "/var/lib/cqb/cqb.db"
 chat_id = -1001234567890
 allowed_user_ids = [123456789]            # only these users may press buttons or write
 control_topic_name = "📋 Треды Codex"
-inbox_topic_name = "📥 Inbox"
-registry_refresh_seconds = 30             # 5..3600; the registry message is edited only if it changed
+registry_refresh_seconds = 5              # 5..3600; at most one edit of the pinned registry message per this many seconds, only if it changed
 
 # Consultant chat (PicoClaw). Present = consultants are enabled and the process refuses to start without
 # CQB_PICO_TOKEN and CQB_MCP_TOKEN in its environment (two different secrets, never in this file).

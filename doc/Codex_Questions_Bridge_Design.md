@@ -1,6 +1,6 @@
 # Codex Questions Bridge — Technical Design
 
-**Version:** 0.5  
+**Version:** 0.6  
 **Date:** 2026-11-06  
 **Status:** Design / implementation-ready with explicitly identified integration spikes  
 **Runtime:** Codex Desktop / Codex App Server + PicoClaw + Telegram Forum Topics + one lightweight Bridge service
@@ -11,7 +11,7 @@
 
 1. **No Codex fork and no native Codex V1/V2 subagent dependency.** Consultants are independent PicoClaw sessions, not Codex subagents.
 2. **One consultant per Codex root thread, created manually only.** Thread discovery, questions and registry synchronization must never create a consultant.
-3. **One private Telegram supergroup with forum topics.** Separate service topics: `📋 Треды Codex` and `📥 Inbox`. When manually requested, one topic per consultant.
+3. **One private Telegram supergroup with forum topics.** One service topic, `📋 Треды Codex`, holding exactly one pinned message (there is no Inbox topic). When manually requested, one topic per consultant; question cards of a thread live in that thread's consultant topic.
 4. **Bridge is deterministic and contains no LLM.** It owns mappings, read-only Codex access, Telegram management, question lifecycle, cursors and security.
 5. **PicoClaw owns dialogs and model calls.** Each consultant has a persistent conversation scoped to its Telegram topic; it loads Codex context lazily through Bridge's read-only tools. PicoClaw has no Telegram channel here: Bridge owns the single Telegram bot and relays consultant messages to a long-running PicoClaw gateway over PicoClaw's `pico` WebSocket channel (§4.1).
 6. **`/status` invokes an ephemeral PicoClaw Status Agent.** It scans actual Codex log entries for the root thread and its descendants. Worker Codex agents are not asked to produce summaries and need no prompt changes.
@@ -31,7 +31,7 @@ flowchart TD
     AS <-->|Whitelisted thread APIs, question requests and answers| BR
     STORE -->|Read-only fallback| BR[Codex Questions Bridge]
     BR <--> DB[(SQLite)]
-    BR <-->|Topic CRUD, control UI, Inbox, consultant relay| TB[Telegram Bot: bridge]
+    BR <-->|Topic CRUD, control UI, question cards, consultant relay| TB[Telegram Bot: bridge]
     TB <--> TG[Private Telegram supergroup]
     BR <-->|pico WebSocket: one WS per active session| PC[PicoClaw gateway]
     PC -->|Per-consultant persistent session| PS[(PicoClaw session store)]
@@ -51,9 +51,9 @@ flowchart TD
 | `codex_reader` | Thread inventory, descendants, persisted events and archive state | Starting turns, prompting Codex, modifying thread history |
 | `thread_registry` | Durable identity, aliases, root/child relationships, status | PicoClaw histories |
 | `consultant_registry` | `Codex root ↔ Telegram topic ↔ PicoClaw session key` | Agent reasoning, session summarization |
-| `question_inbox` | Captured questions, options, resolution states, Inbox messages, answers to the exact captured request | Free-form input into Codex |
+| `question_inbox` | Captured questions, options, resolution states, card messages (in consultant topics), answers to the exact captured request | Free-form input into Codex |
 | `context_api` | Scoped read-only search/read/events tools, caps and redaction | Semantic reasoning and autonomous agent decisions |
-| `telegram_control` | `/threads`, callbacks, buttons, topic create/close/open, Inbox UI | Consultant relay (see `pico_gateway`) |
+| `telegram_control` | `/threads`, callbacks, buttons, topic create/close/open, question cards | Consultant relay (see `pico_gateway`) |
 | `status_cursors` | Last successfully covered event per root and child | LLM progress interpretation |
 | `pico_consultant` | Persistent Q&A dialog, choosing tools, delegation | Editing code or driving Codex work |
 | `pico_gateway` | Telegram consultant relay (registered topics only), per-session `pico` WebSocket, per-session serialization, slash-command escaping, interception of `/status` and other project commands, PicoClaw gateway supervision | Reasoning and model calls |
@@ -63,34 +63,35 @@ flowchart TD
 
 ### 2.1 Forum topic `📋 Треды Codex`
 
-Bridge creates a **single editable registry message** (plus pages if necessary), for example:
+The topic contains **exactly one message**: a pinned registry message (plus pages if necessary) that the Bridge edits in place. Nothing else is ever posted there by the bot (no status cards, no alerts, no question cards). Example:
 
 ```text
 📋 Активные треды Codex · обновлено 12:26
 
-🟢 FoxProfile — User Access
+1. ❓ FoxProfile — User Access
    last activity 12:21 · consultant: —
-   [➕ Создать консультанта] [ℹ️ Подробнее]
+   [➕ Создать консультанта]
 
-🟢 AVIP — Instagram Scraper
+2. ⚙️ AVIP — Instagram Scraper
    last activity 11:48 · consultant: ✅
-   [💬 Открыть] [ℹ️ Подробнее]
+   [💬 Открыть]
 
-🟡 Trading — Runtime
+3. Trading — Runtime
    last activity вчера · consultant: —
-   [➕ Создать консультанта] [ℹ️ Подробнее]
+   [➕ Создать консультанта]
 
-[🔄 Обновить] [◀️] [▶️] [📦 Архивные]
+[◀️] [▶️] [📦 Архивные]
 ```
 
-- `🟢/🟡` are **registry freshness/activity indicators**, not guarantees a thread is actively computing. Do not present `notLoaded` as completed or idle.
-- The default inventory shows unarchived **root** threads sorted by `updatedAt desc`; nested Codex workers are not individual rows here.
+- `❓` marks a root with a pending question (captured / pending_confirmed / decision_staged). `⚙️` marks a root that is working right now: status `active` without a `waitingOn*` flag, taken from the live `thread/status/changed` map first and from the status stored by the last `thread/list` poll otherwise (the renderer never calls the daemon). A row may carry both. Do not present `notLoaded` as completed or idle.
+- The default inventory shows unarchived **root** threads ordered: rows with a pending question first, then working threads, then everything else by `updatedAt desc` (ties by thread id); nested Codex workers are not individual rows here.
 - Configurable recency window (default: 30 days); older threads remain accessible via pagination/filter. "Active" in this view means **not archived**, not "currently running".
-- Row contents: short display name, source/profile, last activity, consultant state (`—`, `✅`, `🔒 closed`, `⚠️ error`), and optional number of pending questions.
+- Row contents: markers (`❓`, `⚙️`), short display name, last activity, consultant state (`—`, `✅`, `🔒 closed`, `⚠️ error`). Row buttons: `💬 Открыть` when a consultant exists, else `➕ Создать консультанта`; nothing else. There is no refresh button and no per-row status button (`/status` is a consultant-topic command).
 - Inline callbacks use short opaque IDs (e.g. `tc:17`), **not full thread IDs**: Telegram `callback_data` is length-limited. Persist callback → action, root ID, expiry, and authorization context in SQLite.
 - Buttons `Создать` and `Открыть` are shown based on durable database state. `Открыть` is a Telegram deep link to the existing topic, constructed from configured group identity and the actual API-created topic ID; verify this URL format in acceptance tests.
-- Bridge edits rather than posts a new registry message on every polling cycle. Refresh only when changed; if the message is gone, recreate and re-pin.
-- Manual `/threads` refreshes the inventory; it must not call any model.
+- The message refreshes itself, event-driven: a dirty flag is set when a question appears or resolves, a root starts or stops working (a status broadcast marks it only when working/not working flips), a poll changes the thread list or its order, a consultant is created, closed or reopened, or an archive state changes. Marks are coalesced: at most one edit per `registry_refresh_seconds` (default 5), and no edit when the rendered content (without the time header) is unchanged; a periodic safety re-render also keeps callback ids fresh. If the message is gone, recreate and re-pin.
+- Pagination buttons (`◀️ ▶️`, active/archived toggle) edit the same message at once; the current page is remembered in `bot_state`.
+- Manual `/threads` (control topic) polls the inventory and forces a re-render of the single message; the bot deletes the command message when it has the right to. It must not call any model.
 
 ### 2.2 Manual consultant creation
 
@@ -129,9 +130,9 @@ Codex source: mac-codex-work · thread: 019…a9
 
 Bridge relays only user messages from the consultant topic to PicoClaw, so this message does not enter the LLM context; the actual binding comes from Bridge context tools and the scope hook, **not** from hoping that the message was read.
 
-### 2.3 Forum topic `📥 Inbox`
+### 2.3 Question cards in the consultant topic
 
-Captures questions even when **no consultant exists** for that Codex root. Example card:
+There is no Inbox topic. A question belongs to the **branch of its thread**: when the origin thread's root has an **open** consultant (topic exists, not archived/closed), the question card and its answer buttons are posted in that consultant's topic. Example card:
 
 ```text
 ❓ FoxProfile — User Access · 12:19
@@ -141,8 +142,11 @@ Where store profile settings?
 A. Existing table
 B. Separate table
 
-[A] [B] [✍️ Другое] [💬 Open consultant / ➕ Create] [🔎 Source]
+[A] [B] [✍️ Другое]
 ```
+
+- When the root has **no open consultant**, no card is posted anywhere and no extra message is sent; the registry row just shows `❓`. When a consultant is created later (or reopened), cards for the root's currently pending questions (captured / pending_confirmed) are posted in its topic. Archived or closed consultants get no new cards; an already posted card can still be edited.
+- A free-text reply to a card stages the `Другое` answer; a reply to a card never reaches the consultant model (in particular never a reply to a secret card).
 
 Question states (do not conflate):
 
@@ -152,7 +156,7 @@ Question states (do not conflate):
 - `resolved_observed` — `serverRequest/resolved` or the request lifecycle confirms resolution, whoever answered; or the user explicitly marks it answered; preserve resolution provenance.
 - `expired_or_stale` — request is no longer actionable or could not be confirmed.
 
-An option button stages the choice (`decision_staged`) and asks for confirmation; confirming sends the answer through the shared daemon. Questions with `isSecret: true` are never relayed to Telegram or an LLM (the Inbox only says that secret input is requested and must be given in Codex). The consultant is optional: a question may be handled without creating one.
+An option button stages the choice (`decision_staged`) and asks for confirmation; confirming sends the answer through the shared daemon. Questions with `isSecret: true` are never relayed to Telegram or an LLM (the card only says that secret input is requested and must be given in Codex; it shows no text and no buttons). The consultant is optional: a question may be handled without creating one.
 
 ### 2.4 Consultant commands
 
@@ -253,7 +257,7 @@ The hook should quickly write/spool an event and exit; it must not block the Cod
 
 **Candidate C (primary, verified 2026-11-06) — additional client on the shared daemon:** Bridge subscribes with `thread/resume` and receives the request; it does not take ownership from Desktop. In our test the tool was available in `plan` collaboration mode (`turn/start.collaborationMode`); default mode is gated by the feature `default_mode_request_user_input` (off in 0.164). Remaining tests: simultaneous answers from two clients, Desktop/mobile as co-subscribers.
 
-**Decision gate:** If C fails and neither A (verified, but see its limits above) nor B can observe live questions reliably, ship thread/consultant/status stages independently and mark the Inbox as `unavailable` until a supported source is installed. Do not invent questions or pollute the user's workflow.
+**Decision gate:** If C fails and neither A (verified, but see its limits above) nor B can observe live questions reliably, ship thread/consultant/status stages independently and mark question cards as `unavailable` until a supported source is installed. Do not invent questions or pollute the user's workflow.
 
 ## 4. Consultant context model: lazy, scoped and reusable
 
@@ -487,7 +491,7 @@ Verified by the status card spike (§12.1, S0-E). The card is at most about 12 l
 
 The live map keeps only ints and enums (status, last-seen time, last usage, goal flag), at most 4096 threads with oldest-first eviction, and is cleared on reconnect.
 
-## 6. Questions Inbox: capture, discuss, answer
+## 6. Questions: capture, discuss, answer
 
 ### 6.1 Canonical question DTO
 
@@ -519,17 +523,17 @@ type Question = {
 ```text
 1. Codex asks request_user_input in root or worker.
 2. Capture adapter observes it and Bridge saves question.
-3. Bridge posts/updates Inbox card, even if consultant does not exist.
-4. User clicks "Open consultant" (or manually creates consultant once).
+3. If the root has an open consultant, Bridge posts/updates the card in that consultant's topic; otherwise only the registry row shows `❓`.
+4. User clicks "Создать консультанта" in the registry (cards of the root's pending questions then appear in the new topic) or "Открыть".
 5. In consultant's topic, user asks why option A vs B.
 6. PicoClaw calls get_questions + read_history/search_history, if needed.
 7. User discusses alternatives; Codex execution is not touched.
-8. User selects an option in Inbox; Bridge marks decision_staged and asks for confirmation.
+8. User selects an option on the card; Bridge marks decision_staged and asks for confirmation.
 9. On confirmation Bridge answers the captured request through the shared daemon (or the user answers in Codex Desktop instead).
 10. `serverRequest/resolved` marks the question resolved_observed, whoever answered.
 ```
 
-An Inbox-created consultant is still **manual creation by a user clicking the explicit button**; no automatic consultant creation is permitted.
+A consultant is still **manual creation by a user clicking the explicit button**; a question never creates one automatically.
 
 ### 6.3 Answer delivery
 
@@ -652,7 +656,7 @@ CREATE TABLE questions (
   delivered_to_codex INTEGER NOT NULL DEFAULT 0,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
-  inbox_message_id INTEGER
+  card_message_id INTEGER   -- renamed from inbox_message_id (migration 3)
 );
 CREATE INDEX idx_question_root_state
   ON questions(source_id, root_thread_id, lifecycle);
@@ -723,7 +727,7 @@ codex-questions-bridge/
 │   ├── codex_events.py          # event normalization and evidence refs
 │   ├── repository.py            # SQLite DAOs
 │   ├── registry.py              # thread / consultant state transitions
-│   ├── telegram_control.py      # Bridge bot: topics, callbacks, Inbox
+│   ├── telegram_control.py      # Bridge bot: topics, callbacks, question cards
 │   ├── pico_gateway.py          # consultant relay, pico WS sessions, supervision
 │   ├── questions.py             # capture, dedup, lifecycle
 │   ├── status.py                # scope, cursors, reports
@@ -750,7 +754,7 @@ Example **Bridge-only** config (this is project-defined TOML, **not** PicoClaw's
 [telegram]
 chat_id = -1001234567890
 control_topic_name = "📋 Треды Codex"
-inbox_topic_name = "📥 Inbox"
+registry_refresh_seconds = 5   # 5..3600: at most one edit of the pinned registry message per interval
 allowed_user_ids = [123456789]
 
 [codex]
@@ -899,7 +903,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 
 **S0-A — Codex reader (must pass):** on the installed Codex Desktop/CLI version, list two existing root threads, a child/subagent, read recent events, identify archived status, and confirm what is available from an independent reader. Verify `ancestorThreadId` support; test JSONL fallback if needed. Capture sample fixtures. Use the existing daemon socket; do not start a second app-server.
 
-**S0-B — PicoClaw gateway integration (passed on a mock model, 2026-11-06):** PicoClaw v0.3.1 `pico` WebSocket gateway driven by a test client: token auth, per-session isolation, history surviving gateway restart, hook visibility of the session id, `approve_tool` scope enforcement (allow own thread, deny other; fail-closed on error/exit/timeout), `before_tool` argument overwrite, slash-command behavior, `max_connections`. Results fixed the Bridge-owned gateway decision (§4.1). Follow-ups verified on the mock (2026-11-06): slash escaping form (`User says: `), default tools and the `AGENT.md` allowlist, `allow_origins` semantics, `delegate` for `codex-status` (S0-D). **Real-model run (OmniRoute, PASS):** combo `Beam` (1M-token context window), key `picoclaw-cqb-spike` restricted to that combo (tier free); `/v1/models` returned 200 with only the model `Beam`; PicoClaw answered with the real model, sessions A and B stayed isolated, and the `approve_tool` hook allowed `X-OWN` and denied `X-OTHER`. Reply latency 1.1-2.7 s; usage about 8-12k tokens (approximate, OmniRoute returned no exact counter). The inference endpoint is reachable only on the host's loopback (SSH tunnel from other machines). **Remaining:** the Telegram message flow (two topics created via Bridge, relay, ignoring `📋 Треды` and `📥 Inbox`); concurrent sessions at scale; whether `/reload` restarts hook/MCP child processes; allowlist hot-reload.
+**S0-B — PicoClaw gateway integration (passed on a mock model, 2026-11-06):** PicoClaw v0.3.1 `pico` WebSocket gateway driven by a test client: token auth, per-session isolation, history surviving gateway restart, hook visibility of the session id, `approve_tool` scope enforcement (allow own thread, deny other; fail-closed on error/exit/timeout), `before_tool` argument overwrite, slash-command behavior, `max_connections`. Results fixed the Bridge-owned gateway decision (§4.1). Follow-ups verified on the mock (2026-11-06): slash escaping form (`User says: `), default tools and the `AGENT.md` allowlist, `allow_origins` semantics, `delegate` for `codex-status` (S0-D). **Real-model run (OmniRoute, PASS):** combo `Beam` (1M-token context window), key `picoclaw-cqb-spike` restricted to that combo (tier free); `/v1/models` returned 200 with only the model `Beam`; PicoClaw answered with the real model, sessions A and B stayed isolated, and the `approve_tool` hook allowed `X-OWN` and denied `X-OTHER`. Reply latency 1.1-2.7 s; usage about 8-12k tokens (approximate, OmniRoute returned no exact counter). The inference endpoint is reachable only on the host's loopback (SSH tunnel from other machines). **Remaining:** the Telegram message flow (two topics created via Bridge, relay, ignoring `📋 Треды`); concurrent sessions at scale; whether `/reload` restarts hook/MCP child processes; allowlist hot-reload.
 
 **S0-C — Real question capture (passed 2026-11-06 for the daemon client path):** on a throwaway thread a second client received the live request with full options, answered it, and a late-joining client received a replay. Still to test: simultaneous answers from two clients, Desktop/mobile as co-subscribers, Bridge reconnect mid-question. Hook and journal paths are optional fallbacks. Hook on `request_user_input` (Candidate A, §3.4): verified, `PreToolUse`/`PostToolUse` fire, `PermissionRequest` does not; payload lacks `isSecret`; can block or rewrite; about 50-60 ms; stays optional.
 
@@ -915,7 +919,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 | S2 Consultant | Explicit create/open, topic binding, persistent PicoClaw session, archive/reopen | +300–550 LOC | One consultant per root, survives restart/archive |
 | S3 Context | Scoped lazy read/search and child discovery | +250–450 LOC | Read only bound root and descendants, pagination/truncation |
 | S4 Status | Bridge-handled deterministic status card (§5.5, done in v0.5); later: optional narrative from a Status Agent in its own routed pico session (not `delegate`), coverage, cursors, variants | +300–550 LOC | Accurate stats with `—` for missing data; narrative never reaches the consultant; no Codex worker prompts |
-| S5 Questions | Capture, Inbox states, consultant cross-reference, answer via shared daemon | +250–500 LOC | Pending state matches observed requests; delivery claimed only after `serverRequest/resolved` |
+| S5 Questions | Capture, card states, consultant cross-reference, answer via shared daemon | +250–500 LOC | Pending state matches observed requests; delivery claimed only after `serverRequest/resolved` |
 | S6 Optional hardening | Concurrent-answer race handling; opt-in MCP ask only if needed | **TBD** | Exactly-once acknowledged answer and cancellation handling |
 
 Estimates are **rough incremental LOC**, with reuse from PicoClaw/Telegram/Codex. Actual S1–S5 range is approximately **1,350–2,400 LOC including tests**; earlier narrower estimates did not include robust status inspection, account isolation, failure recovery and question-capture uncertainty. Don't treat lines of code as a delivery-time guarantee.
@@ -934,8 +938,8 @@ Estimates are **rough incremental LOC**, with reuse from PicoClaw/Telegram/Codex
 10. Root Codex archived → consultant topic closed, session preserved; unarchived → same topic reopened.
 11. A subagent archives while root remains active → consultant topic stays open.
 12. A source temporarily disappears → no false "archived" label.
-13. Inbox receives an actual observed question with exact options; if capture is unsupported, show capability warning rather than fictitious question.
-14. An answer from Telegram is presented as delivered only after `serverRequest/resolved`; if Desktop answers first, the Inbox card closes as answered elsewhere.
+13. The consultant topic of the thread receives a card for an actual observed question with exact options (a root without an open consultant shows only `❓` in the registry); if capture is unsupported, show capability warning rather than fictitious question.
+14. An answer from Telegram is presented as delivered only after `serverRequest/resolved`; if Desktop answers first, the card closes as answered elsewhere.
 15. Unauthorized Telegram user cannot list threads, create consultants, read logs or trigger status; their messages, and messages in unregistered topics, never reach PicoClaw.
 16. Security test inserts prompt-injection strings and secrets into a Codex log; consultant neither executes commands nor exposes secrets. A user message starting with a built-in PicoClaw command (e.g. `/clear`) is escaped by Bridge and not executed as a command.
 
@@ -1003,3 +1007,4 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 - **v0.3 (2026-11-06):** Consultant gateway decided: Bridge-owned Telegram bot talking to a long-running PicoClaw gateway over the pico WebSocket channel, scope enforced by an approve_tool process hook (spike S0-B results).
 - **v0.4 (2026-11-06):** Consistency pass after spike S0-B: /status flow and command costs aligned with the Bridge-owned gateway; stale two-bot wording removed. Bridge, not an LLM, commits the /status cursor. S0-B follow-ups (slash escape, default tools and `AGENT.md` allowlist, `allow_origins`) and S0-D (delegation to `codex-status`) verified on a mock model. Real-model run via OmniRoute passed (S0-B); hook on `request_user_input` verified (optional, Candidate A).
 - **v0.5 (2026-11-06):** Status card: deterministic stats (state, model, context/cache, subagents, limits) separate from the consultant; Status Agent narrative runs in its own pico session routed to codex-status and never reaches the consultant; root context/cache read from the rollout tail.
+- **v0.6 (2026-11-06):** Inbox topic removed; question cards live in the thread's consultant topic and rows show ❓; registry is one self-updating pinned message ordered by questions, working threads, activity; no refresh button.

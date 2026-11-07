@@ -26,9 +26,16 @@ class LiveThread:
 
 
 class LiveState:
-    def __init__(self, max_entries: int = MAX_ENTRIES, clock: Callable[[], float] = time.time) -> None:
+    def __init__(
+        self,
+        max_entries: int = MAX_ENTRIES,
+        clock: Callable[[], float] = time.time,
+        on_working_flip: Callable[[str], None] | None = None,
+    ) -> None:
+        """on_working_flip(thread_id) fires only when a thread starts or stops working, not on every event."""
         self._max = max_entries
         self._clock = clock
+        self._on_flip = on_working_flip
         self._items: OrderedDict[str, LiveThread] = OrderedDict()
 
     def __len__(self) -> int:
@@ -40,7 +47,10 @@ class LiveState:
     async def handle(self, event: Event) -> None:
         match event:
             case ThreadStatusChanged():
+                before = self._items.get(event.thread_id)
                 self._update(event.thread_id, state=event.state)
+                if self._on_flip and _flipped(before, event.state):
+                    self._on_flip(event.thread_id)
             case TokenUsageUpdated():
                 self._update(event.thread_id, usage=event.usage)
             case GoalChanged():
@@ -54,3 +64,10 @@ class LiveState:
         self._items.move_to_end(thread_id)
         while len(self._items) > self._max:
             self._items.popitem(last=False)
+
+
+def _flipped(before: LiveThread | None, now: RunState) -> bool:
+    """Working vs not working. The first broadcast after a (re)connect counts: the stored status may differ."""
+    if before is None or before.state is RunState.UNKNOWN:
+        return True
+    return (before.state is RunState.WORKING) != (now is RunState.WORKING)

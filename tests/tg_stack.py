@@ -20,7 +20,7 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.status import StatusService
 from cqb.telegram.api import BotApi
 from cqb.telegram.control import ControlTopics, RegistryPublisher
-from cqb.telegram.inbox import InboxCards
+from cqb.telegram.cards import QuestionCards
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
 from cqb.telegram.router import Router, RouterConfig
@@ -123,7 +123,9 @@ class Stack:
         self.client = StubClient()
         self.relay = Relay()
         self.status_source = StatusSourceStub()
-        self.live = LiveState(clock=self.clock)
+        self.live = LiveState(
+            clock=self.clock, on_working_flip=lambda t: self.registry.is_root(t) and self.publisher.request_refresh()
+        )
         self.status_service = StatusService(self.status_source, self.live, lambda path: None, "s1", clock=self.clock)
         self.status_cards = StatusCards(self.api, self.state, self.status_service, CHAT_ID, "s1")
         self.inventory = Recorder()
@@ -131,26 +133,27 @@ class Stack:
         self.question_dao = QuestionDao(conn)
         self.questions = QuestionService(self.client, self.question_dao, self.threads, "s1")
         self.keys = ActionKeys(ActionDao(conn), "s1", self.clock)
-        self.registry = RegistryQuery(self.threads, self.consultant_dao, self.question_dao, "s1", 30, self.clock)
-        self.topics = ControlTopics(self.api, self.state, CHAT_ID, "📋 Треды Codex", "📥 Inbox")
+        self.registry = RegistryQuery(self.threads, self.consultant_dao, self.question_dao, "s1", 30, self.clock, live=self.live)
+        self.topics = ControlTopics(self.api, self.state, CHAT_ID, "📋 Треды Codex")
         self.tg_topics = TelegramTopics(self.api, CHAT_ID)
-        self.consultants = ConsultantService(
-            self.consultant_dao, self.threads, self.tg_topics, "s1", CHAT_ID, self.clock, persist_delay=0
-        )
         self.publisher = RegistryPublisher(
             self.api, self.topics, self.state, self.keys, self.registry, CHAT_ID,
-            interval=0.05, min_edit_interval=0, clock=self.clock,
+            interval=0.05, clock=self.clock,
         )
-        self.inbox = InboxCards(
-            self.api, self.topics, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh
+        self.cards = QuestionCards(
+            self.api, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh
+        )
+        self.consultants = ConsultantService(
+            self.consultant_dao, self.threads, self.tg_topics, "s1", CHAT_ID, self.clock, persist_delay=0,
+            on_open=self.cards.mark_root,
         )
         self.router = Router(
             RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.api, self.keys, self.topics,
-            self.publisher, self.inbox, self.consultants, self.tg_topics, self.registry, self.questions,
+            self.publisher, self.cards, self.consultants, self.tg_topics, self.registry, self.questions,
             self.relay, self.status_cards, "s1", self.inventory.poke, self.clock,
         )
         self.poller = Poller(self.api, self.state, self.router.handle, poll_timeout=0)
-        self.questions.subscribe(on_question=self.inbox.on_question, on_resolved=self.inbox.on_resolved)
+        self.questions.subscribe(on_question=self.cards.on_question, on_resolved=self.cards.on_resolved)
 
     @staticmethod
     async def _nosleep(delay):
@@ -169,9 +172,7 @@ class Stack:
 
     async def settle(self):
         """Apply coalesced registry refreshes and dirty cards, like the background loops would."""
-        for qid in list(self.inbox._dirty):
-            del self.inbox._dirty[qid]
-            await self.inbox.refresh_card(qid)
+        await self.cards.process()
         if self.publisher._wake.is_set():
             force, self.publisher._force = self.publisher._force, False
             self.publisher._wake.clear()
@@ -196,18 +197,23 @@ class Stack:
 
     @property
     def control_topic(self):
-        return self.topics.topic_id("control")
-
-    @property
-    def inbox_topic(self):
-        return self.topics.topic_id("inbox")
+        return self.topics.topic_id()
 
     @property
     def registry_message(self):
         return self.state.get_int("registry.message_id")
 
+    def control_messages(self):
+        """Every live message the bot left in the control topic (must be exactly the registry)."""
+        return self.fake.live_messages(self.control_topic)
+
+    async def open_consultant(self, root):
+        """Create the consultant of `root` and return its topic id."""
+        await self.router._create(root)
+        return self.consultant_dao.get("s1", root).tg_topic_id
+
     def card_of(self, qid):
-        return self.question_dao.get(qid).inbox_message_id
+        return self.question_dao.get(qid).card_message_id
 
 
 @contextlib.asynccontextmanager

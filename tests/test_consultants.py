@@ -192,3 +192,18 @@ def test_topic_name_limits():
     assert len(topic_name(thread(name="x" * 300))) == 128
     assert topic_name(thread(name="  a \n b ")) == "a b"
     assert topic_name(thread("abcdef012345", name=None)) == "Thread abcdef01"
+
+
+def test_on_open_fires_for_create_and_reopen_but_not_for_repeats_or_closing(env):
+    svc, topics, dao, threads, conn = env
+    opened = []
+    svc._on_open = opened.append
+    run(svc.create("r1"))
+    run(svc.create("r1"))  # already open: not news
+    assert opened == ["r1"]
+    threads.set_archive_state("s1", "r1", ArchiveState.ARCHIVED, 5)
+    run(svc.reconcile())  # closing
+    assert opened == ["r1"]
+    threads.set_archive_state("s1", "r1", ArchiveState.ACTIVE, 6)
+    run(svc.reconcile())  # reopening
+    assert opened == ["r1", "r1"]

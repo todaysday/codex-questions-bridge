@@ -10,8 +10,9 @@ def test_defaults():
     c = parse_config(OK)
     assert (c.codex.source_id, c.codex.poll_interval_seconds, c.codex.recency_days) == ("local", 30, 30)
     assert c.telegram.chat_id == -1001234567890 and c.telegram.allowed_user_ids == (123,)
-    assert (c.telegram.control_topic_name, c.telegram.inbox_topic_name) == ("📋 Треды Codex", "📥 Inbox")
-    assert c.telegram.registry_refresh_seconds == 30
+    assert c.telegram.control_topic_name == "📋 Треды Codex"
+    assert c.telegram.registry_refresh_seconds == 5
+    assert not hasattr(c.telegram, "inbox_topic_name")
     assert c.codex.codex_home == "/root/.codex"
 
 
@@ -140,3 +141,9 @@ def test_consultant_tokens_come_from_the_environment_and_must_differ():
             read_consultant_tokens(env)
     with pytest.raises(ConfigError, match="different"):
         read_consultant_tokens({"CQB_PICO_TOKEN": "same", "CQB_MCP_TOKEN": "same"})
+
+
+def test_inbox_topic_name_is_no_longer_a_config_key():
+    with pytest.raises(ConfigError, match="inbox_topic_name"):
+        parse_config({**OK, "telegram": {**TG, "inbox_topic_name": "x"}})
+    assert parse_config({**OK, "telegram": {**TG, "registry_refresh_seconds": 3600}}).telegram.registry_refresh_seconds == 3600
