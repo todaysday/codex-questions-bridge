@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from cqb.domain.enums import ArchiveState, ConsultantState, QuestionLifecycle, RunState, VerificationSource
+from cqb.domain.enums import AgentQuestionState, ArchiveState, ConsultantState, QuestionLifecycle, RunState, VerificationSource
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,6 +67,42 @@ class Question:
     created_at: int
     updated_at: int
     card_message_id: int | None = None  # the question card in the consultant topic of the root
+
+
+@dataclass(frozen=True, slots=True)
+class AgentQuestionItem:
+    """One question of an agentMessage card: a title and plain-string options (no ids on the wire)."""
+
+    title: str
+    options: tuple[str, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class AgentQuestion:
+    """Questions an agent put into a final agentMessage (delivery async). They never block the turn.
+
+    Pending until a userMessage follows the message in the thread. `staged` holds the owner's choice per
+    question index; `sent_at` is set once the answer message was sent (not yet seen as a userMessage).
+    """
+
+    agent_question_id: str
+    source_id: str
+    thread_id: str
+    root_thread_id: str
+    turn_id: str
+    item_id: str
+    items: tuple[AgentQuestionItem, ...]
+    answerable: bool  # False when the message had more or longer questions than the Bridge keeps
+    state: AgentQuestionState
+    staged: dict[int, str]
+    sent_at: int | None
+    created_at: int
+    updated_at: int
+    card_message_id: int | None = None
+
+    @property
+    def is_open(self) -> bool:
+        return self.state is AgentQuestionState.PENDING
 
 
 @dataclass(frozen=True, slots=True)

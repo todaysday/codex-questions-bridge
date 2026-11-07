@@ -17,16 +17,18 @@ from cqb.codex.stream import dispatch
 from cqb.config import Config, ConfigError, ConsultantTokens, load_config, read_consultant_tokens, read_token
 from cqb.dao import db
 from cqb.dao.actions import ActionDao
+from cqb.dao.agent_questions import AgentQuestionDao
 from cqb.dao.bot_state import BotStateDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import SourceDao, ThreadDao
-from cqb.domain.models import Question, Source
+from cqb.domain.models import AgentQuestion, Question, Source
 from cqb.mcp.server import McpServer
 from cqb.mcp.tools import build_tools
 from cqb.pico.gateway import PicoGateway
 from cqb.pico.health import PicoHealth, health_url
 from cqb.pico.status_narrator import STATUS_PROMPT, PicoStatusNarrator
+from cqb.services.agent_questions import AgentQuestionService
 from cqb.services.consultants import ConsultantService
 from cqb.services.context import ContextService
 from cqb.services.inventory import InventoryService
@@ -36,6 +38,7 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.services.scope import SessionScopes
 from cqb.services.status import StatusNarrator, StatusService
+from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.api import API_BASE, BotApi
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
@@ -55,10 +58,13 @@ def rss_mib() -> float:
     return pages * os.sysconf("SC_PAGE_SIZE") / 1048576
 
 
-async def _log_rss(interval: float, counts: Callable[[], tuple[int, int]]) -> None:
+async def _log_rss(interval: float, counts: Callable[[], tuple[int, int, int]]) -> None:
     while True:
-        consultants, pending = counts()
-        log.info("rss=%.1f MiB consultants_open=%d questions_pending=%d", rss_mib(), consultants, pending)
+        consultants, pending, agent_pending = counts()
+        log.info(
+            "rss=%.1f MiB consultants_open=%d questions_pending=%d agent_questions_pending=%d",
+            rss_mib(), consultants, pending, agent_pending,
+        )
         await asyncio.sleep(interval)
 
 
@@ -68,6 +74,15 @@ async def _log_question(q: Question) -> None:
         "question %s thread=%s root=%s items=%d secret=%s",
         q.question_id, q.origin_thread_id, q.root_thread_id, len(q.items), q.is_secret,
     )
+
+
+async def _log_agent_question(q: AgentQuestion) -> None:
+    # Ids and counts only: question text may be sensitive and never goes to logs.
+    log.info("agent question %s thread=%s root=%s items=%d", q.agent_question_id, q.thread_id, q.root_thread_id, len(q.items))
+
+
+async def _log_agent_closed(q: AgentQuestion) -> None:
+    log.info("agent question %s -> %s", q.agent_question_id, q.state.value)
 
 
 async def _log_resolved(q: Question) -> None:
@@ -95,10 +110,14 @@ async def run(
     threads = ThreadDao(conn)
     consultant_dao = ConsultantDao(conn)
     question_dao = QuestionDao(conn)
+    agent_dao = AgentQuestionDao(conn)
     state = BotStateDao(conn)
 
     client = AppServerClient(config.codex.socket)
     questions = QuestionService(client, question_dao, threads, source_id)
+    agent_questions = AgentQuestionService(
+        client, agent_dao, threads, source_id, scan_seconds=config.questions.agent_scan_seconds
+    )
     api = BotApi(token, base_url=telegram_base_url)
     closers: list[Callable[[], Awaitable[None]]] = [api.close]
     gateway: PicoGateway | None = None
@@ -109,7 +128,8 @@ async def run(
         # registry and publisher are bound below; the callback only runs on later broadcasts
         live = LiveState(on_working_flip=lambda thread_id: registry.is_root(thread_id) and publisher.request_refresh())
         registry = RegistryQuery(
-            threads, consultant_dao, question_dao, source_id, config.codex.recency_days, live=live
+            threads, consultant_dao, question_dao, source_id, config.codex.recency_days, live=live,
+            agent_questions=agent_dao,
         )
         topics = ControlTopics(api, state, tg.chat_id, tg.control_topic_name)
         tg_topics = TelegramTopics(api, tg.chat_id)
@@ -117,8 +137,14 @@ async def run(
             api, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds
         )
         cards = QuestionCards(api, keys, questions, registry, tg.chat_id, publisher.request_refresh)
+        agent_cards = AgentQuestionCards(api, keys, agent_questions, registry, tg.chat_id, publisher.request_refresh)
+
+        def cards_for_root(root: str) -> None:
+            cards.mark_root(root)
+            agent_cards.mark_root(root)
+
         consultants = ConsultantService(
-            consultant_dao, threads, tg_topics, source_id, tg.chat_id, on_open=cards.mark_root
+            consultant_dao, threads, tg_topics, source_id, tg.chat_id, on_open=cards_for_root
         )
         inventory = InventoryService(
             client, threads, source_id,
@@ -156,11 +182,14 @@ async def run(
         closers.append(status.close)
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
-            api, keys, topics, publisher, cards, consultants, tg_topics, registry, questions,
+            api, keys, topics, publisher, cards, agent_cards, consultants, tg_topics, registry, questions,
+            agent_questions,
             ConsultantRelay(gateway, tg_topics), status, source_id, inventory.poke,
         )
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
         questions.subscribe(on_question=cards.on_question, on_resolved=cards.on_resolved)
+        agent_questions.subscribe(on_question=_log_agent_question, on_closed=_log_agent_closed)
+        agent_questions.subscribe(on_question=agent_cards.on_question, on_closed=agent_cards.on_closed)
 
         if mcp is not None:
             await mcp.start()
@@ -175,14 +204,16 @@ async def run(
         poller = Poller(api, state, router.handle)
         tasks = [
             asyncio.create_task(client.run(), name="appserver"),
-            asyncio.create_task(dispatch(client, [inventory.handle, questions.handle, live.handle]), name="dispatch"),
+            asyncio.create_task(dispatch(client, [inventory.handle, questions.handle, agent_questions.handle, live.handle]), name="dispatch"),
             asyncio.create_task(inventory.run(), name="inventory"),
             asyncio.create_task(poller.run(), name="telegram-poll"),
             asyncio.create_task(publisher.run(before=consultants.reconcile), name="registry"),
             asyncio.create_task(cards.run(), name="cards"),
+            asyncio.create_task(agent_cards.run(), name="agent-cards"),
+            asyncio.create_task(agent_questions.run(), name="agent-questions"),
             *([asyncio.create_task(gateway.run(), name="pico-gateway")] if gateway else []),
             asyncio.create_task(
-                _log_rss(rss_interval, lambda: (consultants.open_count(), questions.open_count())), name="rss"
+                _log_rss(rss_interval, lambda: (consultants.open_count(), questions.open_count(), agent_questions.open_count())), name="rss"
             ),
         ]
         watch_stop = asyncio.create_task(stop.wait())

@@ -11,7 +11,7 @@ from cqb.telegram.models import ActionSpec, Keyboard
 
 ACTION_TTL = 86400
 # Mutations are used up by a press; navigation and info may be pressed repeatedly until expiry.
-ONE_TIME = frozenset({"create", "opt", "send", "cancel"})
+ONE_TIME = frozenset({"create", "opt", "send", "cancel", "aopt", "asend", "acancel"})
 
 
 class ActionKeys:

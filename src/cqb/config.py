@@ -61,6 +61,13 @@ class StatusConfig:
 
 
 @dataclass(frozen=True, slots=True)
+class QuestionsConfig:
+    """Agent-message questions are found by reading thread items; this is how often the sweep reads."""
+
+    agent_scan_seconds: int = 20  # 5..600: period of the sweep over working and recently updated roots
+
+
+@dataclass(frozen=True, slots=True)
 class ConsultantTokens:
     pico: str = field(repr=False)
     mcp: str = field(repr=False)
@@ -74,6 +81,7 @@ class Config:
     pico: PicoConfig | None = None
     mcp: McpConfig = McpConfig()
     status: StatusConfig = StatusConfig()
+    questions: QuestionsConfig = QuestionsConfig()
 
 
 TOKEN_ENV = "CQB_TELEGRAM_TOKEN"
@@ -96,7 +104,7 @@ def load_config(path: str) -> Config:
 
 
 def parse_config(raw: dict[str, Any]) -> Config:
-    unknown = set(raw) - {"codex", "db", "telegram", "pico", "mcp", "status"}
+    unknown = set(raw) - {"codex", "db", "telegram", "pico", "mcp", "status", "questions"}
     if unknown:
         raise ConfigError(f"unknown section(s): {', '.join(sorted(unknown))}")
     codex = _section(raw, "codex", {"socket", "source_id", "poll_interval_seconds", "recency_days", "codex_home"})
@@ -108,6 +116,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
     return Config(
         pico=_pico(raw["pico"]) if "pico" in raw else None,
         status=_status(raw["status"]) if "status" in raw else StatusConfig(),
+        questions=_questions(raw["questions"]) if "questions" in raw else QuestionsConfig(),
         mcp=McpConfig(port=_int(_section(raw, "mcp", {"port"}), "mcp", "port", 18791, 1024, 65535)) if "mcp" in raw
         else McpConfig(),
         codex=CodexConfig(
@@ -169,6 +178,11 @@ def _status(raw: Any) -> StatusConfig:
         timeout_seconds=_int(sec, "status", "timeout_seconds", 300, 30, 3600),
         slots=_int(sec, "status", "slots", 2, 1, 8),
     )
+
+
+def _questions(raw: Any) -> QuestionsConfig:
+    sec = _section({"questions": raw}, "questions", {"agent_scan_seconds"})
+    return QuestionsConfig(agent_scan_seconds=_int(sec, "questions", "agent_scan_seconds", 20, 5, 600))
 
 
 def _section(raw: dict[str, Any], name: str, allowed: set[str]) -> dict[str, Any]:

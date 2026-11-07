@@ -177,3 +177,29 @@ def test_example_config_documents_the_status_section():
     import pathlib
     example = pathlib.Path(__file__).parent.parent / "config.example.toml"
     assert load_config(str(example)).status == StatusConfig(300, 2)
+
+
+# --- agent-message questions: [questions] --------------------------------------------------
+
+from cqb.config import QuestionsConfig  # noqa: E402
+
+
+def test_questions_defaults_bounds_and_example():
+    assert parse_config(OK).questions == QuestionsConfig(agent_scan_seconds=20)
+    assert parse_config({**OK, "questions": {}}).questions == QuestionsConfig(20)
+    for ok in (5, 600):
+        assert parse_config({**OK, "questions": {"agent_scan_seconds": ok}}).questions.agent_scan_seconds == ok
+    import pathlib
+    example = pathlib.Path(__file__).parent.parent / "config.example.toml"
+    assert load_config(str(example)).questions == QuestionsConfig(20)
+
+
+@pytest.mark.parametrize("questions, msg", [
+    ({"agent_scan_seconds": 4}, "agent_scan_seconds"), ({"agent_scan_seconds": 601}, "agent_scan_seconds"),
+    ({"agent_scan_seconds": "20"}, "agent_scan_seconds"), ({"agent_scan_seconds": True}, "agent_scan_seconds"),
+    ({"agent_scan_seconds": 20.5}, "agent_scan_seconds"), ({"typo": 1}, "unknown key"),
+    ({"token": "x"}, "environment"), ("not a table", "missing section"),
+])
+def test_invalid_questions(questions, msg):
+    with pytest.raises(ConfigError, match=msg):
+        parse_config({**OK, "questions": questions})

@@ -4,6 +4,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 
+from cqb.dao.agent_questions import AgentQuestionDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import ThreadDao
@@ -42,6 +43,7 @@ class RegistryQuery:
         recency_days: int,
         clock: Callable[[], float] = time.time,
         live: LiveState | None = None,
+        agent_questions: AgentQuestionDao | None = None,
     ) -> None:
         self._threads = threads
         self._consultants = consultants
@@ -50,6 +52,7 @@ class RegistryQuery:
         self._recency_days = recency_days
         self._clock = clock
         self._live = live
+        self._agent_questions = agent_questions
 
     def is_root(self, thread_id: str) -> bool:
         thread = self._threads.get(self._source, thread_id)
@@ -77,6 +80,9 @@ class RegistryQuery:
     def _rows(self, roots: list[Thread]) -> tuple[RegistryRow, ...]:
         bound = self._consultants.get_many(self._source, [t.thread_id for t in roots])
         pending = self._questions.open_counts_by_root(self._source)
+        if self._agent_questions is not None:  # blocking requests and agent-message questions both count
+            for root, count in self._agent_questions.open_counts_by_root(self._source).items():
+                pending[root] = pending.get(root, 0) + count
         return tuple(
             RegistryRow(
                 thread=t,

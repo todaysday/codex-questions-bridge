@@ -80,6 +80,28 @@ MIGRATIONS: tuple[str, ...] = (
     ALTER TABLE questions RENAME COLUMN inbox_message_id TO card_message_id;
     ALTER TABLE codex_threads ADD COLUMN run_state TEXT;
     """,
+    """
+    CREATE TABLE agent_questions (
+      agent_question_id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      root_thread_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      items_json TEXT NOT NULL,
+      answerable INTEGER NOT NULL DEFAULT 1,
+      state TEXT NOT NULL,
+      staged_json TEXT,
+      sent_at INTEGER,
+      card_message_id INTEGER,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(source_id, thread_id, item_id)
+    );
+    CREATE INDEX idx_agent_question_root ON agent_questions(source_id, root_thread_id, state);
+    CREATE INDEX idx_agent_question_thread ON agent_questions(source_id, thread_id, state);
+    CREATE INDEX idx_agent_question_card ON agent_questions(card_message_id);
+    """,
 )
 
 

@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 
 from cqb.dao.actions import ActionDao
+from cqb.dao.agent_questions import AgentQuestionDao
 from cqb.dao.bot_state import BotStateDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
@@ -13,11 +14,13 @@ from cqb.domain.enums import ArchiveState
 from cqb.domain.enums import RunState
 from cqb.domain.models import QuestionItem, QuestionOption, Thread
 from cqb.domain.status import Activity, Descendants, GoalSummary, RateLimits, ThreadSnapshot
+from cqb.services.agent_questions import AgentQuestionService
 from cqb.services.consultants import ConsultantService
 from cqb.services.questions import QuestionService
 from cqb.services.live_state import LiveState
 from cqb.services.registry import RegistryQuery
 from cqb.services.status import StatusService
+from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.api import BotApi
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.cards import QuestionCards
@@ -43,6 +46,44 @@ class StubClient:
 
     async def respond(self, request_id, result):
         self.responses.append((request_id, result))
+
+
+class AgentClientStub:
+    """The app-server calls the agent-question service makes: items of each thread (oldest first) and sends."""
+
+    def __init__(self):
+        self.items: dict[str, list[dict]] = {}
+        self.sent: list[tuple[str, str]] = []
+        self.send_error: Exception | None = None
+        self.echo = False  # a successful send appends the userMessage the daemon would store
+        self.calls: list[str] = []
+
+    async def call(self, method, params=None):
+        self.calls.append(method)
+        if method == "thread/read":
+            return {"thread": {"id": params["threadId"]}}
+        rows = [{"turnId": "u1", "item": i} for i in self.items.get(params["threadId"], [])][::-1]
+        start = int(params.get("cursor") or 0)
+        limit = params.get("limit") or 25
+        nxt = str(start + limit) if start + limit < len(rows) else None
+        return {"data": rows[start:start + limit], "nextCursor": nxt}
+
+    async def send_user_message(self, thread_id, text):
+        if self.send_error:
+            raise self.send_error
+        self.sent.append((thread_id, text))
+        if self.echo:
+            self.items.setdefault(thread_id, []).append(user_item(f"u{len(self.sent)}", text))
+        return "steer"
+
+
+def agent_item(item_id, questions):
+    return {"type": "agentMessage", "id": item_id, "text": "t", "phase": "final_answer", "delivery": "async",
+            "questions": questions}
+
+
+def user_item(item_id, text="hi"):
+    return {"type": "userMessage", "id": item_id, "content": [{"type": "text", "text": text, "text_elements": []}]}
 
 
 class StatusSourceStub:
@@ -139,9 +180,13 @@ class Stack:
         self.inventory = Recorder()
         self.consultant_dao = ConsultantDao(conn)
         self.question_dao = QuestionDao(conn)
+        self.agent_dao = AgentQuestionDao(conn)
+        self.agent_client = AgentClientStub()
         self.questions = QuestionService(self.client, self.question_dao, self.threads, "s1")
+        self.agent = AgentQuestionService(self.agent_client, self.agent_dao, self.threads, "s1", clock=self.clock)
         self.keys = ActionKeys(ActionDao(conn), "s1", self.clock)
-        self.registry = RegistryQuery(self.threads, self.consultant_dao, self.question_dao, "s1", 30, self.clock, live=self.live)
+        self.registry = RegistryQuery(self.threads, self.consultant_dao, self.question_dao, "s1", 30, self.clock, live=self.live,
+                                       agent_questions=self.agent_dao)
         self.topics = ControlTopics(self.api, self.state, CHAT_ID, "📋 Треды Codex")
         self.tg_topics = TelegramTopics(self.api, CHAT_ID)
         self.publisher = RegistryPublisher(
@@ -151,17 +196,21 @@ class Stack:
         self.cards = QuestionCards(
             self.api, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh
         )
+        self.agent_cards = AgentQuestionCards(
+            self.api, self.keys, self.agent, self.registry, CHAT_ID, self.publisher.request_refresh
+        )
         self.consultants = ConsultantService(
             self.consultant_dao, self.threads, self.tg_topics, "s1", CHAT_ID, self.clock, persist_delay=0,
-            on_open=self.cards.mark_root,
+            on_open=lambda root: (self.cards.mark_root(root), self.agent_cards.mark_root(root)),
         )
         self.router = Router(
             RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.api, self.keys, self.topics,
-            self.publisher, self.cards, self.consultants, self.tg_topics, self.registry, self.questions,
-            self.relay, self.status_cards, "s1", self.inventory.poke, self.clock,
+            self.publisher, self.cards, self.agent_cards, self.consultants, self.tg_topics, self.registry,
+            self.questions, self.agent, self.relay, self.status_cards, "s1", self.inventory.poke, self.clock,
         )
         self.poller = Poller(self.api, self.state, self.router.handle, poll_timeout=0)
         self.questions.subscribe(on_question=self.cards.on_question, on_resolved=self.cards.on_resolved)
+        self.agent.subscribe(on_question=self.agent_cards.on_question, on_closed=self.agent_cards.on_closed)
 
     @staticmethod
     async def _nosleep(delay):
@@ -186,6 +235,7 @@ class Stack:
     async def settle(self):
         """Apply coalesced registry refreshes and dirty cards, like the background loops would."""
         await self.cards.process()
+        await self.agent_cards.process()
         if self.publisher._wake.is_set():
             force, self.publisher._force = self.publisher._force, False
             self.publisher._wake.clear()

@@ -1,7 +1,9 @@
 """Client of the shared Codex app-server daemon (WebSocket over its unix control socket).
 
 The connection has full rights on the daemon, so the method whitelist below is the
-only read-only boundary. Everything the Bridge sends goes through call() or respond().
+only boundary. Everything the Bridge sends goes through call(), respond() or send_user_message().
+call() is read-only. send_user_message() is the single write path into a thread: one plain user
+message (the answer to an agent-message question), built from threadId and text only.
 """
 
 import asyncio
@@ -24,6 +26,10 @@ ALLOWED_METHODS = frozenset(
 )
 # thread/resume may carry config overrides; the Bridge may only select the thread.
 _RESUME_KEYS = frozenset({"threadId", "excludeTurns"})
+# The only writes, reachable solely through send_user_message(): never through call().
+STEER, START = "turn/steer", "turn/start"
+MAX_USER_MESSAGE_CHARS = 20_000
+RACE_PAUSE = 0.5  # a turn that has just begun reads as "interrupted" for ~0.3 s: look again after this
 
 INBOX_MAX = 1024
 MAX_MESSAGE_BYTES = 8 * 1024 * 1024
@@ -85,6 +91,48 @@ class AppServerClient:
         if method == "thread/resume" and not set(params or {}) <= _RESUME_KEYS:
             raise MethodNotAllowed("thread/resume with parameters beyond threadId/excludeTurns")
         return await self._rpc(method, params, timeout)
+
+    async def send_user_message(self, thread_id: str, text: str) -> str:
+        """Send `text` into the thread as a normal user message; returns "steer" or "start".
+
+        turn/steer when the latest turn is in progress, else thread/resume + turn/start (and an unsubscribe
+        again). The params are built here: threadId, input (one text item) and, for steer, expectedTurnId.
+        Never any approvalPolicy, sandbox, model, cwd, effort or other override. A rejected call (the turn
+        ended or a new one began meanwhile) is re-planned once from a fresh read; a timeout is not retried,
+        because the message may have gone through.
+        """
+        if not thread_id or not text.strip() or len(text) > MAX_USER_MESSAGE_CHARS:
+            raise ValueError(f"a user message must have 1..{MAX_USER_MESSAGE_CHARS} characters")
+        content = [{"type": "text", "text": text}]
+        for attempt in (0, 1):
+            try:
+                turn_id = await self._running_turn(thread_id)
+                if turn_id is not None:
+                    await self._rpc(STEER, {"threadId": thread_id, "input": content, "expectedTurnId": turn_id})
+                    return "steer"
+                await self._start_turn(thread_id, content)
+                return "start"
+            except RpcError:
+                if attempt:
+                    raise
+                await asyncio.sleep(RACE_PAUSE)
+        raise AssertionError("unreachable")
+
+    async def _running_turn(self, thread_id: str) -> str | None:
+        page = await self.call("thread/turns/list", {"threadId": thread_id, "limit": 1, "itemsView": "notLoaded"})
+        turns = page.get("data") or []
+        turn = turns[0] if turns and isinstance(turns[0], dict) else {}
+        return turn.get("id") if turn.get("status") == "inProgress" and isinstance(turn.get("id"), str) else None
+
+    async def _start_turn(self, thread_id: str, content: list[dict[str, Any]]) -> None:
+        await self._rpc("thread/resume", {"threadId": thread_id, "excludeTurns": True})
+        try:
+            await self._rpc(START, {"threadId": thread_id, "input": content})
+        finally:
+            try:
+                await self._rpc("thread/unsubscribe", {"threadId": thread_id})
+            except Exception as exc:
+                log.debug("unsubscribe %s failed: %s", thread_id, type(exc).__name__)
 
     async def respond(self, request_id: int | str, result: dict[str, Any]) -> None:
         """Answer a server request by its id (the only non-whitelisted write)."""

@@ -154,7 +154,7 @@ def test_no_refresh_or_status_button_anywhere_and_key_kinds(conn):
                 if nav:
                     click(st, msg, nav)
                     await st.pump()
-    assert ONE_TIME == {"create", "opt", "send", "cancel"}
+    assert ONE_TIME == {"create", "opt", "send", "cancel", "aopt", "asend", "acancel"}
     run(main())
 
 

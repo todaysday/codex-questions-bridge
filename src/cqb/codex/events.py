@@ -8,7 +8,7 @@ from typing import Any
 
 from cqb.codex.appserver import Inbound
 from cqb.domain.enums import ArchiveState, RunState
-from cqb.domain.models import QuestionItem, QuestionOption, Thread
+from cqb.domain.models import AgentQuestionItem, QuestionItem, QuestionOption, Thread
 from cqb.domain.status import UsageSnapshot
 
 MAX_ITEMS = 8
@@ -18,6 +18,10 @@ MAX_QUESTION = 500
 MAX_LABEL = 200
 MAX_DESCRIPTION = 300
 MAX_NAME = 80
+MAX_AGENT_QUESTIONS = 8
+MAX_AGENT_OPTIONS = 10
+MAX_AGENT_TITLE = 1500
+MAX_AGENT_OPTION = 300
 
 
 @dataclass(frozen=True, slots=True)
@@ -126,6 +130,33 @@ def normalize(msg: Inbound) -> Event | None:
     except (KeyError, TypeError, AttributeError, ValueError):
         return None  # malformed payload: ignore rather than crash the pump
     return None
+
+
+def agent_questions_from_item(raw: Any) -> tuple[tuple[AgentQuestionItem, ...], bool] | None:
+    """A ThreadItem agentMessage with a non-empty `questions` list -> (items, answerable), else None.
+
+    Only titles and options are read; the message text is never touched. Text past the limits is cut and
+    the question is then not answerable from Telegram (the answer must quote titles and options exactly).
+    """
+    if not isinstance(raw, dict) or raw.get("type") != "agentMessage":
+        return None
+    questions = raw.get("questions")
+    if not isinstance(questions, list) or not questions:
+        return None
+    complete = len(questions) <= MAX_AGENT_QUESTIONS
+    items: list[AgentQuestionItem] = []
+    for q in questions[:MAX_AGENT_QUESTIONS]:
+        options = q.get("options") if isinstance(q, dict) else None
+        options = [] if options is None else options
+        if not isinstance(q, dict) or not isinstance(q.get("title"), str) or not isinstance(options, list) \
+                or not all(isinstance(o, str) for o in options):
+            return None  # an unknown shape: better unseen than answered wrongly
+        complete = complete and len(q["title"]) <= MAX_AGENT_TITLE and len(options) <= MAX_AGENT_OPTIONS \
+            and all(len(o) <= MAX_AGENT_OPTION for o in options)
+        items.append(AgentQuestionItem(
+            q["title"][:MAX_AGENT_TITLE], tuple(o[:MAX_AGENT_OPTION] for o in options[:MAX_AGENT_OPTIONS])
+        ))
+    return tuple(items), complete
 
 
 def thread_waiting_on_user(raw: dict[str, Any]) -> bool:

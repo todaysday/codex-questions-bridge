@@ -33,6 +33,9 @@ class FakeAppServer:
         self.turns: dict[str, list[dict[str, Any]]] = {}  # thread id -> turns, newest first
         self.goals: dict[str, dict[str, Any]] = {}
         self.items: dict[str, list[dict[str, Any]]] = {}  # thread id -> thread/items/list entries, oldest first
+        self.gone: set[str] = set()  # deleted threads: items/list fails as it does for a thread without a rollout
+        self.steer_races = 0  # the next N turn/steer calls fail like "the turn ended meanwhile"
+        self.start_races = 0  # the next N turn/start calls fail like "a turn is already running"
         self.rate_limits: dict[str, Any] | None = {
             "ordinaryUsageAllowed": True,
             "rateLimits": {"primary": {"usedPercent": 30, "windowDurationMins": 10080, "resetsAt": 1_800_100_000},
@@ -159,6 +162,9 @@ class FakeAppServer:
         elif method == "thread/turns/list":
             await self._reply(conn, m, {"data": self.turns.get(params["threadId"], [])[: params.get("limit") or 25]})
         elif method == "thread/items/list":
+            if params["threadId"] in self.gone:
+                await self._fail(conn, m, "thread/items/list is not supported yet")
+                return
             await self._reply(conn, m, self._items(params))
         elif method == "thread/goal/get":
             await self._reply(conn, m, {"goal": self.goals.get(params["threadId"])})
@@ -175,11 +181,48 @@ class FakeAppServer:
             await self._reply(conn, m, {"thread": {**self.threads[tid], "turns": []}})
             if tid in self.pending:
                 await self._send_request(conn, self.pending[tid])
+        elif method in ("turn/steer", "turn/start"):
+            await self._write(conn, m, method, params)
         elif method == "thread/unsubscribe":
             conn.subscribed.discard(params["threadId"])
             await self._reply(conn, m, {"status": "unsubscribed"})
         else:
             await conn.ws.send_json({"id": m["id"], "error": {"code": -32601, "message": "method not found"}})
+
+    async def _write(self, conn: FakeConn, m: dict[str, Any], method: str, params: dict[str, Any]) -> None:
+        tid = params["threadId"]
+        turns = self.turns.setdefault(tid, [])
+        running = turns[0] if turns and turns[0]["status"] == "inProgress" else None
+        if method == "turn/steer":
+            if self.steer_races > 0:
+                self.steer_races -= 1
+                if running:
+                    running["status"] = "completed"  # the turn ended between the read and the steer
+                await self._fail(conn, m, "no active turn to steer")
+            elif running is None or params.get("expectedTurnId") != running["id"]:
+                await self._fail(conn, m, "expectedTurnId does not match the active turn")
+            else:
+                self.items.setdefault(tid, []).append({"turnId": running["id"], "item": self._user(tid, params["input"])})
+                await self._reply(conn, m, {"turnId": running["id"]})
+            return
+        if tid not in conn.subscribed:
+            await self._fail(conn, m, "thread not loaded")
+        elif self.start_races > 0 or running:
+            if self.start_races > 0:
+                self.start_races -= 1
+                turns.insert(0, {"id": f"t{len(turns) + 1}", "status": "inProgress"})  # a turn began meanwhile
+            await self._fail(conn, m, "a turn is already in progress")
+        else:
+            turn = {"id": f"t{len(turns) + 1}", "status": "inProgress"}
+            turns.insert(0, turn)
+            self.items.setdefault(tid, []).append({"turnId": turn["id"], "item": self._user(tid, params["input"])})
+            await self._reply(conn, m, {"turn": turn})
+
+    def _user(self, tid: str, content: list[dict[str, Any]]) -> dict[str, Any]:
+        return user_message(content, f"um{len(self.items.get(tid, []))}")
+
+    async def _fail(self, conn: FakeConn, m: dict[str, Any], message: str) -> None:
+        await conn.ws.send_json({"id": m["id"], "error": {"code": -32600, "message": message}})
 
     async def _reply(self, conn: FakeConn, m: dict[str, Any], result: dict[str, Any]) -> None:
         await conn.ws.send_json({"id": m["id"], "result": result})
@@ -216,6 +259,27 @@ class FakeAppServer:
         page = rows[start:start + limit]
         nxt = str(start + limit) if start + limit < len(rows) else None
         return {"data": page, "nextCursor": nxt}
+
+
+def agent_message(item_id: str, questions: list[dict[str, Any]] | None, text: str = "SECRET-TEXT") -> dict[str, Any]:
+    """agentMessage thread item in the real shape; `questions` is [{"title": str, "options": [str] | None}]."""
+    item: dict[str, Any] = {
+        "type": "agentMessage", "id": item_id, "text": text, "phase": "final_answer", "memoryCitation": None,
+        "delivery": "async" if questions else None,
+    }
+    if questions is not None:
+        item["questions"] = questions
+    return item
+
+
+def user_message(content: list[dict[str, Any]] | str, item_id: str = "um") -> dict[str, Any]:
+    if isinstance(content, str):
+        content = [{"type": "text", "text": content, "text_elements": []}]
+    return {"type": "userMessage", "id": item_id, "content": content}
+
+
+def other_item(item_id: str, kind: str = "reasoning") -> dict[str, Any]:
+    return {"type": kind, "id": item_id}
 
 
 async def wait_until(pred, timeout: float = 3.0) -> None:

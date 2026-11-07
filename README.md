@@ -6,13 +6,14 @@
 
 Codex Questions Bridge (`cqb`) is a small Telegram bridge for [Codex](https://github.com/openai/codex). It connects
 as one more client to the shared Codex app-server daemon, so it sees every thread and every live
-`request_user_input` question. It never starts, steers or edits anything. You get your threads on one self-updating
-Telegram message, questions with answer buttons, and an optional read-only LLM consultant per thread.
+`request_user_input` question. It never starts or edits threads on its own: the one thing it writes is the answer you
+confirm, sent as a normal user message. You get your threads on one self-updating Telegram message, questions with
+answer buttons, and an optional read-only LLM consultant per thread.
 
 - 📋 **One registry.** A single pinned message lists all your Codex threads and edits itself in place.
   `❓` means a thread waits for your answer, `⚙️` means it is working right now.
-- ❓ **Questions in Telegram.** A `request_user_input` question appears in the thread's own topic with answer buttons.
-  The answer goes back through the shared daemon. Secret questions are never relayed.
+- ❓ **Questions in Telegram.** Both kinds of questions (see [Two kinds of questions](#two-kinds-of-questions)) appear in
+  the thread's own topic with answer buttons. Secret questions are never relayed.
 - 💬 **A consultant per thread.** You create it by hand. It is an LLM chat in its own topic that reads the thread's
   history through read-only tools and cannot change anything.
 - 📊 **`/status`.** A snapshot with deterministic numbers (state, model, context fill, cache, subagents, limits),
@@ -75,13 +76,27 @@ sequenceDiagram
 The card says "delivered" only after the daemon confirms with `serverRequest/resolved`. If someone answers in Codex
 first, the card closes as answered elsewhere.
 
+### Two kinds of questions
+
+A *question* is a card the Codex apps show as "Question / Answer question". There are two kinds, and the Bridge handles both.
+
+| Kind | What it is | How the Bridge finds it | How an answer goes back |
+| --- | --- | --- | --- |
+| Blocking `request_user_input` | A server request. The turn waits (`waitingOnUserInput`). | Live, as a subscriber of the shared daemon. | A JSON-RPC response to that request. Delivered when `serverRequest/resolved` arrives. |
+| Agent-message question | A final `agentMessage` item with `delivery: async` and a `questions` list. The turn does not wait. | By reading thread items (`thread/items/list`, no resume, no subscribe) on a status broadcast of a root thread and in a periodic sweep (`[questions] agent_scan_seconds`). | A **normal user message** in the thread, in the format the Codex app itself writes (`<send_user_message_question_reply>` with one JSON entry per question). Delivered when that user message shows up in the thread. |
+
+An agent-message question is pending while no user message follows it in the thread. With several questions in one message you pick one
+answer per question (buttons, or `✍️ Другое` by replying `N: text` to the card) and confirm once: one combined message is sent, with
+`turn/steer` if the thread has a turn in progress and with `turn/start` otherwise, never with any model, sandbox or approval override.
+If you answered in the app first, the card says so and nothing is sent. Only root threads are scanned.
+
 ### Design principles
 
 - **Single process.** One asyncio process with SQLite (WAL), no workers, no broker, no web dashboard.
 - **Memory first.** Bounded queues, pages and previews, `gc.freeze()` after wiring. About 40-45 MiB RSS (see
   [Memory profile](#memory-profile)).
-- **Read-only by construction.** The daemon client refuses every method outside a whitelist. The consultant's tools
-  are read-only, and the scope hook is fail-closed (an error, a crash or a timeout means deny).
+- **Read-only by construction, one narrow write.** The daemon client refuses every method outside a whitelist. The
+  consultant's tools are read-only, and the scope hook is fail-closed (an error, a crash or a timeout means deny).
 - **No LLM inside the Bridge.** Inventory, registry, cards and cursors are deterministic code. Models live in PicoClaw.
 - **Manual consultants.** A consultant is created only by pressing a button, never by discovery, a question or `/status`.
 - **No secrets in the repo.** Tokens come from the environment. The config loader rejects keys named like
@@ -89,8 +104,10 @@ first, the card closes as answered elsewhere.
 
 What the Bridge may call on the daemon: `thread/list`, `thread/read`, `thread/loaded/list`, `thread/resume` (thread id
 only), `thread/unsubscribe`, `thread/turns/list`, `thread/items/list`, `thread/goal/get`, `account/rateLimits/read`.
-The only write is the JSON-RPC response to a captured question, and only when you ask for it. Logs carry ids and counts,
-never question or message text.
+There are two writes, both only when you confirm an answer: the JSON-RPC response to a captured `request_user_input`
+question, and `send_user_message`, one plain user message (thread id and text only) sent with `turn/steer` or
+`thread/resume` + `turn/start` to answer an agent-message question. `call()` refuses every other `turn/*` method.
+Logs carry ids and counts, never question or message text.
 
 ## 🚀 Requirements and quick start
 
@@ -283,7 +300,7 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 
 | Marker | Meaning |
 | --- | --- |
-| `❓` | A question is pending for this thread. |
+| `❓` | A question (of either kind) is pending for this thread. |
 | `⚙️` | The thread is working right now (status `active` without a waiting flag). |
 | `✅` / `🔒` / `⚠️` | Consultant state: open, closed (its thread is archived), error. `—` means none. |
 
@@ -321,6 +338,7 @@ Agent follows. The message is sent once when all of it is ready (typing indicato
 | `[mcp] port` | 18791 | 1024..65535, always bound to 127.0.0.1 |
 | `[status] timeout_seconds` | 300 | 30..3600 |
 | `[status] slots` | 2 | 1..8, each needs a dispatch rule in PicoClaw |
+| `[questions] agent_scan_seconds` | 20 | 5..600, period of the sweep for agent-message questions (at most 25 roots per sweep) |
 
 Environment: `CQB_TELEGRAM_TOKEN` (always), `CQB_PICO_TOKEN` and `CQB_MCP_TOKEN` (with `[pico]`, must differ),
 `CQB_CONFIG` (config path, instead of `--config`).
@@ -335,7 +353,7 @@ cache and no mmap.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # about 470 tests, no network, fake daemon, fake Telegram, fake PicoClaw
+.venv/bin/python -m pytest -q          # about 540 tests, no network, fake daemon, fake Telegram, fake PicoClaw
 .venv/bin/python -m pytest -q -m e2e tests/e2e   # real PicoClaw binary, mock model, loopback only
 ```
 
@@ -350,9 +368,9 @@ Telegram. `integrations/picoclaw_scope_hook.py` is a standalone stdlib script.
 ```text
 src/cqb/
   domain/      DTOs and enums
-  dao/         SQLite access (threads, questions, consultants, bot state)
+  dao/         SQLite access (threads, questions, agent questions, consultants, bot state)
   codex/       app-server client with the method whitelist, rollout tail reader, history, status reader
-  services/    inventory, questions, registry, consultants, relay, context, scope, status, live state
+  services/    inventory, questions, agent_questions, registry, consultants, relay, context, scope, status, live state
   telegram/    api, poller, router, control, cards, status_post, topics, keys, pure views
   pico/        PicoClaw gateway client, health probe, status narrator
   mcp/         read-only context API (server, tools)
@@ -373,6 +391,7 @@ token auth, session isolation, restart persistence, the fail-closed hook, slash 
 
 **Not verified yet**
 
+- Agent-message questions: the real Telegram flow and a live pending question (the format and both send paths were proven on throwaway threads only). The app writes one answer message per question; one combined message is the Bridge's choice. Whether the app accepts free text for these questions is not known.
 - Simultaneous answers from two clients, Desktop or mobile as co-subscribers, and a Bridge reconnect in the middle of a question.
 - Questions appear in `plan` collaboration mode. In default mode the tool is behind `default_mode_request_user_input`, which was off in Codex 0.164.
 - The Status Agent (routed slots) has been run end to end only with a mock model, not with a real one.

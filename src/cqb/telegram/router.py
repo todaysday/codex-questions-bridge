@@ -7,11 +7,13 @@ from dataclasses import dataclass
 
 from cqb.domain.enums import ConsultantState
 from cqb.domain.models import TelegramAction
+from cqb.services.agent_questions import AgentQuestionService
 from cqb.services.consultants import ConsultantError, ConsultantService
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.telegram.api import BotApi, TelegramError
+from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.consultant_view import render_opening, render_questions, render_thread
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
@@ -42,10 +44,12 @@ class Router:
         topics: ControlTopics,
         publisher: RegistryPublisher,
         cards: QuestionCards,
+        agent_cards: AgentQuestionCards,
         consultants: ConsultantService,
         consultant_topics: TelegramTopics,
         registry: RegistryQuery,
         questions: QuestionService,
+        agent_questions: AgentQuestionService,
         relay: ConsultantRelay,
         status: StatusPoster,
         source_id: str,
@@ -58,10 +62,12 @@ class Router:
         self._topics = topics
         self._publisher = publisher
         self._cards = cards
+        self._agent_cards = agent_cards
         self._consultants = consultants
         self._consultant_topics = consultant_topics
         self._registry = registry
         self._questions = questions
+        self._agent_questions = agent_questions
         self._relay = relay
         self._status = status
         self._source = source_id
@@ -131,17 +137,23 @@ class Router:
                 await self._say(m, render_thread(row, self._source, int(self._clock())))
         elif command == "questions":
             qs = self._questions.open_questions(consultant.root_thread_id)
-            await self._say(m, render_questions(qs, self._names()))
+            agent = self._agent_questions.open_questions(consultant.root_thread_id)
+            await self._say(m, render_questions(qs, self._names(), agent))
         elif command == "status":
             if not self._status.request(consultant.root_thread_id, m.thread_id):
                 await self._say(m, STATUS_BUSY)
         elif command is None and m.reply_to_message_id is not None and (
-            reply := await self._cards.stage_text(m.reply_to_message_id, m.text or "")
+            reply := await self._card_reply(m.reply_to_message_id, m.text or "")
         ) is not None:
             if reply.text:  # a reply to a question card is never chat: it must not reach the model
                 await self._say(m, reply.text)
         else:
             await self._relay.relay(consultant, m.text or "")
+
+    async def _card_reply(self, reply_to: int, text: str) -> Reply | None:
+        """Free text replied to a question card of either kind; None when the message is not a card."""
+        reply = await self._cards.stage_text(reply_to, text)
+        return reply if reply is not None else await self._agent_cards.stage_text(reply_to, text)
 
     def _command(self, text: str) -> str | None:
         """Command name; None for plain text; "" for a command aimed at another bot."""
@@ -155,7 +167,7 @@ class Router:
 
     def _names(self) -> dict[str, str]:
         rows = {}
-        for q in self._questions.open_questions():
+        for q in (*self._questions.open_questions(), *self._agent_questions.open_questions()):
             row = self._registry.describe(q.root_thread_id)
             if row:
                 rows[q.root_thread_id] = thread_name(row)
@@ -199,6 +211,8 @@ class Router:
             self._publisher.request_refresh(force=True)
         elif (q := self._questions.by_card_message(message_id)) is not None:
             self._cards.mark(q.question_id)
+        elif (aq := self._agent_questions.by_card_message(message_id)) is not None:
+            self._agent_cards.mark(aq.agent_question_id)
 
     async def _dispatch(self, a: TelegramAction) -> Reply:
         match a.action:
@@ -218,6 +232,15 @@ class Router:
                 return await self._cards.cancel(a.payload or "")
             case "other":
                 return self._cards.other_hint()
+            case "aopt":
+                qid, question, option = (a.payload or "").split(":")
+                return await self._agent_cards.stage(qid, int(question), int(option))
+            case "asend":
+                return await self._agent_cards.confirm(a.payload or "")
+            case "acancel":
+                return await self._agent_cards.cancel(a.payload or "")
+            case "aother":
+                return self._agent_cards.other_hint((a.payload or "").partition(":")[0])
         return Reply("Неизвестное действие")
 
     async def _create(self, root: str) -> Reply:

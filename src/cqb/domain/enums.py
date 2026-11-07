@@ -22,6 +22,12 @@ OPEN_LIFECYCLES = (
 )
 
 
+class AgentQuestionState(StrEnum):
+    PENDING = "pending"
+    ANSWERED = "answered"
+    STALE = "stale"
+
+
 class VerificationSource(StrEnum):
     HOOK = "hook"
     JOURNAL = "journal"
