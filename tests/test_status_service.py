@@ -82,12 +82,12 @@ def test_turn_elapsed_only_for_an_active_thread_and_never_negative():
     assert collect(svc, "r1").turn_elapsed_s == 0
 
 
-def test_context_and_cache_math_use_last_call_only():
-    usage = UsageSnapshot(context_tokens=29_500, context_window=475_000, input_tokens=29_000, cached_input_tokens=23_200)
+def test_context_uses_the_last_call_and_the_cache_rate_the_whole_session():
+    usage = UsageSnapshot(29_500, 475_000, 29_000, 29_000, total_input_tokens=29_000, total_cached_input_tokens=23_200)
     svc, src, *_ = make(usage)
     src.threads["r1"] = snapshot("r1", path="/p")
     report = collect(svc)
-    assert report.usage.fill_percent == 6 and report.usage.cache_percent == 80
+    assert report.usage.fill_percent == 6 and report.usage.cache_permille == 800
     assert "\n <b>ctx</b> 29.5k/475k (6%) · 💾 80%\n" in render_status(report)
 
 
@@ -104,7 +104,7 @@ def test_the_roots_cwd_reaches_the_report_from_the_thread_snapshot_already_read(
 def test_usage_edge_cases():
     assert UsageSnapshot(10, None, 0, 0).fill_percent is None
     assert UsageSnapshot(10, 0, 0, 0).fill_percent is None
-    assert UsageSnapshot(10, 100, 0, 0).cache_percent is None
+    assert UsageSnapshot(10, 100, 0, 0).cache_permille is None
     assert UsageSnapshot(100, 100, 50, 50).fill_percent == 100
 
 

@@ -54,6 +54,8 @@ class UsageSnapshot:
     context_window: int | None
     input_tokens: int
     cached_input_tokens: int
+    total_input_tokens: int | None = None  # since the session started (cached tokens are part of the input)
+    total_cached_input_tokens: int | None = None
 
     @property
     def fill_percent(self) -> int | None:
@@ -62,10 +64,14 @@ class UsageSnapshot:
         return round(100 * self.context_tokens / self.context_window)
 
     @property
-    def cache_percent(self) -> int | None:
-        if self.input_tokens <= 0:
+    def cache_permille(self) -> int | None:
+        """Prompt-cache hit rate of the whole session in tenths of a percent, rounded DOWN (1000 only when every input
+        token was cached). Not the latest call: a call that re-sends a long prefix is nearly all cached, always ~100%.
+        None when the session totals are unknown: a last-call figure would mislead."""
+        total, cached = self.total_input_tokens, self.total_cached_input_tokens
+        if not total or total <= 0 or cached is None or not 0 <= cached <= total:
             return None
-        return round(100 * self.cached_input_tokens / self.input_tokens)
+        return cached * 1000 // total
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +119,8 @@ class AgentLine:
     last_activity: int | None
     activity: Activity | None = None
     depth: int | None = None  # 2 and deeper are drawn as nested
+    compactions: int | None = None  # how many times its context was compacted; None = unknown
+    cache_permille: int | None = None  # session-wide prompt-cache hit rate (see UsageSnapshot); None = unknown
 
 
 @dataclass(frozen=True, slots=True)
@@ -145,3 +153,4 @@ class StatusReport:
     activity: Activity | None = None  # the root's own 'now'
     summary: StatusSummary | None = None  # None = the Status Agent was unavailable
     cwd: str | None = None  # the root's working directory
+    compactions: int | None = None  # how many times the root's context was compacted; None = unknown

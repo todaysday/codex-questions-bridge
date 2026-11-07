@@ -11,6 +11,7 @@ import aiohttp
 
 from cqb.codex.appserver import AppServerClient
 from cqb.codex.history import HistoryReader
+from cqb.codex.rollout_count import CompactionCounter
 from cqb.codex.rollout_tail import read_usage
 from cqb.codex.status_reader import DaemonStatusReader
 from cqb.codex.stream import dispatch
@@ -191,7 +192,7 @@ async def run(
         status = StatusPoster(
             api, StatusService(
                 reader, live, lambda path: read_usage(path, home), source_id, narrator,
-                summary_timeout=config.status.timeout_seconds,
+                summary_timeout=config.status.timeout_seconds, compactions=CompactionCounter(home),
             ),
             tg.chat_id, source_id,
         )

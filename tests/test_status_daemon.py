@@ -44,10 +44,13 @@ def test_run_state_mapping_from_wire():
 
 def test_new_notifications_are_normalized_and_bad_payloads_ignored():
     ev = normalize(Inbound("notification", "thread/tokenUsage/updated", {
-        "threadId": "t1", "turnId": "u", "tokenUsage": {"last": LAST, "total": {"totalTokens": 10**7},
-                                                         "modelContextWindow": 100_000}}))
+        "threadId": "t1", "turnId": "u", "tokenUsage": {
+            "last": LAST, "total": {"totalTokens": 10**7, "inputTokens": 8_000_000, "cachedInputTokens": 6_000_000},
+            "modelContextWindow": 100_000}}))
     assert isinstance(ev, TokenUsageUpdated)
-    assert (ev.usage.context_tokens, ev.usage.context_window, ev.usage.cache_percent) == (40_400, 100_000, 75)
+    assert (ev.usage.context_tokens, ev.usage.context_window, ev.usage.cache_permille) == (40_400, 100_000, 750)
+    bare = normalize(Inbound("notification", "thread/tokenUsage/updated", {"threadId": "t", "tokenUsage": {"last": LAST}}))
+    assert bare.usage.cache_permille is None  # the latest call alone says nothing honest about the cache
     assert normalize(Inbound("notification", "thread/goal/updated", {"threadId": "t", "goal": {}})) == GoalChanged("t", True)
     assert normalize(Inbound("notification", "thread/goal/cleared", {"threadId": "t"})) == GoalChanged("t", False)
     no_window = normalize(Inbound("notification", "thread/tokenUsage/updated", {
@@ -222,6 +225,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
         rollout = home / "sessions" / "r.jsonl"
         rollout.write_text(json.dumps({"type": "event_msg", "payload": {"type": "token_count", "info": {
             "last_token_usage": {"input_tokens": 50_000, "cached_input_tokens": 25_000, "total_tokens": 51_000},
+            "total_token_usage": {"input_tokens": 400_000, "cached_input_tokens": 396_000, "total_tokens": 1},
             "model_context_window": 200_000}}}) + "\n")
         async with connected_client() as (client, fake):
             fake.add_thread("r1", NOW - 60, name="Root", path=str(rollout))
@@ -239,7 +243,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
                 fake.turns["r1"] = [{"id": "t1", "status": "inProgress", "startedAt": int(asyncio.get_running_loop().time())}]
                 report = await svc.collect("local", "r1")
                 text = render_status(report)
-                assert " <b>ctx</b> 51k/200k (26%) · 💾 50%" in text  # root: rollout tail
+                assert " <b>ctx</b> 51k/200k (26%) · 💾 99.0%" in text  # root: rollout tail
                 assert " 🟢 Ada · luna·low · ctx 40%" in text  # subagent: broadcast usage
                 assert "🎯 Ship · 10/100\n" in text and "📈 лимит 30% нед." in text
                 assert set(fake.methods()) <= {"thread/read", "thread/list", "thread/goal/get",

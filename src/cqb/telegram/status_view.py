@@ -66,15 +66,18 @@ class Plan:
     agent_lines: int = AGENT_LINES
     now_max: int = NOW_MAX
     goal: bool = True
+    agent_cache: bool = True  # the `💾 N%` part of a subagent line
     progress_max: int = PROGRESS_MAX  # characters of the summary parts, before escaping
     next_max: int = NEXT_MAX
 
 
 PLANS = (
-    *(Plan(agent_lines=n) for n in range(AGENT_LINES, MIN_AGENT_LINES - 1, -1)),
-    Plan(MIN_AGENT_LINES, 24), Plan(MIN_AGENT_LINES, 12), Plan(MIN_AGENT_LINES, 12, goal=False),
-    Plan(MIN_AGENT_LINES, 12, False, 450, 250), Plan(MIN_AGENT_LINES, 12, False, 300, 150),  # the summary goes last
-    Plan(0, 0, False, 150, 100),  # unreachable in practice, but sized for the worst escaped card: the guarantee is unconditional
+    Plan(),
+    *(Plan(agent_lines=n, agent_cache=False) for n in range(AGENT_LINES, MIN_AGENT_LINES - 1, -1)),  # cache part first
+    Plan(MIN_AGENT_LINES, 24, agent_cache=False), Plan(MIN_AGENT_LINES, 12, agent_cache=False),
+    Plan(MIN_AGENT_LINES, 12, False, False),
+    Plan(MIN_AGENT_LINES, 12, False, False, 450, 250), Plan(MIN_AGENT_LINES, 12, False, False, 300, 150),  # summary last
+    Plan(0, 0, False, False, 150, 100),  # unreachable in practice, but sized for the worst escaped card: the guarantee is unconditional
 )
 
 
@@ -88,7 +91,7 @@ def render_status(r: StatusReport) -> str:
 
 
 def _card(r: StatusReport, plan: Plan) -> str:
-    top = [_title_line(r), _status_line(r), _context(r.usage)]
+    top = [_title_line(r), _status_line(r), _context(r.usage, r.compactions)]
     if r.goal and plan.goal:
         top.append(_goal(r.goal))
     blocks = ["\n".join(top), "\n".join(_agents(r, plan)), "\n".join(_summary(r.summary, plan)), _limits(r.limits)]
@@ -130,14 +133,24 @@ def _model(model: str | None, effort: str | None) -> str | None:
     return "·".join(x for x in (name, effort) if x) or None
 
 
-def _context(u: UsageSnapshot | None) -> str:
-    """` <b>ctx</b> 160k/475k (34%) · 💾 80%`: starts with one space; the cache part is left out when unknown."""
+def _cache(permille: int) -> str:
+    """`97%`, and from 99% up one decimal (`99.4%`); never rounded up, `100%` only when every token was cached."""
+    return "100%" if permille >= 1000 else f"{permille / 10:.1f}%" if permille >= 990 else f"{permille // 10}%"
+
+
+def _compacted(n: int | None) -> str:
+    """` · 🗜️5`: how many times the context was compacted; nothing for zero or unknown."""
+    return f" · 🗜️{n}" if n else ""
+
+
+def _context(u: UsageSnapshot | None, compactions: int | None) -> str:
+    """` <b>ctx</b> 160k/475k (34%) · 💾 80% · 🗜️5`: starts with one space; the cache and 🗜️ parts are left out when unknown."""
     if u is None:
-        return f" <b>ctx</b> {DASH}"
+        return f" <b>ctx</b> {DASH}{_compacted(compactions)}"
     window = tokens(u.context_window) if u.context_window else DASH
     fill = f" ({u.fill_percent}%)" if u.fill_percent is not None else ""
-    cache = f" · 💾 {u.cache_percent}%" if u.cache_percent is not None else ""
-    return f" <b>ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}"
+    cache = f" · 💾 {_cache(u.cache_permille)}" if u.cache_permille is not None else ""
+    return f" <b>ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}{_compacted(compactions)}"
 
 
 def _goal(g: GoalSummary) -> str:
@@ -156,19 +169,22 @@ def _agents(r: StatusReport, plan: Plan) -> list[str]:
     total = f"{r.agents_total}{'+' if r.agents_more else ''}"
     lines = [" · ".join([f"🤖 <b>Субагенты {total}</b>", *(f"{icon} {n}" for icon, n in counts if n)])]
     shown = r.agents[: plan.agent_lines]
-    lines += [_agent_line(a, r.now, plan.now_max) for a in shown]
+    lines += [_agent_line(a, r.now, plan.now_max, plan.agent_cache) for a in shown]
     if r.agents_total > len(shown):
         lines.append(f" … и ещё {r.agents_total - len(shown)}")
     return lines
 
 
-def _agent_line(a: AgentLine, now: int, now_max: int) -> str:
-    """One line: icon, title, model, context, and what it does now (or what it waits for, or how long it rests)."""
+def _agent_line(a: AgentLine, now: int, now_max: int, cache: bool = True) -> str:
+    """One line: icon, title, model, context and cache hit, compactions, and what it does now (or what it waits
+    for, or how long it rests)."""
     parts = [_e(a.label or DASH, TITLE_MAX)]
     if model := _model(a.model, a.effort):
         parts.append(_e(model, MODEL_MAX))
     if a.context_percent is not None:
         parts.append(f"ctx {a.context_percent}%")
+    if cache and a.cache_permille is not None:
+        parts.append(f"💾 {_cache(a.cache_permille)}")
     if a.state in (RunState.WORKING, RunState.STALLED):
         fragment = _now(a.state, a.activity, now)
         if fragment != DASH and now_max:
@@ -177,6 +193,8 @@ def _agent_line(a: AgentLine, now: int, now_max: int) -> str:
         parts.append(WORD[a.state])
     else:
         parts.append(_ago(a.last_activity, now))
+    if a.compactions:
+        parts.append(f"🗜️{a.compactions}")
     nested = "↳ " if a.depth is not None and a.depth >= 2 else ""
     return f" {nested}{ICON[a.state]} " + " · ".join(parts)
 

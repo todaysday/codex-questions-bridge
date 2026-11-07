@@ -11,7 +11,7 @@ import contextlib
 import dataclasses
 import logging
 import time
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from typing import Protocol
 
 from cqb.domain.enums import RunState
@@ -62,15 +62,17 @@ class StatusService:
         self,
         source: StatusSource,
         live: LiveState,
-        root_usage: Callable[[str], UsageSnapshot | None],
+        tail_usage: Callable[[str], UsageSnapshot | None],
         source_id: str,
         narrator: StatusNarrator | None = None,
         clock: Callable[[], float] = time.time,
         summary_timeout: float = SUMMARY_TIMEOUT,
+        compactions: Callable[[str], Awaitable[int | None]] | None = None,
     ) -> None:
         self._source = source
         self._live = live
-        self._root_usage = root_usage
+        self._tail_usage = tail_usage  # rollout path -> latest usage; for the root and for every shown subagent
+        self._compactions = compactions  # rollout path -> how many times the context was compacted (a grep child, may take a moment)
         self._source_id = source_id
         self._narrator = narrator or NoNarrator()
         self._clock = clock
@@ -121,17 +123,18 @@ class StatusService:
         now = int(self._clock())
         live = self._live.get(root_id)
         skip_goal = live is not None and live.has_goal is False
-        activity, goal, agents, limits = await asyncio.gather(
+        activity, goal, agents, limits, compacted = await asyncio.gather(
             self._activity(root_id, root.state, turn_needed=True),
             _none() if skip_goal else self._source.goal(root_id),
             self._source.descendants(root_id, AGENT_FETCH_LIMIT),
             self._rate_limits(now),
+            self._compacted(root.path),
         )
         last = max(root.updated_at, live.seen_at if live else 0) or None
         state, quiet = root.state, None
         if state is RunState.WORKING and last is not None and now - last > STALL_SECONDS:
             state, quiet = RunState.STALLED, (now - last) // 60
-        usage = self._root_usage(root.path) if root.path else None
+        usage = self._tail_usage(root.path) if root.path else None
         started = activity.started_at if activity and activity.turn_running else None
         active = root.state in (RunState.WORKING, RunState.WAITING_INPUT, RunState.WAITING_APPROVAL)
         lines, total, working, waiting, idle = await self._agents(agents)
@@ -141,7 +144,7 @@ class StatusService:
             usage=usage, last_activity=last, goal=goal,
             agents_total=total, agents_more=bool(agents and agents.more),
             agents_working=working, agents_waiting=waiting, agents_idle=idle, agents=lines, limits=limits,
-            activity=activity, cwd=root.cwd,
+            activity=activity, cwd=root.cwd, compactions=compacted,
         )
 
     async def _agents(
@@ -154,16 +157,40 @@ class StatusService:
         waiting = sum(t.state.is_waiting for t in threads)
         ranked = sorted(threads, key=lambda t: (_rank(t.state), -self._last(t)))[:AGENT_LINES]
         sem = asyncio.Semaphore(NOW_FETCHES)
-        activities = await asyncio.gather(*(self._activity(t.thread_id, t.state, sem=sem) for t in ranked))
-        lines = tuple(self._line(t, a) for t, a in zip(ranked, activities))
+        activities, extras = await asyncio.gather(
+            asyncio.gather(*(self._activity(t.thread_id, t.state, sem=sem) for t in ranked)),
+            asyncio.gather(*(self._rollout_facts(t, sem) for t in ranked)),
+        )
+        lines = tuple(self._line(t, a, *e) for t, a, e in zip(ranked, activities, extras))
         return lines, len(threads), working, waiting, len(threads) - working - waiting
 
-    def _line(self, t: ThreadSnapshot, activity: Activity | None) -> AgentLine:
-        live = self._live.get(t.thread_id)
+    async def _rollout_facts(self, t: ThreadSnapshot, sem: asyncio.Semaphore) -> tuple[UsageSnapshot | None, int | None]:
+        """Context usage and compaction count of one subagent from its rollout, which survives a Bridge restart.
+
+        The daemon writes the rollout when it broadcasts, so the tail is never older than the live value: it wins,
+        and the live value only fills in when the tail has none (no path, unreadable, no token_count yet)."""
+        async with sem:
+            usage = self._tail_usage(t.path) if t.path else None
+            live = self._live.get(t.thread_id)
+            return usage or (live.usage if live else None), await self._compacted(t.path)
+
+    async def _compacted(self, path: str | None) -> int | None:
+        if not path or self._compactions is None:
+            return None
+        try:
+            return await self._compactions(path)
+        except Exception as exc:  # fail soft: the counter is a nicety
+            log.warning("compaction count failed: %s", type(exc).__name__)
+            return None
+
+    def _line(
+        self, t: ThreadSnapshot, activity: Activity | None, usage: UsageSnapshot | None, compactions: int | None
+    ) -> AgentLine:
         return AgentLine(
             label=t.title, depth=t.depth, model=t.model, effort=t.effort, state=t.state,
-            context_percent=live.usage.fill_percent if live and live.usage else None,
-            last_activity=self._last(t) or None, activity=activity,
+            context_percent=usage.fill_percent if usage else None,
+            last_activity=self._last(t) or None, activity=activity, compactions=compactions,
+            cache_permille=usage.cache_permille if usage else None,
         )
 
     def _last(self, t: ThreadSnapshot) -> int:

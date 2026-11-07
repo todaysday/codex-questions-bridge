@@ -21,15 +21,16 @@ TURN = Activity(True, NOW - 1500, None, ItemBrief(K.COMMAND, False, "pytest -q")
 ENGLISH = ("working", "idle", "completed", "waiting", "stalled", "running")
 
 
-def agent(label="Ada", state=R.WORKING, model="gpt-6-luna", effort="high", ctx=40, age=30, now=None, depth=1):
+def agent(label="Ada", state=R.WORKING, model="gpt-6-luna", effort="high", ctx=40, age=30, now=None, depth=1,
+          compactions=None, cache_permille=None):
     activity = Activity(True, NOW - 60, None, ItemBrief(K.REASONING, False)) if now is None and state is R.WORKING else now
-    return AgentLine(label, model, effort, state, ctx, NOW - age, activity, depth)
+    return AgentLine(label, model, effort, state, ctx, NOW - age, activity, depth, compactions, cache_permille)
 
 
 def report(**kw):
     base = dict(
         now=NOW, title="Fox Profile", state=R.WORKING, quiet_minutes=None, model="gpt-6-sol", effort="low",
-        turn_elapsed_s=1500, usage=UsageSnapshot(160_000, 475_000, 100, 80), last_activity=NOW - 120,
+        turn_elapsed_s=1500, usage=UsageSnapshot(160_000, 475_000, 100, 100, 1000, 800), last_activity=NOW - 120,
         goal=GoalSummary("Ship the profile page", "active", 1_250_000, None), agents_total=0, agents_more=False,
         agents_working=0, agents_waiting=0, agents_idle=0, agents=(), limits=RateLimits(41, RESET, 10080),
         activity=TURN, summary=None)
@@ -217,10 +218,70 @@ def test_status_line_segments_turn_duration_last_activity_and_now():
 
 def test_context_line_starts_with_one_space_has_bold_ctx_and_leaves_out_an_unknown_cache():
     ctx = lambda usage: render_status(report(usage=usage)).splitlines()[2]
-    assert ctx(UsageSnapshot(160_000, 475_000, 100, 80)) == " <b>ctx</b> 160k/475k (34%) · 💾 80%"
-    assert ctx(UsageSnapshot(160_000, 475_000, 0, 0)) == " <b>ctx</b> 160k/475k (34%)"
-    assert ctx(UsageSnapshot(900, None, 10, 1)) == " <b>ctx</b> 900/— · 💾 10%"
+    assert ctx(UsageSnapshot(160_000, 475_000, 100, 80, 1000, 800)) == " <b>ctx</b> 160k/475k (34%) · 💾 80%"
+    assert ctx(UsageSnapshot(160_000, 475_000, 0, 0, 0, 0)) == " <b>ctx</b> 160k/475k (34%)"
+    assert ctx(UsageSnapshot(900, None, 10, 1, 100, 10)) == " <b>ctx</b> 900/— · 💾 10%"
+    assert ctx(UsageSnapshot(160_000, 475_000, 100, 100)) == " <b>ctx</b> 160k/475k (34%)"  # last call only: no figure
     assert ctx(None) == " <b>ctx</b> —"
+
+
+@pytest.mark.parametrize("permille,shown", [
+    (0, "0%"), (7, "0%"), (10, "1%"), (500, "50%"), (876, "87%"), (979, "97%"), (985, "98%"), (989, "98%"),  # integers, down
+    (990, "99.0%"), (994, "99.4%"), (995, "99.5%"), (999, "99.9%"),  # one decimal from 99%, never rounded up
+    (1000, "100%"),  # exactly everything cached
+])
+def test_cache_rate_is_rounded_down_with_one_decimal_from_99_percent_and_100_only_when_exact(permille, shown):
+    assert view._cache(permille) == shown
+    usage = UsageSnapshot(1, 2, 3, 3, 1000, permille)
+    assert usage.cache_permille == permille
+    assert ctx_line(usage).endswith(f"💾 {shown}")
+
+
+def ctx_line(usage):
+    return render_status(report(usage=usage)).splitlines()[2]
+
+
+def test_cache_rate_is_the_whole_session_never_the_last_call_and_unknown_shows_nothing():
+    assert UsageSnapshot(1, 2, 1000, 1000).cache_permille is None  # a last-call figure of 100% is not shown
+    assert UsageSnapshot(1, 2, 1000, 1000, 5_000_000, 4_970_000).cache_permille == 994
+    assert UsageSnapshot(1, 2, 3, 3, 1999, 1000).cache_permille == 500  # 50.02: down
+    assert UsageSnapshot(1, 2, 3, 3, 999_999, 999_999).cache_permille == 1000 and UsageSnapshot(1, 2, 3, 3, 1_000_000, 999_999).cache_permille == 999  # one token short: 99.9, never 100
+    assert UsageSnapshot(1, 2, 3, 3, 0, 0).cache_permille is None and UsageSnapshot(1, 2, 3, 3, 10, 11).cache_permille is None
+    assert UsageSnapshot(1, 2, 3, 3, 10, None).cache_permille is None
+    assert "💾" not in ctx_line(UsageSnapshot(160_000, 475_000, 100, 100))
+
+
+def test_compactions_are_shown_after_the_cache_on_the_root_and_at_the_end_of_a_subagent_line_and_zero_is_hidden():
+    usage = UsageSnapshot(160_000, 475_000, 100, 80, 1000, 994)
+    text = render_status(with_agents([agent(compactions=2), agent("B", compactions=0), agent("C", compactions=None)],
+                                     usage=usage, compactions=5))
+    assert text.splitlines()[2] == " <b>ctx</b> 160k/475k (34%) · 💾 99.4% · 🗜️5"
+    lines = [x for x in text.splitlines() if x.startswith(" 🟢")]
+    assert lines[0].endswith("· думает · 🗜️2") and lines[1].endswith("· думает") and lines[2].endswith("· думает")
+    assert "🗜️" not in render_status(report(usage=usage, compactions=0))
+    assert "🗜️" not in render_status(report(usage=usage, compactions=None))
+    assert render_status(report(usage=None, compactions=3)).splitlines()[2] == " <b>ctx</b> — · 🗜️3"
+    assert render_status(report(usage=UsageSnapshot(1, None, 1, 1), compactions=3)).splitlines()[2].endswith("· 🗜️3")
+
+
+def test_subagent_lines_show_the_cache_rate_right_after_the_context():
+    line = lambda **kw: next(x for x in render_status(with_agents([agent(**kw)])).splitlines() if x.startswith(" 🟢"))
+    assert line(cache_permille=874) == " 🟢 Ada · luna 6·high · ctx 40% · 💾 87% · думает"
+    assert line(cache_permille=997) == " 🟢 Ada · luna 6·high · ctx 40% · 💾 99.7% · думает"
+    assert line(cache_permille=None) == " 🟢 Ada · luna 6·high · ctx 40% · думает"
+    assert line(cache_permille=874, ctx=None) == " 🟢 Ada · luna 6·high · 💾 87% · думает"
+    assert line(cache_permille=874, compactions=1).endswith("ctx 40% · 💾 87% · думает · 🗜️1")
+
+
+def test_the_subagent_cache_part_is_the_first_thing_the_shrink_drops():
+    plans = view.PLANS
+    assert plans[0].agent_cache and not any(p.agent_cache for p in plans[1:])
+    assert plans[1].agent_lines == plans[0].agent_lines and plans[1].now_max == plans[0].now_max and plans[1].goal  # nothing else yet
+    r = with_agents([agent(f"Agent {i}", cache_permille=874) for i in range(6)], summary=StatusSummary("в", "д"))
+    full = view._card(r, plans[0])
+    kid_marks = lambda text: sum("💾" in x for x in text.splitlines() if x.startswith(" 🟢"))
+    assert kid_marks(full) == 6 and kid_marks(view._card(r, plans[1])) == 0 and "💾 80%" in view._card(r, plans[1])  # root keeps it
+    assert len(view._card(r, plans[1])) < len(full)
 
 
 def test_time_and_duration_words_are_abbreviated():
@@ -275,10 +336,11 @@ def test_clipping_happens_before_escaping_so_an_entity_is_never_cut():
 
 def huge(**kw):
     long = "я" * 400
-    kids = [agent(long, model=long, effort=long, now=Activity(True, NOW, None, ItemBrief(K.COMMAND, False, long)))
-            for _ in range(6)]
+    kids = [agent(long, model=long, effort=long, now=Activity(True, NOW, None, ItemBrief(K.COMMAND, False, long)),
+                  compactions=10**6, cache_permille=999) for _ in range(6)]
     base = dict(title=long, model=long, effort=long, activity=Activity(True, NOW, None, ItemBrief(K.COMMAND, False, long)),
-                goal=GoalSummary(long, "x" * 99, 10**9, 10**9), summary=StatusSummary(long * 2, long))
+                goal=GoalSummary(long, "x" * 99, 10**9, 10**9), summary=StatusSummary(long * 2, long),
+                compactions=10**9, usage=UsageSnapshot(10**9, 10**9, 10**9, 10**9, 10**12, 10**12 - 1))
     base.update(kw)
     return with_agents(kids, total=300, **base)
 
@@ -336,24 +398,23 @@ def test_plans_shrink_in_the_documented_order():
 
 
 def test_render_picks_the_first_plan_that_fits(monkeypatch):
-    r = huge()
-    size = lambda *plan: len(view._card(r, view.Plan(*plan)))
-    fragments = lambda text: [len(x.split(" · ")[-1]) for x in text.splitlines() if x.startswith(" 🟢")]
-    full = render_status(r)
-    assert len(full) <= TEXT_LIMIT  # a huge fixture does not fit with six lines: it was shrunk already
-    cases = [  # (limit just under this plan, what must be left)
-        (size(6, 40, True), 5, 40, True), (size(3, 40, True), 3, 24, True),
-        (size(3, 24, True), 3, 12, True), (size(3, 12, True), 3, 12, False)]
-    monkeypatch.setattr(view, "TEXT_LIMIT", size(3, 12, False) - 1)  # only now is the summary cut, not before
-    text = render_status(r)
-    assert len(text) < size(3, 12, False) and len(fragments(text)) == 3 and "🎯" not in text
-    assert len(text.split("📝 <b>В процессе:</b> ")[1].split("\n")[0]) < len("я" * PROGRESS_MAX * 2)
-    for limit, count, now_len, goal in cases:
-        monkeypatch.setattr(view, "TEXT_LIMIT", limit - 1)
+    r = with_agents([agent(f"Agent {i}", cache_permille=874) for i in range(6)], total=40, cwd="/w/fox",
+                    summary=StatusSummary("в" * PROGRESS_MAX, "д" * NEXT_MAX), goal=GoalSummary("ц" * 60, "paused", 1, 2))
+    plans = view.PLANS
+    sizes = [len(view._card(r, p)) for p in plans]
+    assert sizes == sorted(sizes, reverse=True) and sizes[-1] < sizes[0]  # no step grows the card
+    kids = lambda text: [x for x in text.splitlines() if x.startswith(" 🟢")]
+    for i in range(1, len(plans)):
+        if sizes[i] == sizes[i - 1]:
+            continue  # a plan that changes nothing for this card
+        monkeypatch.setattr(view, "TEXT_LIMIT", sizes[i - 1] - 1)  # just too small for the previous plan
         text = render_status(r)
-        assert len(text) <= limit - 1 and len(fragments(text)) == count and ("🎯" in text) is goal, (limit, count)
-        assert max(fragments(text)) == now_len if count else True
+        assert text == view._card(r, plans[i]) and len(text) <= sizes[i - 1] - 1
+        assert len(kids(text)) == plans[i].agent_lines and ("🎯" in text) is plans[i].goal
+        assert all(("💾" in x) is plans[i].agent_cache for x in kids(text))
         check_html(text)
+    monkeypatch.setattr(view, "TEXT_LIMIT", 10)  # nothing fits: the last plan is still returned
+    assert render_status(r) == view._card(r, plans[-1])
 
 
 def test_the_folder_survives_every_shrink_step():

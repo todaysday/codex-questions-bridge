@@ -9,8 +9,10 @@ shown; the goal text and command heads are replaced by placeholders, message tex
 import asyncio
 import dataclasses
 import sys
+import time
 
 from cqb.codex.appserver import AppServerClient
+from cqb.codex.rollout_count import CompactionCounter
 from cqb.codex.rollout_tail import read_usage
 from cqb.codex.status_reader import DaemonStatusReader
 from cqb.services.live_state import LiveState
@@ -55,8 +57,15 @@ async def main(socket_path: str, home: str) -> int:
             if root is None:
                 print("no root thread found")
                 return 1
-            service = StatusService(DaemonStatusReader(client), LiveState(), lambda p: read_usage(p, home), "local")
+            service = StatusService(
+                DaemonStatusReader(client), LiveState(), lambda p: read_usage(p, home), "local",
+                compactions=CompactionCounter(home))
+            started = time.monotonic()
             r = await service.collect("local", root["id"])
+            print(f"collect took {(time.monotonic() - started) * 1000:.0f} ms (cold: nothing cached yet)")
+            started = time.monotonic()
+            await service.collect("local", root["id"])
+            print(f"second collect took {(time.monotonic() - started) * 1000:.0f} ms (rollout counts cached)")
     except TimeoutError:
         print("FAILED: no connection / response within 30 s")
         return 1
@@ -66,13 +75,14 @@ async def main(socket_path: str, home: str) -> int:
     u = r.usage
     print(f"state={r.state.value} model={r.model} effort={r.effort} quiet_min={r.quiet_minutes} turn_s={r.turn_elapsed_s}")
     print(f"context={u.fill_percent if u else None}% window={u.context_window if u else None} "
-          f"cache={u.cache_percent if u else None}% last_activity_s_ago={r.now - r.last_activity if r.last_activity else None}")
+          f"cache_permille={u.cache_permille if u else None} last_activity_s_ago={r.now - r.last_activity if r.last_activity else None}")
     print(f"goal={'yes:' + r.goal.status if r.goal else 'none'} "
           f"agents_total={r.agents_total} more={r.agents_more} working={r.agents_working} "
           f"waiting={r.agents_waiting} idle={r.agents_idle} lines={len(r.agents)}")
+    print(f"root compactions={r.compactions}")
     print(f"root now: {_now(r.activity)}")
     for a in r.agents[:3]:
-        print(f"  agent state={a.state.value} model={a.model} effort={a.effort} ctx={a.context_percent} now: {_now(a.activity)}")
+        print(f"  agent state={a.state.value} model={a.model} effort={a.effort} ctx={a.context_percent} cache_permille={a.cache_permille} compactions={a.compactions} now: {_now(a.activity)}")
     print(f"limits={r.limits}")
     print("--- card (HTML as sent; goal text and command heads masked) ---")
     print(render_status(_masked(r)))

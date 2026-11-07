@@ -17,7 +17,7 @@ ROOT_DIRS = ("sessions", "archived_sessions")
 
 
 def read_usage(path: str, codex_home: str) -> UsageSnapshot | None:
-    real = _safe_path(path, codex_home)
+    real = safe_path(path, codex_home)
     if real is None:
         return None
     try:
@@ -41,7 +41,8 @@ def read_usage(path: str, codex_home: str) -> UsageSnapshot | None:
     return None
 
 
-def _safe_path(path: str, codex_home: str) -> str | None:
+def safe_path(path: str, codex_home: str) -> str | None:
+    """The real path when it stays inside the Codex sessions directories (shared with the compaction counter)."""
     try:
         real = os.path.realpath(path)
         for name in ROOT_DIRS:
@@ -61,6 +62,10 @@ def _read_tail(fd: int, start: int) -> bytes:
     return b"".join(chunks)
 
 
+def _int(value: object) -> int | None:
+    return value if isinstance(value, int) and not isinstance(value, bool) else None
+
+
 def _last_usage(data: bytes, skip_first: bool) -> UsageSnapshot | None:
     lines = data.split(b"\n")
     if skip_first:
@@ -77,9 +82,12 @@ def _last_usage(data: bytes, skip_first: bool) -> UsageSnapshot | None:
                 continue  # rate-limit-only update without usage
             last = info["last_token_usage"]
             window = info.get("model_context_window")
+            total = info.get("total_token_usage") or {}
+            total_input = _int(total.get("input_tokens"))
             return UsageSnapshot(
                 int(last["total_tokens"]), int(window) if window else None,
                 int(last["input_tokens"]), int(last.get("cached_input_tokens") or 0),
+                total_input, _int(total.get("cached_input_tokens")) if total_input is not None else None,
             )
         except (ValueError, KeyError, TypeError, AttributeError):
             continue

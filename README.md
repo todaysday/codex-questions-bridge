@@ -130,6 +130,7 @@ Logs carry ids and counts, never question or message text.
   The socket is usually root-only, so the Bridge runs as root or as a user that can open it.
 - A Telegram bot and a private supergroup with Topics enabled ([setup below](#-telegram-setup)).
 - Optional, for consultants and the `/status` summary: PicoClaw and an OpenAI-compatible model endpoint.
+- Optional, for the compaction count on the `/status` card: `ripgrep` is optional but recommended; grep is the fallback.
 
 **Quick start, bot only (no consultants)**
 
@@ -331,7 +332,7 @@ unarchiving reopens the same one.
 
 ### `/status` content
 
-Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context and cache, goal, subagent counts (up to 300
+Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context, the session-wide cache hit and the compaction count (`🗜️N`, hidden when zero) for the root and for each shown subagent (all read from the session files, so they survive a restart), goal, subagent counts (up to 300
 read; at most 6 one-line entries named like the Codex app, working first, then waiting, then recent, then `… и ещё N`),
 rate limit. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,
 `правит файлы (N)`, `думает`, `ждёт ответа`, ...), built without an LLM from the kind of the newest item. Command heads are
@@ -344,12 +345,12 @@ text Telegram cannot parse is resent as plain text. Example:
 ```
 🟢 FoxProfile · 📁 foxprofile-api
 🧠 sol 6.1·low · 🕒 25м · 🔄 now 💭 выполняет: pytest -q
- ctx 160k/475k (34%) · 💾 80%
+ ctx 160k/475k (34%) · 💾 80% · 🗜️3
 🎯 Ship the profile page · 1.2M
 
 🤖 Субагенты 9 · 🟢 2 · 🟡 1 · ⚪ 6
- 🟢 Oracle run lifecycle · luna·high · ctx 40% · думает
- 🟡 Spec review · luna·high · ctx 12% · ждёт ответа
+ 🟢 Oracle run lifecycle · luna·high · ctx 44% · 💾 95% · думает · 🗜️2
+ 🟡 Spec review · luna·high · ctx 12% · 💾 91% · ждёт ответа
  ↳ ⚪ Parser · luna·low · 12м назад
  … и ещё 6
 

@@ -8,10 +8,11 @@ import pytest
 from cqb.codex.rollout_tail import TAIL_STEPS, read_usage
 
 
-def token_line(total=29_500, window=475_000, inp=29_000, cached=23_200, info=True):
+def token_line(total=29_500, window=475_000, inp=29_000, cached=23_200, info=True, session=(290_000, 232_000)):
     payload = {"type": "token_count", "rate_limits": {"limit_id": "codex"}}
     payload["info"] = {
-        "total_token_usage": {"total_tokens": total * 9},
+        "total_token_usage": {"total_tokens": total * 9, "input_tokens": session[0], "cached_input_tokens": session[1]}
+        if session else {"total_tokens": total * 9},
         "last_token_usage": {"input_tokens": inp, "cached_input_tokens": cached, "output_tokens": 500,
                              "total_tokens": total},
         "model_context_window": window,
@@ -41,7 +42,12 @@ def test_newest_token_count_wins_and_fields_are_mapped(home):
     p = write(home, [token_line(total=1), noise(3), token_line(total=29_500), noise(2)])
     u = read_usage(p, str(home))
     assert (u.context_tokens, u.context_window, u.input_tokens, u.cached_input_tokens) == (29_500, 475_000, 29_000, 23_200)
-    assert (u.fill_percent, u.cache_percent) == (6, 80)
+    assert u.fill_percent == 6 and (u.total_input_tokens, u.total_cached_input_tokens) == (290_000, 232_000)
+    assert u.cache_permille == 800  # the whole session, not the latest call (23_200 / 29_000 is 80% here by chance)
+    last_only = read_usage(write(home, [token_line(session=None)], "l.jsonl"), str(home))
+    assert last_only.cache_permille is None  # no session totals: no figure rather than the last call's
+    odd = read_usage(write(home, [token_line(session=(100, 200)), ], "o.jsonl"), str(home))
+    assert odd.cache_permille is None  # cached above input is nonsense: unknown
 
 
 def test_info_null_updates_are_skipped_in_favor_of_older_usage(home):
