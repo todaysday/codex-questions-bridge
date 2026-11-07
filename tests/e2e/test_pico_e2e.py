@@ -166,7 +166,7 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
             first = json.loads(open(tmp_path / "mock.jsonl").readline())["body"]
             offered = sorted(t["function"]["name"] for t in first["tools"])
             assert offered == sorted(f"mcp_cqb_{n}" for n in (
-                "get_thread_overview", "list_agents", "get_recent_events", "read_event", "get_questions")), offered
+                "get_thread_overview", "list_agents", "get_recent_events", "read_event", "get_questions")) + ["web_fetch"], offered
 
             # 2. a tool call hits our MCP HTTP server; the hook overwrote the root the model asked for
             r = await ask(tg, fox, 'CALL_TOOL mcp_cqb_get_thread_overview {"root_id":"r2"}')
@@ -246,7 +246,7 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
             n_fox = len(tg.live_messages(fox))
             tg.push_message("/status", fox)
             card = await reply_in(tg, fox, n_fox, 40)
-            assert card.startswith("⚪ FoxProfile\n🧠 ") and "💭" not in card.splitlines()[1], card
+            assert card.startswith("⚪ FoxProfile · 📁 w\n🧠 ") and "💭" not in card.splitlines()[1], card
             assert "📝 <b>В процессе:</b> TOOLRESULT[" in card and "&quot;root_id&quot;:&quot;r1&quot;" in card and "OtherProject" not in card, card
             await asyncio.sleep(1.5)
             assert len(tg.live_messages(fox)) == n_fox + 1  # one message: no placeholder, nothing edited in later

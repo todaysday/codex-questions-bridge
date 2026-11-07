@@ -66,6 +66,13 @@ def test_snapshot_from_wire_tolerates_missing_fields():
     assert s.name == "many words here" and s.path is None and s.nickname == "Ada"
 
 
+def test_cwd_comes_from_the_same_thread_read_and_odd_values_are_none():
+    assert snapshot_from_wire({"id": "t", "cwd": "/srv/projects/fox"}).cwd == "/srv/projects/fox"
+    for odd in (None, "", 5, ["/a"], {"p": "/a"}):
+        assert snapshot_from_wire({"id": "t", "cwd": odd}).cwd is None
+    assert snapshot_from_wire({"id": "t"}).cwd is None
+
+
 def test_agent_path_and_depth_are_parsed_defensively():
     def spawn(source):
         return snapshot_from_wire({"id": "t", "source": source})

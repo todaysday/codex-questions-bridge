@@ -89,7 +89,7 @@ def test_project_file_tools_with_real_picoclaw(tmp_path):
             offered = sorted(t["function"]["name"] for t in first["tools"])
             assert offered == sorted(f"mcp_cqb_{n}" for n in (
                 "get_thread_overview", "list_agents", "get_recent_events", "read_event", "get_questions",
-                "read_project_file", "list_project_dir")), offered
+                "read_project_file", "list_project_dir")) + ["web_fetch"], offered
 
             # 2. real calls: the hook (agent id `main`) approves, the Bridge reads inside the root thread's cwd
             r = await ask(tg, fox, 'CALL_TOOL mcp_cqb_read_project_file {"path":"README.md"}')

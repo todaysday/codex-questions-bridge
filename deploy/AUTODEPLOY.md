@@ -111,5 +111,8 @@ Better: add the config before pushing the commit that requires it.
 - One commit at a time: if several pushes land between polls, only the newest `main` is tested and deployed.
 - Only the code in git is deployed. `/etc/cqb`, `/var/lib/picoclaw` (except the AGENT.md files `update.sh` installs)
   and the units of cqb itself are never touched by the deployer.
+- Server-only, never touched by `update.sh` or the deployer: the PicoClaw egress drop-in
+  `/etc/systemd/system/picoclaw-gateway.service.d/egress.conf` (made by hand from `deploy/picoclaw/egress.conf.example`)
+  and the `/etc/cqb` files, including the web search settings in `config.toml` and `cqb.env`.
 - The health check cannot prove the bot behaves: it proves the services are up, the MCP port is open and cqb logged no
   error since the restart.

@@ -91,6 +91,16 @@ def test_context_and_cache_math_use_last_call_only():
     assert "\n <b>ctx</b> 29.5k/475k (6%) · 💾 80%\n" in render_status(report)
 
 
+def test_the_roots_cwd_reaches_the_report_from_the_thread_snapshot_already_read():
+    svc, src, *_ = make()
+    src.threads["r1"] = snapshot("r1", cwd="/srv/projects/gh-runner-dispatcher/")
+    src.threads["r2"] = snapshot("r2")
+    report = collect(svc)
+    assert report.cwd == "/srv/projects/gh-runner-dispatcher/" and src.calls.count("thread") == 1  # no second read
+    assert render_status(report).splitlines()[0] == "⚪ Thread r1 · 📁 gh-runner-dispatcher"
+    assert collect(svc, "r2").cwd is None and render_status(collect(svc, "r2")).splitlines()[0] == "⚪ Thread r2"
+
+
 def test_usage_edge_cases():
     assert UsageSnapshot(10, None, 0, 0).fill_percent is None
     assert UsageSnapshot(10, 0, 0, 0).fill_percent is None

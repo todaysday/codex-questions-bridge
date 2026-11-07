@@ -6,7 +6,7 @@ subagent lines (down to MIN_AGENT_LINES), shorter 'сейчас' fragments, no g
 The only absolute time is the limit reset, labelled UTC.
 
 Header (three lines, then the goal line):
-    {state icon} {thread name}
+    {state icon} {thread name} · 📁 {project folder, the last path component of the cwd; left out when unknown}
     🧠 {model short}·{effort} · 🕒 {turn duration} · 🔄 {last activity} 💭 {сейчас}
      <b>ctx</b> {used}/{window} ({pct}%) · 💾 {cache pct}%
 """
@@ -43,6 +43,7 @@ GOAL_WORD = {
 SUMMARY_UNAVAILABLE = "📝 резюме недоступно"
 MIN_AGENT_LINES = 3
 TITLE_MAX = 32
+FOLDER_MAX = 32  # the project folder on the first line
 NOW_MAX = 40  # a subagent's 'сейчас' fragment
 ROOT_NOW_MAX = 120  # the service already cut a command head at 80
 GOAL_MAX = 60
@@ -87,7 +88,7 @@ def render_status(r: StatusReport) -> str:
 
 
 def _card(r: StatusReport, plan: Plan) -> str:
-    top = [f"{ICON[r.state]} {_e(r.title or DASH, 60)}", _status_line(r), _context(r.usage)]
+    top = [_title_line(r), _status_line(r), _context(r.usage)]
     if r.goal and plan.goal:
         top.append(_goal(r.goal))
     blocks = ["\n".join(top), "\n".join(_agents(r, plan)), "\n".join(_summary(r.summary, plan)), _limits(r.limits)]
@@ -96,6 +97,20 @@ def _card(r: StatusReport, plan: Plan) -> str:
 
 def _e(text: str, limit: int) -> str:
     return html.escape(clip(text, limit))
+
+
+def _title_line(r: StatusReport) -> str:
+    """`🟢 Fox Profile · 📁 gh-runner-dispatcher`: the folder part only when the working directory is known."""
+    folder = folder_name(r.cwd)
+    tail = f" · 📁 {_e(folder, FOLDER_MAX)}" if folder else ""
+    return f"{ICON[r.state]} {_e(r.title or DASH, 60)}{tail}"
+
+
+def folder_name(cwd: str | None) -> str | None:
+    """The last component of a working directory, never a path: None for nothing usable (unknown, `/`, `.`, `..`)."""
+    parts = [p.strip() for p in re.split(r"[/\\]+", cwd or "")]
+    name = next((p for p in reversed(parts) if p), None)
+    return name if name and name not in (".", "..") else None
 
 
 def _status_line(r: StatusReport) -> str:

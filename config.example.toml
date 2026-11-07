@@ -38,6 +38,14 @@ project_files = false
 project_file_max_bytes = 16384         # 1024..65536: output cap of one read or listing
 project_dir_max_entries = 200          # 1..1000
 project_file_deny_extra = []           # extra name patterns (fnmatch, case-insensitive) added to the built-in deny table
+# Web search for the consultant (tool web_search). OFF by default: while false the tool is not listed and calls are
+# refused with `disabled`. When true the Bridge needs two environment variables (not this file: they hold a secret and
+# an internal address): CQB_WEB_SEARCH_URL, the full URL of a search API that takes POST {"query", "max_results"} with
+# `Authorization: Bearer <key>` and answers {"results": [{"title", "url", "snippet"}]} (OmniRoute: .../v1/search), and
+# CQB_WEB_SEARCH_KEY. Queries are capped (200 characters, no key-like runs), results are bounded and redacted, redirects
+# are not followed, and the scope hook allows the tool for the consultant only.
+web_search = false
+web_search_max_results = 5             # 1..10: default and cap of results per call
 
 # The /status snapshot (consultant topics only). Works without [pico] too: the card then says `резюме недоступно`.
 [status]

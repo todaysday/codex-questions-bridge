@@ -25,6 +25,7 @@ class ThreadSnapshot:
     path: str | None
     agent_path: str | None = None  # `source.subAgent.thread_spawn.agent_path`: "/root/<task>/<subtask>"
     depth: int | None = None  # spawn depth, 1 = direct child of the root
+    cwd: str | None = None  # working directory as the daemon reports it (the card shows only its last component)
 
     @property
     def title(self) -> str | None:
@@ -143,3 +144,4 @@ class StatusReport:
     limits: RateLimits | None
     activity: Activity | None = None  # the root's own 'now'
     summary: StatusSummary | None = None  # None = the Status Agent was unavailable
+    cwd: str | None = None  # the root's working directory

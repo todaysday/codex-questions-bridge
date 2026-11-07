@@ -14,7 +14,10 @@ from cqb.codex.history import HistoryReader
 from cqb.codex.rollout_tail import read_usage
 from cqb.codex.status_reader import DaemonStatusReader
 from cqb.codex.stream import dispatch
-from cqb.config import Config, ConfigError, ConsultantTokens, load_config, read_consultant_tokens, read_token
+from cqb.config import (
+    Config, ConfigError, ConsultantTokens, WebSearchEndpoint, load_config, read_consultant_tokens, read_token,
+    read_web_search_endpoint,
+)
 from cqb.dao import db
 from cqb.dao.actions import ActionDao
 from cqb.dao.agent_questions import AgentQuestionDao
@@ -32,6 +35,7 @@ from cqb.services.agent_questions import AgentQuestionService
 from cqb.services.consultants import ConsultantService
 from cqb.services.context import ContextService
 from cqb.services.project_files import ProjectFiles
+from cqb.services.web_search import WebSearch
 from cqb.services.inventory import InventoryService
 from cqb.services.live_state import LiveState
 from cqb.services.focus import QuestionFocus
@@ -100,6 +104,7 @@ async def run(
     telegram_base_url: str = API_BASE,
     rss_interval: float = RSS_LOG_SECONDS,
     consultant_tokens: ConsultantTokens | None = None,
+    web_search: WebSearchEndpoint | None = None,
     status_prompt: str = STATUS_PROMPT,  # a test seam: the Status Agent's task text
 ) -> None:
     """Without a [pico] section (or its tokens) the bot runs and consultant topics say they are not configured."""
@@ -174,8 +179,9 @@ async def run(
             )
             scopes = SessionScopes(consultants.scope_for_session)
             files = ProjectFiles(config.mcp, context.check_scope, reader)
+            web = WebSearch(config.mcp, context.check_scope, web_search, http)
             mcp = McpServer(
-                consultant_tokens.mcp, build_tools(context, files), scopes.lookup, health.beat, port=config.mcp.port,
+                consultant_tokens.mcp, build_tools(context, files, web), scopes.lookup, health.beat, port=config.mcp.port,
             )
             narrator = PicoStatusNarrator(
                 gateway, scopes, config.pico.session_prefix, config.status.slots, status_prompt
@@ -244,12 +250,14 @@ async def run(
         conn.close()
 
 
-async def _amain(config: Config, token: str, consultant_tokens: ConsultantTokens | None) -> None:
+async def _amain(
+    config: Config, token: str, consultant_tokens: ConsultantTokens | None, web_search: WebSearchEndpoint | None,
+) -> None:
     stop = asyncio.Event()
     loop = asyncio.get_running_loop()
     for sig in (signal.SIGINT, signal.SIGTERM):
         loop.add_signal_handler(sig, stop.set)
-    await run(config, stop, token=token, consultant_tokens=consultant_tokens)
+    await run(config, stop, token=token, consultant_tokens=consultant_tokens, web_search=web_search)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -263,9 +271,10 @@ def main(argv: list[str] | None = None) -> int:
         config = load_config(args.config)
         token = read_token(os.environ)
         consultant_tokens = read_consultant_tokens(os.environ) if config.pico is not None else None
+        web_search = read_web_search_endpoint(os.environ) if config.pico is not None and config.mcp.web_search else None
     except ConfigError as exc:
         print(f"cqb: config error: {exc}", file=sys.stderr)
         return 2
-    asyncio.run(_amain(config, token, consultant_tokens))
+    asyncio.run(_amain(config, token, consultant_tokens, web_search))
     log.info("stopped")
     return 0

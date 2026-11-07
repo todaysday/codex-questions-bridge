@@ -141,7 +141,7 @@ class StatusService:
             usage=usage, last_activity=last, goal=goal,
             agents_total=total, agents_more=bool(agents and agents.more),
             agents_working=working, agents_waiting=waiting, agents_idle=idle, agents=lines, limits=limits,
-            activity=activity,
+            activity=activity, cwd=root.cwd,
         )
 
     async def _agents(

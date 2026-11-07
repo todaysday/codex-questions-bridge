@@ -8,14 +8,14 @@ Codex Questions Bridge (`cqb`) is a small Telegram bridge for [Codex](https://gi
 as one more client to the shared Codex app-server daemon, so it sees every thread and every live
 `request_user_input` question. It never starts or edits threads on its own: the one thing it writes is the answer you
 confirm, sent as a normal user message. You get your threads on one self-updating Telegram message, questions with
-answer buttons, and an optional read-only LLM consultant per thread.
+answer buttons, and an optional LLM consultant per thread (read-only on your repository, web access limited as described in the safety model).
 
 - 📋 **One registry.** A single pinned message lists all your Codex threads and edits itself in place.
   `❓` means a thread waits for your answer, `⚙️` means it is working right now.
 - ❓ **Questions in Telegram.** Both kinds of questions (see [Two kinds of questions](#two-kinds-of-questions)) appear in
   the thread's own topic with answer buttons. Secret questions are never relayed.
 - 💬 **A consultant per thread.** You create it by hand. It is an LLM chat in its own topic that reads the thread's
-  history through read-only tools and cannot change anything.
+  history through read-only tools and cannot change anything. It can also read a public web page and, if you enable it, search the web.
 - 📊 **`/status`.** A snapshot with deterministic numbers (state, model, context fill, cache, subagents, limits),
   a "now" phrase per thread, and a two-part summary (`В процессе` / `Дальше`) from a separate Status Agent that never
   reaches the consultant. One HTML message, sent once when everything is ready.
@@ -108,7 +108,7 @@ When several cards pile up in a topic, tell the consultant which one you mean:
 - **Memory first.** Bounded queues, pages and previews, `gc.freeze()` after wiring. About 40-45 MiB RSS (see
   [Memory profile](#memory-profile)).
 - **Read-only by construction, one narrow write.** The daemon client refuses every method outside a whitelist. The
-  consultant's tools are read-only, and the scope hook is fail-closed (an error, a crash or a timeout means deny).
+  consultant's tools are read-only on your repository and threads (web access is limited as described in the safety model), and the scope hook is fail-closed (an error, a crash or a timeout means deny).
 - **No LLM inside the Bridge.** Inventory, registry, cards and cursors are deterministic code. Models live in PicoClaw.
 - **Manual consultants.** A consultant is created only by pressing a button, never by discovery, a question or `/status`.
 - **No secrets in the repo.** Tokens come from the environment. The config loader rejects keys named like
@@ -178,7 +178,7 @@ The layout used on the reference server. The service never runs from a working t
 | --- | --- |
 | Code | root-owned virtualenv `/opt/cqb/.venv`, installed from a git checkout |
 | Config | `/etc/cqb/config.toml` (0640) |
-| Secrets | `/etc/cqb/cqb.env` (root:root 0600): `CQB_TELEGRAM_TOKEN`, `CQB_PICO_TOKEN`, `CQB_MCP_TOKEN`; the only `EnvironmentFile` of the unit |
+| Secrets | `/etc/cqb/cqb.env` (root:root 0600): `CQB_TELEGRAM_TOKEN`, `CQB_PICO_TOKEN`, `CQB_MCP_TOKEN`, and with `[mcp] web_search` also `CQB_WEB_SEARCH_URL`, `CQB_WEB_SEARCH_KEY`; the only `EnvironmentFile` of the unit |
 | State | SQLite in `/var/lib/cqb` (systemd `StateDirectory`) |
 | Unit | `cqb.service` from `deploy/cqb.service` (set `User=`; it ships as `CHANGE_ME`) |
 | Ports | PicoClaw `127.0.0.1:18790` (pico WebSocket, `/health`), Bridge MCP `127.0.0.1:18791`. Nothing listens publicly |
@@ -212,6 +212,9 @@ curl http://127.0.0.1:18790/health           # PicoClaw liveness, the same probe
 Live check of the consultant path without Telegram:
 `sudo bash -c 'set -a; . /etc/cqb/cqb.env; set +a; /opt/cqb/.venv/bin/python scripts/smoke_pico.py --session cqb-smoke-1 "Reply with one word: ping"'`.
 
+Live check of the web tools without Telegram or a model: `sudo bash -c 'set -a; . /etc/cqb/cqb.env; set +a; /opt/cqb/.venv/bin/python scripts/smoke_web.py'`
+(the search endpoint, the hook's URL screening on a public page and on private targets; it prints statuses and public results only).
+
 ## 🤖 Consultants (PicoClaw)
 
 Optional. Tested with **PicoClaw v0.3.1** (linux x86_64). Its config loader rejects unknown fields, so re-check every
@@ -241,6 +244,7 @@ unchanged.
    `sudo systemctl restart picoclaw-gateway.service`. A dead hook process is never respawned by PicoClaw. The Bridge
    notices through a heartbeat and refuses consultant turns until the gateway is restarted. Never run `picoclaw agent`
    against live sessions.
+8. **Web access (optional).** `web_fetch` is on in the template. For `web_search` add `[mcp] web_search = true` to `config.toml` and put `CQB_WEB_SEARCH_URL` (the full URL of the model gateway's search endpoint, `POST <base>/search`) and `CQB_WEB_SEARCH_KEY` into `/etc/cqb/cqb.env`. Then install the kernel egress guard: copy `deploy/picoclaw/egress.conf.example` to `/etc/systemd/system/picoclaw-gateway.service.d/egress.conf`, replace `__OMNIROUTE_TAILNET_ADDRESS__` with the model gateway's address and run `systemctl daemon-reload && systemctl restart picoclaw-gateway`. It denies the private ranges and `100.64.0.0/10` (the tailnet) to the gateway and its hook and allows loopback and the model gateway (systemd gives `IPAddressAllow` precedence over `IPAddressDeny`). The drop-in and the `/etc/cqb` files are server-only: `update.sh` and auto-deploy never touch them.
 
 **Workspaces on the reference server.** `/var/lib/picoclaw/ws-main` (consultant) and `ws-status` (Status Agent), owned by
 `cqb-pico`; the `AGENT.md` files inside are root-owned, 0644.
@@ -258,13 +262,14 @@ occasional cleanup.
 
 | Layer | What it does |
 | --- | --- |
-| Scope hook | Every tool call is checked by the hook against the Bridge (`/internal/scope/<session>`). The hook overwrites `root_id` with the trusted value, so the model cannot pick another thread. An error, exit or timeout means deny. |
-| Tool allowlists | The consultant gets five read-only tools (`get_thread_overview`, `list_agents`, `get_recent_events`, `read_event`, `get_questions`), plus `read_project_file` and `list_project_dir` when `[mcp] project_files = true` (seven in all). `codex-status` gets four of them (no `read_event`, never the file tools). Default PicoClaw tools are disabled too. |
+| Scope hook | Every tool call is checked by the hook against the Bridge (`/internal/scope/<session>`). The hook overwrites `root_id` with the trusted value, so the model cannot pick another thread. An error, exit or timeout means deny. The project-file and web tools are allowed for the consultant (agent `main`) only, never for a Status Agent slot, and with known argument names only. |
+| Tool allowlists | The consultant gets five read-only tools (`get_thread_overview`, `list_agents`, `get_recent_events`, `read_event`, `get_questions`), plus `read_project_file` and `list_project_dir` (with `[mcp] project_files = true`), `web_search` (with `[mcp] web_search = true`) and PicoClaw's `web_fetch`. `codex-status` gets four of the read-only ones (no `read_event`, never the file or web tools). Default PicoClaw tools are disabled too. |
 | Context API | Loopback only, bearer token. Results are redacted and bounded (at most 100 events and 64 KiB per call, 16 KiB per event). A secret question's text is never returned. |
 | Slash escaping | Only free text reaches PicoClaw. Any text starting with `/` or `!` gets a visible `User says: ` prefix, so `/clear`, `/switch`, `/reload`, `/subagents` cannot run. |
 | `/stop` | Exactly `/stop` passes through unescaped, so the owner can cancel a running turn. |
 | Timeouts | Consultant replies have no time limit (`turn_timeout_seconds = 0`). The `/status` collect has a 5 minute deadline (`[status] timeout_seconds = 300`), after which the card goes out with `резюме недоступно` ("summary unavailable"). |
 | Dead gateway | If `GET /health` fails or the hook heartbeat is silent, the topic answers `Консультант временно недоступен` ("consultant temporarily unavailable"). A dead cached socket is replaced once; an unexpected error in a session worker gives `внутренняя ошибка шлюза: <Type>` and the queue goes on. |
+| Web access | `web_fetch` (PicoClaw) and `web_search` (a Bridge tool, off by default) are for the consultant only, never for Status Agent slots, and take known argument names only. The hook checks every `web_fetch` URL: http/https, ports 80 and 443, no userinfo, no private, loopback, link-local, CGNAT (tailnet), ULA, multicast or metadata address (IP literals in any encoding; DNS answers are checked too, best effort against rebinding), URL up to 300 characters and query up to 120, no token-like runs or key-like parameters; `maxChars` is clamped to 20000. PicoClaw refuses private IPs at dial time, also on redirects (at most 5). A search query is up to 200 characters without key-like runs; results are cut to title, URL and snippet and redacted. A server-only systemd egress drop-in adds a kernel-level guard (`deploy/picoclaw/egress.conf.example`). Residual risks: redirects to public hosts, DNS rebinding, data hidden in queries or URLs made of short words, and prompt injection through public pages. |
 | Project files | Off by default (`[mcp] project_files`). The Bridge runs as root, so confinement is by file descriptor: `O_NOFOLLOW` at every step, no symlinks, no `..`, regular files only, root = the thread's working directory (broad roots such as `/`, home, `/srv`, `/tmp` refused). Secrets, keys, `.git`, `.env*`, databases, `node_modules` and similar names are denied by a built-in table without revealing whether they exist; output is capped (`project_file_max_bytes`) and redacted. Only the consultant can call these tools. |
 | Queue | One turn at a time per consultant, at most 5 queued messages. Replies are plain text, at most 12000 characters, split below 4096 per message. |
 
@@ -326,7 +331,7 @@ unarchiving reopens the same one.
 
 ### `/status` content
 
-Header: state icon and thread name, then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context and cache, goal, subagent counts (up to 300
+Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context and cache, goal, subagent counts (up to 300
 read; at most 6 one-line entries named like the Codex app, working first, then waiting, then recent, then `… и ещё N`),
 rate limit. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,
 `правит файлы (N)`, `думает`, `ждёт ответа`, ...), built without an LLM from the kind of the newest item. Command heads are
@@ -337,7 +342,7 @@ never edited; the only absolute time is the limit reset, in UTC. A card over 409
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
-🟢 FoxProfile
+🟢 FoxProfile · 📁 foxprofile-api
 🧠 sol 6.1·low · 🕒 25м · 🔄 now 💭 выполняет: pytest -q
  ctx 160k/475k (34%) · 💾 80%
 🎯 Ship the profile page · 1.2M
@@ -380,12 +385,15 @@ text Telegram cannot parse is resent as plain text. Example:
 | `[mcp] project_files` | false | `true` lists `read_project_file` and `list_project_dir` for the consultant (read-only, confined, see Safety model) |
 | `[mcp] project_file_max_bytes` | 16384 | 1024..65536, output cap of one read or listing |
 | `[mcp] project_dir_max_entries` | 200 | 1..1000, entries of one listing |
+| `[mcp] web_search` | false | `true` lists the `web_search` tool for the consultant; needs `CQB_WEB_SEARCH_URL` and `CQB_WEB_SEARCH_KEY` |
+| `[mcp] web_search_max_results` | 5 | 1..10, default and cap of results per call |
 | `[mcp] project_file_deny_extra` | `[]` | extra name patterns to deny (up to 100, no `/`); the built-in table is never reduced |
 | `[status] timeout_seconds` | 300 | 30..3600 |
 | `[status] slots` | 2 | 1..8, each needs a dispatch rule in PicoClaw |
 | `[questions] agent_scan_seconds` | 20 | 5..600, period of the sweep for agent-message questions (at most 25 roots per sweep) |
 
 Environment: `CQB_TELEGRAM_TOKEN` (always), `CQB_PICO_TOKEN` and `CQB_MCP_TOKEN` (with `[pico]`, must differ),
+`CQB_WEB_SEARCH_URL` and `CQB_WEB_SEARCH_KEY` (with `[mcp] web_search = true`: the full search endpoint URL and its Bearer key),
 `CQB_CONFIG` (config path, instead of `--config`).
 
 ### Memory profile
@@ -422,7 +430,7 @@ src/cqb/
   config.py  security.py  main.py
 integrations/  picoclaw_scope_hook.py    standalone stdlib hook
 deploy/        cqb.service, update.sh, picoclaw/ (config, security template, ws-main, ws-status, unit)
-scripts/       smoke_telegram.py, smoke_real_daemon.py, smoke_status.py, smoke_pico.py
+scripts/       smoke_telegram.py, smoke_real_daemon.py, smoke_status.py, smoke_pico.py, smoke_web.py
 tests/         unit and integration tests, fakes, e2e/
 doc/           Codex_Questions_Bridge_Design.md
 ```

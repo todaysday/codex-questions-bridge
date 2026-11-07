@@ -236,3 +236,4 @@ def test_example_config_documents_project_files_switched_off():
     example = pathlib.Path(__file__).parent.parent / "config.example.toml"
     assert load_config(str(example)).mcp == McpConfig(18791)
     assert "project_files = false" in example.read_text()
+    assert "web_search = false" in example.read_text() and not load_config(str(example)).mcp.web_search

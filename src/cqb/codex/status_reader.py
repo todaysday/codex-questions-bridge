@@ -136,6 +136,7 @@ def snapshot_from_wire(raw: dict[str, Any]) -> ThreadSnapshot | None:
             path=raw.get("path") if isinstance(raw.get("path"), str) else None,
             agent_path=spawn.get("agent_path") if isinstance(spawn.get("agent_path"), str) else None,
             depth=_int(spawn.get("depth")),
+            cwd=raw["cwd"] if isinstance(raw.get("cwd"), str) and raw["cwd"] else None,
         )
     except (KeyError, TypeError, ValueError):
         return None

@@ -25,7 +25,10 @@ MemoryMax=512M
 MemorySwapMax=0
 TasksMax=128
 
-# Hardening: it needs loopback sockets (Bridge, model endpoint) and its home directory, nothing else.
+# Hardening: it needs loopback sockets (Bridge), the model gateway and its home directory, and the public web for web_fetch.
+# The web is why the server also gets a systemd drop-in with IPAddressDeny/IPAddressAllow that keeps private and tailnet
+# ranges out of reach (redirects and DNS rebinding): see deploy/picoclaw/egress.conf.example. It is never in the repo
+# with real addresses and is not installed by deploy/update.sh.
 NoNewPrivileges=true
 ProtectSystem=strict
 ProtectHome=true

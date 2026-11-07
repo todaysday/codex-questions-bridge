@@ -71,8 +71,8 @@
     "cron": {"enabled": false},
     "install_skill": {"enabled": false},
     "find_skills": {"enabled": false},
-    "web_fetch": {"enabled": false},
-    "web": {"enabled": false},
+    "web_fetch": {"enabled": true},
+    "web": {"enabled": false, "fetch_limit_bytes": 2097152, "format": "markdown", "private_host_whitelist": []},
     "skills": {"enabled": false},
     "mcp": {
       "enabled": true,

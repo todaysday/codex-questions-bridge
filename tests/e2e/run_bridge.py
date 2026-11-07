@@ -9,20 +9,25 @@ import signal
 import sys
 
 from cqb import main as cqb_main
-from cqb.config import CodexConfig, Config, ConsultantTokens, DbConfig, McpConfig, PicoConfig, TelegramConfig
+from cqb.config import (
+    CodexConfig, Config, ConsultantTokens, DbConfig, McpConfig, PicoConfig, TelegramConfig, WebSearchEndpoint,
+)
 
 
 async def amain(spec: dict) -> None:
     config = Config(
         CodexConfig(spec["socket"], "local", 30, 36500), DbConfig(spec["db"]),
         TelegramConfig(spec["chat_id"], "📋 Треды Codex", (spec["owner"],), 5),
-        pico=PicoConfig(url=spec["pico_url"], idle_seconds=spec.get("idle", 120)), mcp=McpConfig(port=spec["mcp_port"], project_files=spec.get("project_files", False)),
+        pico=PicoConfig(url=spec["pico_url"], idle_seconds=spec.get("idle", 120)), mcp=McpConfig(port=spec["mcp_port"], project_files=spec.get("project_files", False),
+                      web_search="web_search_url" in spec),
     )
     import os
     tokens = ConsultantTokens(os.environ["CQB_PICO_TOKEN"], os.environ["CQB_MCP_TOKEN"])
     stop = asyncio.Event()
     asyncio.get_running_loop().add_signal_handler(signal.SIGTERM, stop.set)
     extra = {"status_prompt": spec["status_prompt"]} if "status_prompt" in spec else {}
+    if "web_search_url" in spec:
+        extra["web_search"] = WebSearchEndpoint(spec["web_search_url"], os.environ["E2E_SEARCH_KEY"])
     await cqb_main.run(
         config, stop, token=spec["tg_token"], telegram_base_url=spec["tg_base"], consultant_tokens=tokens, **extra)
 

@@ -54,6 +54,8 @@ class McpConfig:
     project_file_max_bytes: int = 16384  # output cap of one read or listing, JSON-encoded bytes
     project_dir_max_entries: int = 200
     project_file_deny_extra: tuple[str, ...] = ()  # more deny patterns; the built-in table is never reduced
+    web_search: bool = False  # web_search tool (OmniRoute search endpoint): not listed and refused while False
+    web_search_max_results: int = 5  # default and cap of results per call (1..10)
 
 
 @dataclass(frozen=True, slots=True)
@@ -69,6 +71,14 @@ class QuestionsConfig:
     """Agent-message questions are found by reading thread items; this is how often the sweep reads."""
 
     agent_scan_seconds: int = 20  # 5..600: period of the sweep over working and recently updated roots
+
+
+@dataclass(frozen=True, slots=True)
+class WebSearchEndpoint:
+    """Where web_search goes: the full URL of a POST {query, max_results} -> {results} search API, and its key."""
+
+    url: str
+    key: str = field(repr=False)
 
 
 @dataclass(frozen=True, slots=True)
@@ -91,6 +101,8 @@ class Config:
 TOKEN_ENV = "CQB_TELEGRAM_TOKEN"
 PICO_TOKEN_ENV = "CQB_PICO_TOKEN"
 MCP_TOKEN_ENV = "CQB_MCP_TOKEN"
+WEB_SEARCH_URL_ENV = "CQB_WEB_SEARCH_URL"
+WEB_SEARCH_KEY_ENV = "CQB_WEB_SEARCH_KEY"
 _LOOPBACK = frozenset({"127.0.0.1", "localhost", "::1"})
 _SOURCE_ID = re.compile(r"^[A-Za-z0-9._-]{1,64}$")
 
@@ -150,6 +162,18 @@ def read_consultant_tokens(env: Mapping[str, str]) -> ConsultantTokens:
     return ConsultantTokens(pico, mcp)
 
 
+def read_web_search_endpoint(env: Mapping[str, str]) -> WebSearchEndpoint:
+    """Only called when [mcp] web_search is on. The URL is operator input, so it is checked, never echoed."""
+    url, key = env.get(WEB_SEARCH_URL_ENV, "").strip(), env.get(WEB_SEARCH_KEY_ENV, "").strip()
+    for name, value in ((WEB_SEARCH_URL_ENV, url), (WEB_SEARCH_KEY_ENV, key)):
+        if not value:
+            raise ConfigError(f"environment variable {name} is not set but [mcp] web_search is on")
+    parts = urlsplit(url)
+    if parts.scheme not in ("http", "https") or not parts.hostname or parts.username or parts.password or parts.fragment:
+        raise ConfigError(f"{WEB_SEARCH_URL_ENV} must be an http(s) URL without credentials")
+    return WebSearchEndpoint(url, key)
+
+
 def read_token(env: Mapping[str, str]) -> str:
     token = env.get(TOKEN_ENV, "").strip()
     if not token:
@@ -177,10 +201,13 @@ def _pico(raw: Any) -> PicoConfig:
 
 def _mcp(raw: Any) -> McpConfig:
     sec = _section({"mcp": raw}, "mcp", {"port", "project_files", "project_file_max_bytes", "project_dir_max_entries",
-                                          "project_file_deny_extra"})
+                                          "project_file_deny_extra", "web_search", "web_search_max_results"})
     flag = sec.get("project_files", False)
     if not isinstance(flag, bool):
         raise ConfigError("[mcp] project_files must be true or false")
+    web = sec.get("web_search", False)
+    if not isinstance(web, bool):
+        raise ConfigError("[mcp] web_search must be true or false")
     extra = sec.get("project_file_deny_extra", [])
     ok = isinstance(extra, list) and len(extra) <= 100 and all(
         isinstance(p, str) and 1 <= len(p) <= 100 and "/" not in p and "\0" not in p for p in extra)
@@ -190,7 +217,8 @@ def _mcp(raw: Any) -> McpConfig:
         port=_int(sec, "mcp", "port", 18791, 1024, 65535), project_files=flag,
         project_file_max_bytes=_int(sec, "mcp", "project_file_max_bytes", 16384, 1024, 65536),
         project_dir_max_entries=_int(sec, "mcp", "project_dir_max_entries", 200, 1, 1000),
-        project_file_deny_extra=tuple(extra),
+        project_file_deny_extra=tuple(extra), web_search=web,
+        web_search_max_results=_int(sec, "mcp", "web_search_max_results", 5, 1, 10),
     )
 
 

@@ -1,0 +1,17 @@
+# Kernel-level egress guard for the PicoClaw gateway. SERVER ONLY: install as
+#   /etc/systemd/system/picoclaw-gateway.service.d/egress.conf
+# then `systemctl daemon-reload && systemctl restart picoclaw-gateway`. Keep the real file out of the repository:
+# it names the address of the model gateway.
+#
+# Why: the consultant has web_fetch, so a page it fetches could redirect to an internal address, or a name could
+# resolve to one after the scope hook looked (the hook sees only the first URL; DNS rebinding is best effort).
+# PicoClaw also refuses private ranges on every connection, but this guard works below it, for every process
+# in the unit, hook included. CGNAT (100.64.0.0/10) holds the tailnet, so other tailnet hosts are cut off too.
+#
+# systemd gives IPAddressAllow precedence over IPAddressDeny: the Allow lines are the only holes. The model
+# gateway (OmniRoute) sits on the tailnet, inside the denied CGNAT range, so it must be listed.
+# DNS is answered by the local stub resolver on 127.0.0.53 (loopback). If the host uses another resolver address
+# inside a denied range, add it to IPAddressAllow as well.
+[Service]
+IPAddressDeny=10.0.0.0/8 172.16.0.0/12 192.168.0.0/16 169.254.0.0/16 100.64.0.0/10 fc00::/7 fe80::/10
+IPAddressAllow=127.0.0.0/8 ::1/128 __OMNIROUTE_TAILNET_ADDRESS__/32
