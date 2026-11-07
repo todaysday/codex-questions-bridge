@@ -181,12 +181,12 @@ The layout actually deployed on the production host (secrets are never in this r
 | Workspaces | `/var/lib/picoclaw/ws-main`, `ws-status` (owned by `cqb-pico`; the `AGENT.md` files inside are root-owned, 0644) |
 | Scope hook | `/opt/cqb/integrations/picoclaw_scope_hook.py` (root, python3 stdlib only), started by the gateway; its env (`CQB_MCP_URL`, `CQB_MCP_TOKEN`) comes from `/etc/cqb/picoclaw.env` (root:cqb-pico 0640) |
 | Ports | PicoClaw `127.0.0.1:18790` (pico WebSocket, `/health`), Bridge MCP `127.0.0.1:18791`; nothing else listens |
-| Model | OmniRoute combo `Beam` on the Tailscale host `etc2nd-shlink` (100.116.177.53), reached directly over the tailnet at `http://100.116.177.53:20129/v1` (no SSH tunnel) |
+| Model | OmniRoute combo `Beam` on the Tailscale host `<omniroute-host>`, reached directly over the tailnet at `http://<omniroute-tailnet-ip>:20129/v1` (no SSH tunnel) |
 
 Production secrets live only in `/etc/cqb` and `/var/lib/picoclaw`; no unit, config or env file there references
 `/srv/projects/secrets`, which is only the development source the values were copied from.
 
-OmniRoute listens on 127.0.0.1 of `etc2nd-shlink`; that one TCP port is published to the tailnet only (no Funnel) with
+OmniRoute listens on 127.0.0.1 of `<omniroute-host>`; that one TCP port is published to the tailnet only (no Funnel) with
 `sudo tailscale serve --bg --tcp=20129 tcp://127.0.0.1:20129` on that host. Undo: `sudo tailscale serve --tcp=20129 off`
 (`tailscale serve status` shows it). The OmniRoute key is restricted to the combo `Beam`; revoke it in the OmniRoute
 dashboard to cut access.
