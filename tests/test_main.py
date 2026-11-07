@@ -55,7 +55,7 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
         fox = tg.topic_named("FoxProfile")[0]
         await wait_until(lambda: any("Where store settings?" in m["text"] for m in tg.live_messages(fox)))
         card_id = next(i for i, m in tg.messages.items() if m["thread_id"] == fox and "Where store" in m["text"])
-        tg.push_callback(tg.button(card_id, "B.")["callback_data"], card_id)
+        tg.push_callback(tg.button(card_id, "B")["callback_data"], card_id)
         await wait_until(lambda: "Выбрано: B" in tg.messages[card_id]["text"])
         tg.push_callback(tg.button(card_id, "Отправить")["callback_data"], card_id)
         await wait_until(lambda: app.answers == [{"answers": {"pick": {"answers": ["B"]}}}])
@@ -65,11 +65,11 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
 
         # /status in the consultant topic: one static snapshot from the (fake) daemon, never relayed
         tg.push_message("/status", fox)
-        await wait_until(lambda: any("📊 Статус" in m["text"] for m in tg.live_messages(fox)))
-        card = next(m["text"] for m in tg.live_messages(fox) if "📊 Статус" in m["text"])
-        assert "FoxProfile" in card and "Лимит: 30% (неделя)" in card and "Субагенты: нет" in card
-        assert "сейчас:" in card and "резюме недоступно" in card  # no [pico]: the summary is unavailable, the rest is there
-        assert len([m for m in tg.live_messages(fox) if "📊 Статус" in m["text"]]) == 1  # one static message
+        await wait_until(lambda: any("📊" in m["text"] for m in tg.live_messages(fox)))
+        card = next(m["text"] for m in tg.live_messages(fox) if "📊" in m["text"])
+        assert "FoxProfile" in card and "📈 лимит 30% нед." in card and "Субагенты</b> · нет" in card
+        assert "💭" in card and "📝 резюме недоступно" in card  # no [pico]: the summary is unavailable, the rest is there
+        assert len([m for m in tg.live_messages(fox) if "📊" in m["text"]]) == 1  # one static message
         assert set(app.methods()) <= {"thread/list", "thread/read", "thread/resume", "thread/unsubscribe",
                                       "thread/loaded/list", "thread/goal/get", "thread/turns/list",
                                       "thread/items/list", "account/rateLimits/read"}

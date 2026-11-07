@@ -2,7 +2,6 @@
 
 from dataclasses import dataclass
 
-from cqb.domain.models import QuestionItem
 
 
 @dataclass(frozen=True, slots=True)
@@ -67,15 +66,24 @@ class AgentList:
 
 
 @dataclass(frozen=True, slots=True)
+class QuestionItemInfo:
+    title: str
+    options: tuple[str, ...]
+    text_truncated: bool = False  # a bound cut the title or an option, or dropped options (ask by `number` for more)
+
+
+@dataclass(frozen=True, slots=True)
 class QuestionInfo:
-    """A pending question. Secret questions carry no text at all."""
+    """A question of either kind. Secret questions carry no text at all."""
 
     question_id: str
+    number: str  # `Q3`: what the owner calls it
+    kind: str  # request_user_input | agent_message
+    state: str  # pending | answered | stale
     thread_id: str
     is_secret: bool
-    lifecycle: str
     created_at: int
-    items: tuple[QuestionItem, ...]
+    items: tuple[QuestionItemInfo, ...]
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,3 +91,4 @@ class QuestionList:
     source_id: str
     root_id: str
     questions: tuple[QuestionInfo, ...]
+    truncated: bool = False

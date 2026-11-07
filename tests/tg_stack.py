@@ -16,6 +16,7 @@ from cqb.domain.models import QuestionItem, QuestionOption, Thread
 from cqb.domain.status import Activity, Descendants, GoalSummary, RateLimits, ThreadSnapshot
 from cqb.services.agent_questions import AgentQuestionService
 from cqb.services.consultants import ConsultantService
+from cqb.services.focus import QuestionFocus
 from cqb.services.questions import QuestionService
 from cqb.services.live_state import LiveState
 from cqb.services.registry import RegistryQuery
@@ -137,8 +138,8 @@ class Relay:
     def __init__(self):
         self.got = []
 
-    async def relay(self, consultant, text):
-        self.got.append((consultant.root_thread_id, text))
+    async def relay(self, consultant, text, lead=None):
+        self.got.append((consultant.root_thread_id, (lead or "") + text))
 
 
 class Recorder:
@@ -194,19 +195,20 @@ class Stack:
             interval=0.05, clock=self.clock,
         )
         self.cards = QuestionCards(
-            self.api, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh
+            self.api, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh, self.clock
         )
         self.agent_cards = AgentQuestionCards(
-            self.api, self.keys, self.agent, self.registry, CHAT_ID, self.publisher.request_refresh
+            self.api, self.keys, self.agent, self.registry, CHAT_ID, self.publisher.request_refresh, self.clock
         )
         self.consultants = ConsultantService(
             self.consultant_dao, self.threads, self.tg_topics, "s1", CHAT_ID, self.clock, persist_delay=0,
             on_open=lambda root: (self.cards.mark_root(root), self.agent_cards.mark_root(root)),
         )
+        self.focus = QuestionFocus(self.consultant_dao, self.questions, self.agent, "s1")
         self.router = Router(
             RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.api, self.keys, self.topics,
             self.publisher, self.cards, self.agent_cards, self.consultants, self.tg_topics, self.registry,
-            self.questions, self.agent, self.relay, self.status_cards, "s1", self.inventory.poke, self.clock,
+            self.questions, self.agent, self.relay, self.focus, self.status_cards, "s1", self.inventory.poke, self.clock,
         )
         self.poller = Poller(self.api, self.state, self.router.handle, poll_timeout=0)
         self.questions.subscribe(on_question=self.cards.on_question, on_resolved=self.cards.on_resolved)

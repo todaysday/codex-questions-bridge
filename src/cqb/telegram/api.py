@@ -5,9 +5,11 @@ and Telegram's description, and exception text from aiohttp is dropped.
 """
 
 import asyncio
+import html
 import json
 import logging
 import random
+import re
 from collections.abc import Awaitable, Callable
 from typing import Any
 
@@ -26,6 +28,7 @@ MAX_ATTEMPTS = 5
 MAX_RETRY_AFTER = 60.0
 BACKOFF_BASE = 0.5
 BACKOFF_CAP = 10.0
+_TAG = re.compile(r"</?[A-Za-z][^<>]*>")
 
 
 class TelegramError(Exception):
@@ -119,14 +122,26 @@ class BotApi:
 
     async def send_message(
         self, chat_id: int, text: str, *, thread_id: int | None = None,
-        keyboard: tuple[tuple[Button, ...], ...] | None = None,
+        keyboard: tuple[tuple[Button, ...], ...] | None = None, parse_mode: str | None = None,
     ) -> SentMessage:
+        """With parse_mode `HTML`, a text Telegram cannot parse is sent again as plain text (tags stripped),
+        so a message is never lost to its own markup."""
         params: dict[str, Any] = {"chat_id": chat_id, "text": text, "disable_web_page_preview": True}
         if thread_id is not None:
             params["message_thread_id"] = thread_id
         if keyboard:
             params["reply_markup"] = _markup(keyboard)
-        r = await self._call("sendMessage", params, idempotent=False)
+        if parse_mode:
+            params["parse_mode"] = parse_mode
+        try:
+            r = await self._call("sendMessage", params, idempotent=False)
+        except BadRequest as exc:
+            if parse_mode != "HTML" or "can't parse entities" not in exc.description.lower():
+                raise
+            log.warning("sendMessage: HTML was rejected; sending the same text as plain text")
+            params.pop("parse_mode")
+            params["text"] = strip_html(text)
+            r = await self._call("sendMessage", params, idempotent=False)
         return SentMessage(r["message_id"])
 
     async def edit_message_text(
@@ -223,6 +238,11 @@ class BotApi:
         if status in (401, 403):
             raise Unauthorized(method, status, description)
         raise BadRequest(method, status, description)
+
+
+def strip_html(text: str) -> str:
+    """The plain text of a Telegram HTML message: tags removed, entities decoded."""
+    return html.unescape(_TAG.sub("", text))
 
 
 def _markup(keyboard: tuple[tuple[Button, ...], ...]) -> dict[str, Any]:

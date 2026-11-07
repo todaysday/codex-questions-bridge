@@ -10,7 +10,7 @@
       "context_window": 1000000,
       "summarize_token_percent": 80,
       "summarize_message_threshold": 100000,
-      "max_tool_iterations": 8,
+      "max_tool_iterations": 500,
       "tool_feedback": {"enabled": false}
     },
     "list": [

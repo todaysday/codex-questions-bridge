@@ -6,9 +6,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 
 from cqb.domain.enums import ConsultantState
-from cqb.domain.models import TelegramAction
+from cqb.domain.models import Consultant, Question, TelegramAction
 from cqb.services.agent_questions import AgentQuestionService
 from cqb.services.consultants import ConsultantError, ConsultantService
+from cqb.services.focus import QuestionFocus
+from cqb.services.question_context import discussion_prefix
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
@@ -26,6 +28,7 @@ from cqb.telegram.topics import TelegramTopics
 log = logging.getLogger(__name__)
 
 STALE = "Кнопка устарела; обновляю сообщение"
+SECRET_REFUSAL = "Секретный ввод: Bridge не обсуждает и не принимает его, ответьте в Codex"
 
 
 @dataclass(frozen=True, slots=True)
@@ -51,6 +54,7 @@ class Router:
         questions: QuestionService,
         agent_questions: AgentQuestionService,
         relay: ConsultantRelay,
+        focus: QuestionFocus,
         status: StatusPoster,
         source_id: str,
         request_poll: Callable[[], None],
@@ -69,6 +73,7 @@ class Router:
         self._questions = questions
         self._agent_questions = agent_questions
         self._relay = relay
+        self._focus = focus
         self._status = status
         self._source = source_id
         self._request_poll = request_poll
@@ -142,18 +147,36 @@ class Router:
         elif command == "status":
             if not self._status.request(consultant.root_thread_id, m.thread_id):
                 await self._say(m, STATUS_BUSY)
-        elif command is None and m.reply_to_message_id is not None and (
-            reply := await self._card_reply(m.reply_to_message_id, m.text or "")
-        ) is not None:
-            if reply.text:  # a reply to a question card is never chat: it must not reach the model
-                await self._say(m, reply.text)
+        elif command is None:
+            await self._text(consultant, m)
         else:
             await self._relay.relay(consultant, m.text or "")
 
-    async def _card_reply(self, reply_to: int, text: str) -> Reply | None:
-        """Free text replied to a question card of either kind; None when the message is not a card."""
+    async def _text(self, consultant: Consultant, m: Message) -> None:
+        """Plain text of the owner: the answer to an armed card, or chat. The focus question is updated first."""
+        text, root = m.text or "", consultant.root_thread_id
+        card, reply_to = None, m.reply_to_message_id
+        if reply_to is not None:
+            card = self._questions.by_card_message(reply_to) or self._agent_questions.by_card_message(reply_to)
+            if card is not None and card.root_thread_id != root:
+                card = None  # a card of another thread is nothing to this topic
+        if card is None:
+            self._focus.note_mentions(root, text)
+            await self._relay.relay(consultant, text)  # not a card of this topic: ordinary chat
+            return
+        self._focus.point_card(card)
+        assert reply_to is not None
         reply = await self._cards.stage_text(reply_to, text)
-        return reply if reply is not None else await self._agent_cards.stage_text(reply_to, text)
+        if reply is None:
+            reply = await self._agent_cards.stage_text(reply_to, text)
+        if reply is not None:  # the armed card took it as its answer
+            if reply.text:
+                await self._say(m, reply.text)
+        elif isinstance(card, Question) and card.is_secret:
+            await self._say(m, SECRET_REFUSAL)  # whatever the owner typed may be the secret: nothing is forwarded
+        elif text.strip():
+            self._focus.note_mentions(root, text)
+            await self._relay.relay(consultant, text, lead=discussion_prefix(card))
 
     def _command(self, text: str) -> str | None:
         """Command name; None for plain text; "" for a command aimed at another bot."""
@@ -225,23 +248,36 @@ class Router:
                 return Reply()
             case "opt":
                 qid, _, index = (a.payload or "").rpartition(":")
+                self._focus_on(qid)
                 return await self._cards.stage(qid, int(index))
             case "send":
                 return await self._cards.confirm(a.payload or "")
             case "cancel":
                 return await self._cards.cancel(a.payload or "")
             case "other":
-                return self._cards.other_hint()
+                self._focus_on(a.payload or "")
+                return await self._cards.arm(a.payload or "")
+            case "unarm":
+                qid = a.payload or ""
+                return await (self._agent_cards if qid.startswith("a_") else self._cards).unarm(qid)
             case "aopt":
-                qid, question, option = (a.payload or "").split(":")
-                return await self._agent_cards.stage(qid, int(question), int(option))
+                qid, _, option = (a.payload or "").rpartition(":")
+                self._focus_on(qid)
+                return await self._agent_cards.stage(qid, int(option))
             case "asend":
                 return await self._agent_cards.confirm(a.payload or "")
             case "acancel":
                 return await self._agent_cards.cancel(a.payload or "")
             case "aother":
-                return self._agent_cards.other_hint((a.payload or "").partition(":")[0])
+                self._focus_on(a.payload or "")
+                return await self._agent_cards.arm(a.payload or "")
         return Reply("Неизвестное действие")
+
+    def _focus_on(self, question_id: str) -> None:
+        """Pressing an option or the text button on a card points the conversation at that question."""
+        card = self._questions.get(question_id) or self._agent_questions.get(question_id)
+        if card is not None:
+            self._focus.point_card(card)
 
     async def _create(self, root: str) -> Reply:
         before = self._consultants.get(root)

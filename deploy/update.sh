@@ -10,6 +10,12 @@ git -C "$repo" archive HEAD | tar -x -C "$build"
 /opt/cqb/.venv/bin/pip install -q "$build"   # pulls dependency changes, if any
 # the PicoClaw scope hook is a standalone script that must match the bridge version
 install -D -m 755 "$build/integrations/picoclaw_scope_hook.py" /opt/cqb/integrations/picoclaw_scope_hook.py
+# consultant and Status Agent prompts live in the PicoClaw workspaces (root-owned, read-only for the gateway)
+for ws in ws-main ws-status; do
+  if [ -d "/var/lib/picoclaw/$ws" ]; then
+    install -m 644 -o root -g root "$build/deploy/picoclaw/$ws/AGENT.md" "/var/lib/picoclaw/$ws/AGENT.md"
+  fi
+done
 systemctl restart cqb.service
 # The gateway connects to the bridge's MCP server only while it starts, and the hook is its child: restart it after
 # the bridge is listening (override the port with CQB_MCP_PORT if [mcp] uses another one).

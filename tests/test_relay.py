@@ -3,8 +3,8 @@ import asyncio
 from cqb.domain.enums import ArchiveState, ConsultantState
 from cqb.domain.models import Consultant
 from cqb.services.relay import (
-    BUSY, FAILED, NOT_CONFIGURED, QUEUE_FULL, QUEUED, REPLY_MAX_CHARS, TIMED_OUT, TRUNCATED, UNAVAILABLE,
-    ConsultantRelay, DialogResult, Outcome, Submit, present,
+    BUSY, ERRORED, FAILED, NOT_CONFIGURED, QUEUE_FULL, QUEUED, REPLY_MAX_CHARS, TIMED_OUT, TRUNCATED, UNAVAILABLE,
+    ConsultantRelay, DialogResult, Outcome, Submit, present, with_reason,
 )
 from fake_appserver import wait_until
 from tg_stack import make_stack, thread
@@ -19,8 +19,11 @@ def run(coro):
 class Dialog:
     """Records submissions; `outcome` decides the submit result, `results` what deliver gets."""
 
-    def __init__(self, outcome=Submit.ACCEPTED, results=(DialogResult(Outcome.REPLY, "pong"),)):
-        self.outcome, self.results, self.calls = outcome, results, []
+    def __init__(self, outcome=Submit.ACCEPTED, results=(DialogResult(Outcome.REPLY, "pong"),), reason=""):
+        self.outcome, self.results, self.calls, self.reason = outcome, results, [], reason
+
+    def unavailable_reason(self):
+        return self.reason
 
     def submit(self, session_id, text, deliver):
         self.calls.append((session_id, text))
@@ -87,6 +90,66 @@ def test_status_lines_for_every_submit_and_dialog_outcome():
     assert present(DialogResult(Outcome.REPLY, "  ")) == FAILED  # an empty reply is shown as a failure, not silence
     for line in (UNAVAILABLE, FAILED, BUSY, TIMED_OUT):
         assert "Traceback" not in line and "\n" not in line
+
+
+def test_every_unavailable_busy_and_error_line_carries_its_reason():
+    async def main():
+        sink = Sink()
+        await ConsultantRelay(Dialog(Submit.UNAVAILABLE, (), reason="хук не отвечает"), sink).relay(consultant(), "hi")
+        assert sink.said == [(7, f"{UNAVAILABLE} (хук не отвечает)")]
+        sink = Sink()  # no reason known: the old line, unchanged
+        await ConsultantRelay(Dialog(Submit.UNAVAILABLE, ()), sink).relay(consultant(), "hi")
+        assert sink.said == [(7, UNAVAILABLE)]
+        sink = Sink()  # a reason that arrives with the dialog result
+        relay = ConsultantRelay(Dialog(results=(DialogResult(Outcome.UNAVAILABLE, "соединение с PicoClaw оборвано"),)), sink)
+        await relay.relay(consultant(), "hi")
+        await wait_until(lambda: sink.said)
+        assert sink.said == [(7, f"{UNAVAILABLE} (соединение с PicoClaw оборвано)")]
+    run(main())
+    assert present(DialogResult(Outcome.BUSY, "слишком много соединений")) == f"{BUSY} (слишком много соединений)"
+    assert present(DialogResult(Outcome.ERROR, "модель вернула ошибку: x")) == f"{ERRORED} (модель вернула ошибку: x)"
+    assert present(DialogResult(Outcome.ERROR, "  ")) == FAILED  # no reason: the old line
+    assert present(DialogResult(Outcome.TIMEOUT, "ignored")) == TIMED_OUT
+
+
+def test_a_reason_is_one_bounded_line():
+    line = with_reason(UNAVAILABLE, "a\n  b " + "x" * 1000)
+    assert "\n" not in line and len(line) <= len(UNAVAILABLE) + 240 + 3 and line.endswith("…)") and "a b x" in line
+    assert with_reason(UNAVAILABLE, "  ") == UNAVAILABLE
+
+
+def test_the_context_line_is_prepended_to_every_forwarded_text_but_never_to_stop():
+    async def main():
+        dialog, sink = Dialog(), Sink()
+        asked = []
+        relay = ConsultantRelay(dialog, sink, typing_seconds=0.01,
+                                context=lambda root: asked.append(root) or '[Context: focus Q3 "x" (explicit)]')
+        await relay.relay(consultant(), "why?")
+        await relay.relay(consultant(), "/clear")
+        await relay.relay(consultant(), "/stop")
+        await relay.relay(consultant(), "  ")  # nothing to forward: no line alone
+        await relay.relay(consultant(), "about it", lead="[Context: the user replies about question Q4 (t)] ")
+        key = "cqb-" + "x" * 26
+        assert dialog.calls == [
+            (key, '[Context: focus Q3 "x" (explicit)]\nwhy?'),
+            (key, '[Context: focus Q3 "x" (explicit)]\n/clear'),  # no longer starts with a slash: nothing to escape
+            (key, "/stop"),
+            (key, "[Context: the user replies about question Q4 (t)] about it"),  # the reply prefix takes precedence
+        ]
+        assert asked == ["r1", "r1"]
+    run(main())
+
+
+def test_no_context_line_when_nothing_is_pending_and_a_failing_provider_never_blocks_the_owner():
+    async def main():
+        dialog, sink = Dialog(), Sink()
+        await ConsultantRelay(dialog, sink, context=lambda root: "").relay(consultant(), "hi")
+
+        def broken(root):
+            raise RuntimeError("db is gone: private text")
+        await ConsultantRelay(dialog, sink, context=broken).relay(consultant(), "still delivered")
+        assert [t for _, t in dialog.calls] == ["hi", "still delivered"]
+    run(main())
 
 
 def test_reply_size_is_bounded_with_a_visible_notice():

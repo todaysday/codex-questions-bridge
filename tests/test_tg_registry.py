@@ -154,7 +154,7 @@ def test_no_refresh_or_status_button_anywhere_and_key_kinds(conn):
                 if nav:
                     click(st, msg, nav)
                     await st.pump()
-    assert ONE_TIME == {"create", "opt", "send", "cancel", "aopt", "asend", "acancel"}
+    assert ONE_TIME == {"create", "opt", "send", "cancel", "aopt", "asend", "acancel", "unarm"}
     run(main())
 
 
@@ -169,7 +169,7 @@ def test_one_message_in_the_control_topic_across_a_full_scenario(conn):
             await st.settle()
             card = st.card_of(st.qid_of("i1"))
             assert fake.messages[card]["thread_id"] == topic
-            fake.push_callback(fake.button(card, "A. Existing")["callback_data"], card)
+            fake.push_callback(fake.button(card, "A")["callback_data"], card)
             await st.pump()
             fake.push_callback(fake.button(card, "Отправить")["callback_data"], card)
             await st.pump()

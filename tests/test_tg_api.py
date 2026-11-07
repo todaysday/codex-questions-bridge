@@ -135,3 +135,50 @@ def test_get_updates_decodes_message_and_callback():
         assert fake.methods("getUpdates")[0]["allowed_updates"] == ["message", "callback_query"]
         assert await api.get_updates(ups[-1].update_id + 1, timeout=0) == []
     with_api(body)
+
+
+def test_parse_mode_is_sent_only_when_asked():
+    async def body(api, fake, sleeps):
+        plain = await api.send_message(CHAT_ID, "a <b>b</b>")
+        html = await api.send_message(CHAT_ID, "a <b>b</b>", parse_mode="HTML")
+        assert fake.messages[plain.message_id]["parse_mode"] is None
+        assert fake.messages[html.message_id]["parse_mode"] == "HTML" and fake.messages[html.message_id]["text"] == "a <b>b</b>"
+        assert [p.get("parse_mode") for p in fake.methods("sendMessage")] == [None, "HTML"]
+    with_api(body)
+
+
+@pytest.mark.parametrize("text", ["📊 <b>x", "a < b", "x & y", "<unknown>t</unknown>", "<b>x</i>"])
+def test_html_the_fake_rejects_matches_what_telegram_rejects_and_valid_html_passes(text):
+    async def body(api, fake, sleeps):
+        for good in ("<b>x</b> &lt;a&gt; &amp; &quot;q&quot; &#x27;", "no markup at all"):
+            assert (await api.send_message(CHAT_ID, good, parse_mode="HTML")).message_id
+        sent = await api.send_message(CHAT_ID, text, parse_mode="HTML")  # rejected, then resent as plain text
+        assert fake.messages[sent.message_id]["parse_mode"] is None
+    with_api(body)
+
+
+def test_unparsable_html_is_resent_as_the_same_text_without_tags_so_nothing_is_lost(caplog):
+    async def body(api, fake, sleeps):
+        text = "📊 <b>Fox &amp; Co</b>\n🟢 <b>работает</b> &lt;3 &quot;q&quot; &#x27;s&#x27;\n<b>unclosed"
+        with caplog.at_level(logging.WARNING):
+            sent = await api.send_message(CHAT_ID, text, thread_id=None, parse_mode="HTML")
+        stored = fake.messages[sent.message_id]
+        assert stored["text"] == "📊 Fox & Co\n🟢 работает <3 \"q\" 's'\nunclosed" and stored["parse_mode"] is None
+        calls = fake.methods("sendMessage")
+        assert [p.get("parse_mode") for p in calls] == ["HTML", None]
+        assert "Fox" not in caplog.text  # the warning never carries message text
+    with_api(body)
+
+
+def test_only_a_parse_error_triggers_the_plain_fallback():
+    async def body(api, fake, sleeps):
+        with pytest.raises(BadRequest):
+            await api.send_message(CHAT_ID, "<b>x</b>", thread_id=999, parse_mode="HTML")  # another 400: raised, not retried
+        assert fake.methods().count("sendMessage") == 1
+        fake.fail("sendMessage", 400, "Bad Request: can't parse entities: Can't find end tag", times=1)
+        sent = await api.send_message(CHAT_ID, "<b>ok</b>", parse_mode="HTML")  # a simulated server-side parse error
+        assert fake.messages[sent.message_id]["text"] == "ok"
+        fake.fail("sendMessage", 400, "Bad Request: can't parse entities", times=1)
+        with pytest.raises(BadRequest):
+            await api.send_message(CHAT_ID, "plain", parse_mode=None)  # no HTML asked: nothing to fall back from
+    with_api(body)

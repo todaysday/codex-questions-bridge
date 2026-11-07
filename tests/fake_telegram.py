@@ -2,6 +2,7 @@
 
 import asyncio
 import itertools
+import re
 from typing import Any
 
 from aiohttp import web
@@ -169,9 +170,12 @@ class FakeTelegram:
         thread = p.get("message_thread_id")
         if thread is not None and thread not in self.topics:
             raise _Fail(400, "Bad Request: message thread not found")
+        if p.get("parse_mode") == "HTML":
+            check_html(p["text"])
         mid = next(self._msg_ids)
         self.messages[mid] = {
             "text": p["text"], "thread_id": thread, "markup": p.get("reply_markup"), "chat_id": p["chat_id"],
+            "parse_mode": p.get("parse_mode"),
         }
         return {"message_id": mid}
 
@@ -222,6 +226,32 @@ class FakeTelegram:
     async def m_answerCallbackQuery(self, p: dict[str, Any]) -> bool:
         self.callback_answers.append(p)
         return True
+
+
+_HTML_TAG = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)[^<>]*>")
+_HTML_TAGS = {"b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "pre", "a", "tg-spoiler", "blockquote"}
+_HTML_ENTITY = re.compile(r"&(#\d+|#x[0-9a-fA-F]+|lt|gt|amp|quot);")
+
+
+def check_html(text: str) -> None:
+    """What Telegram's HTML parse mode rejects with `can't parse entities`: unknown or unbalanced tags, a bare `<` or `&`."""
+    stack: list[str] = []
+    for m in _HTML_TAG.finditer(text):
+        tag = m.group(1).lower()
+        if tag not in _HTML_TAGS:
+            raise _Fail(400, f"Bad Request: can't parse entities: Unsupported start tag \"{tag}\"")
+        if m.group(0).startswith("</"):
+            if not stack or stack.pop() != tag:
+                raise _Fail(400, f"Bad Request: can't parse entities: Unmatched end tag \"{tag}\"")
+        else:
+            stack.append(tag)
+    if stack:
+        raise _Fail(400, "Bad Request: can't parse entities: Can't find end tag")
+    bare = _HTML_TAG.sub("", text)
+    if "<" in bare:
+        raise _Fail(400, "Bad Request: can't parse entities: Unsupported start tag")
+    if _HTML_ENTITY.sub("", bare).count("&"):
+        raise _Fail(400, "Bad Request: can't parse entities: Unsupported entity")
 
 
 class _Fail(Exception):

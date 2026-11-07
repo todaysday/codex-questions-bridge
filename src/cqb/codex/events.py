@@ -11,17 +11,19 @@ from cqb.domain.enums import ArchiveState, RunState
 from cqb.domain.models import AgentQuestionItem, QuestionItem, QuestionOption, Thread
 from cqb.domain.status import UsageSnapshot
 
+# Bounds on what is stored. They are far above anything a person writes, because a card never cuts text:
+# its body carries the full title and every option (long cards are split into several messages).
 MAX_ITEMS = 8
-MAX_OPTIONS = 12
+MAX_OPTIONS = 26
 MAX_HEADER = 100
-MAX_QUESTION = 500
-MAX_LABEL = 200
-MAX_DESCRIPTION = 300
+MAX_QUESTION = 20000
+MAX_LABEL = 2000
+MAX_DESCRIPTION = 8000
 MAX_NAME = 80
-MAX_AGENT_QUESTIONS = 8
-MAX_AGENT_OPTIONS = 10
-MAX_AGENT_TITLE = 1500
-MAX_AGENT_OPTION = 300
+MAX_AGENT_QUESTIONS = 20
+MAX_AGENT_OPTIONS = 26
+MAX_AGENT_TITLE = 20000
+MAX_AGENT_OPTION = 8000
 
 
 @dataclass(frozen=True, slots=True)
@@ -132,18 +134,18 @@ def normalize(msg: Inbound) -> Event | None:
     return None
 
 
-def agent_questions_from_item(raw: Any) -> tuple[tuple[AgentQuestionItem, ...], bool] | None:
-    """A ThreadItem agentMessage with a non-empty `questions` list -> (items, answerable), else None.
+def agent_questions_from_item(raw: Any) -> tuple[AgentQuestionItem, ...] | None:
+    """A ThreadItem agentMessage with a non-empty `questions` list -> its questions in order (the position is the
+    question's index), else None.
 
-    Only titles and options are read; the message text is never touched. Text past the limits is cut and
-    the question is then not answerable from Telegram (the answer must quote titles and options exactly).
+    Only titles and options are read; the message text is never touched. A question past the bounds is kept cut
+    with `complete=False`: it is shown, but not answerable from Telegram (the answer must quote the title exactly).
     """
     if not isinstance(raw, dict) or raw.get("type") != "agentMessage":
         return None
     questions = raw.get("questions")
     if not isinstance(questions, list) or not questions:
         return None
-    complete = len(questions) <= MAX_AGENT_QUESTIONS
     items: list[AgentQuestionItem] = []
     for q in questions[:MAX_AGENT_QUESTIONS]:
         options = q.get("options") if isinstance(q, dict) else None
@@ -151,12 +153,12 @@ def agent_questions_from_item(raw: Any) -> tuple[tuple[AgentQuestionItem, ...], 
         if not isinstance(q, dict) or not isinstance(q.get("title"), str) or not isinstance(options, list) \
                 or not all(isinstance(o, str) for o in options):
             return None  # an unknown shape: better unseen than answered wrongly
-        complete = complete and len(q["title"]) <= MAX_AGENT_TITLE and len(options) <= MAX_AGENT_OPTIONS \
+        complete = len(q["title"]) <= MAX_AGENT_TITLE and len(options) <= MAX_AGENT_OPTIONS \
             and all(len(o) <= MAX_AGENT_OPTION for o in options)
         items.append(AgentQuestionItem(
-            q["title"][:MAX_AGENT_TITLE], tuple(o[:MAX_AGENT_OPTION] for o in options[:MAX_AGENT_OPTIONS])
+            q["title"][:MAX_AGENT_TITLE], tuple(o[:MAX_AGENT_OPTION] for o in options[:MAX_AGENT_OPTIONS]), complete
         ))
-    return tuple(items), complete
+    return tuple(items)
 
 
 def thread_waiting_on_user(raw: dict[str, Any]) -> bool:

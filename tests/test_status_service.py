@@ -7,7 +7,7 @@ import pytest
 
 from cqb.codex.events import Connected, Disconnected, GoalChanged, ThreadStatusChanged, TokenUsageUpdated
 from cqb.domain.enums import RunState as R
-from cqb.domain.status import Activity, AgentLine, GoalSummary, RateLimits, StatusReport, UsageSnapshot
+from cqb.domain.status import Activity, AgentLine, GoalSummary, RateLimits, StatusReport, StatusSummary, UsageSnapshot
 from cqb.services import status as status_mod
 from cqb.services.live_state import LiveState
 from cqb.services.status import StatusService, StatusUnavailable
@@ -40,7 +40,7 @@ def test_root_state_icon_and_word(state, icon, word):
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1", state, updated=NOW - 5)
     text = render_status(collect(svc))
-    assert f"{icon} {word}" in text.splitlines()[1]
+    assert f"{icon} <b>{word}</b>" in text.splitlines()[1]
 
 
 @pytest.mark.parametrize("quiet,stalled", [(0, False), (599, False), (600, False), (601, True), (3600, True)])
@@ -51,7 +51,7 @@ def test_stalled_boundaries_use_updated_at(quiet, stalled):
     assert (report.state is R.STALLED) == stalled
     if stalled:
         assert report.quiet_minutes == quiet // 60
-        assert f"🟠 тихо {quiet // 60} мин" in render_status(report)
+        assert f"🟠 <b>тихо {'1ч' if quiet == 3600 else f'{quiet // 60}м'}</b>" in render_status(report)
 
 
 def test_stalled_uses_the_latest_broadcast_and_never_applies_to_waiting_or_idle():
@@ -71,7 +71,7 @@ def test_turn_elapsed_only_for_an_active_thread_and_never_negative():
     src.turn_start = NOW - 754
     src.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
     report = collect(svc)
-    assert report.turn_elapsed_s == 754 and "ход 12 мин" in render_status(report)
+    assert report.turn_elapsed_s == 754 and "ход 12м" in render_status(report)
     src.threads["r2"] = snapshot("r2", R.IDLE)
     src.activities["r2"] = Activity(False, NOW - 900, NOW - 800, None)
     report = collect(svc, "r2")
@@ -86,7 +86,7 @@ def test_context_and_cache_math_use_last_call_only():
     src.threads["r1"] = snapshot("r1", path="/p")
     report = collect(svc)
     assert report.usage.fill_percent == 6 and report.usage.cache_percent == 80
-    assert "Контекст: 29.5k / 475k (6%) · кэш 80%" in render_status(report)
+    assert "🧠 ctx 29.5k/475k (6%) · 💾 кэш 80%" in render_status(report)
 
 
 def test_usage_edge_cases():
@@ -108,19 +108,19 @@ def test_missing_data_is_a_dash_never_invented():
     src.turn_start = None
     text = render_status(collect(svc))
     lines = text.splitlines()
-    assert lines[0] == "📊 Статус: —"
-    assert lines[1] == "🟢 работает · — · effort — · ход —"
-    assert "Контекст: — · кэш —" in text and "Лимит: —" in text
-    assert "Цель" not in text  # no goal: the line is skipped, not dashed
+    assert lines[0] == "📊 <b>—</b>"
+    assert lines[1] == "🟢 <b>работает</b> · — · ход — · 🕒 только что"
+    assert "🧠 ctx — · 💾 кэш —" in text and "📈 лимит —" in text and "снимок" not in text
+    assert "🎯" not in text  # no goal: the line is skipped, not dashed
 
 
 def test_unreadable_children_are_a_dash_but_no_children_is_none():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
-    assert "Субагенты: нет" in render_status(collect(svc))
+    assert "🤖 <b>Субагенты</b> · нет" in render_status(collect(svc))
     src.fail = False
     report = dataclasses.replace(collect(svc, "r1"), agents_total=None)
-    assert "Субагенты: —" in render_status(report)
+    assert "🤖 <b>Субагенты</b> · —" in render_status(report)
 
 
 def test_root_unreadable_raises_and_unknown_source_is_refused():
@@ -152,7 +152,7 @@ def children(src, n, **kw):
                  model="luna", effort="high", role="luna-high") for i in range(n))
 
 
-def test_subagent_counting_and_the_eight_line_cap():
+def test_subagent_counting_and_the_six_line_cap():
     svc, src, live, _ = make()
     src.threads["r1"] = snapshot("r1")
     children(src, 11)
@@ -164,12 +164,13 @@ def test_subagent_counting_and_the_eight_line_cap():
     src.children["r1"] = tuple(kids)
     report = collect(svc)
     assert (report.agents_total, report.agents_working, report.agents_waiting, report.agents_idle) == (11, 2, 2, 7)
-    assert len(report.agents) == 8
+    assert len(report.agents) == 6
     assert [a.state for a in report.agents[:4]] == [R.WORKING, R.WORKING, R.WAITING_INPUT, R.WAITING_APPROVAL]
     text = render_status(report)
-    assert "Субагенты: 11 · 🟢 2 работают · 🟡 2 ждут · ⚪ 7 простаивают" in text
-    assert text.count("\n •") == 8 and "\nи ещё 3\n" in text and "+" not in text.split("Субагенты")[1].split("Резюме")[0]
-    assert len(text.splitlines()) <= 14 + 2 * 8
+    assert "🤖 <b>Субагенты 11</b> · 🟢 2 · 🟡 2 · ⚪ 7\n" in text
+    assert sum(x.startswith((" 🟢", " 🟡", " ⚪")) for x in text.splitlines()) == 6
+    assert "\n … и ещё 5\n" in text and "+" not in text.split("Субагенты")[1].split("📝")[0]
+    assert len(text.splitlines()) <= 20
 
 
 def test_more_pages_than_fetched_is_marked():
@@ -178,7 +179,7 @@ def test_more_pages_than_fetched_is_marked():
     children(src, 9)
     src.more = True
     text = render_status(collect(svc))
-    assert "Субагенты: 9+" in text and "\nи ещё 1\n" in text and "ещё+" not in text
+    assert "Субагенты 9+</b>" in text and "\n … и ещё 3\n" in text and "ещё+" not in text
 
 
 def test_agent_line_label_context_from_broadcast_and_dashes():
@@ -191,17 +192,17 @@ def test_agent_line_label_context_from_broadcast_and_dashes():
     )
     run(live.handle(TokenUsageUpdated("a1", UsageSnapshot(50_000, 200_000, 49_000, 0))))
     lines = render_status(collect(svc)).splitlines()
-    agent_lines = [x for x in lines if x.startswith(" •")]
-    assert any(x.startswith(" • Lovelace · luna low · 🟢 · ctx 25%") for x in agent_lines)
-    assert any(x.startswith(" • luna-high · — — · ⚪ · ctx —") for x in agent_lines)
-    assert any(x.startswith(" • — ·") for x in agent_lines)  # no path, nickname or role: a dash, never an id
+    agent_lines = [x for x in lines if x.startswith((" 🟢", " 🟡", " ⚪"))]
+    assert any(x.startswith(" 🟢 Lovelace · luna·low · ctx 25%") for x in agent_lines)
+    assert any(x.startswith(" ⚪ luna-high · ") and "ctx" not in x and "—" not in x.split(" · ")[1] for x in agent_lines)
+    assert any(x.startswith(" ⚪ — · gpt-6·low · ") for x in agent_lines)  # no path, nickname or role: a dash, never an id
 
 
 def test_goal_line_present_and_skipped_when_live_says_none():
     svc, src, live, _ = make()
     src.threads["r1"] = snapshot("r1")
     src.goals["r1"] = GoalSummary("Ship the profile page", "active", 12_300, 50_000)
-    assert "Цель: Ship the profile page · активна · 12.3k / 50k ток." in render_status(collect(svc))
+    assert "🎯 Ship the profile page · 12.3k/50k\n" in render_status(collect(svc))
     run(live.handle(GoalChanged("r1", False)))
     calls = src.calls.count("goal")
     assert collect(svc).goal is None and src.calls.count("goal") == calls  # no daemon call needed
@@ -221,17 +222,17 @@ def test_rate_limits_are_cached_for_thirty_seconds():
     assert src.calls.count("limits") == 2
     src.limits = None
     clock.now += 31
-    assert "Лимит: —" in render_status(collect(svc))
+    assert render_status(collect(svc)).endswith("📈 лимит —")
 
 
 def test_limits_rendering_weekly_primary_only():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
     text = render_status(collect(svc))
-    assert "Лимит: 30% (неделя) · сброс " in text
+    assert "📈 лимит 30% нед. · сброс " in text and text.endswith(" UTC") and "снимок" not in text
     src.limits = RateLimits(55, None, 300)
     svc._limits = None
-    assert "Лимит: 55% (5 ч)" in render_status(collect(svc))
+    assert render_status(collect(svc)).endswith("📈 лимит 55% 5ч")
 
 
 def test_every_snapshot_reads_fresh_data():
@@ -247,8 +248,9 @@ def test_card_never_exceeds_the_telegram_limit():
     agents = tuple(AgentLine(long, long, long, R.WORKING, 99, NOW) for _ in range(8))
     report = StatusReport(
         NOW, long, R.STALLED, 99, long, long, 10**6, UsageSnapshot(10**9, 10**9, 10**9, 10**9), NOW,
-        GoalSummary(long, long, 10**9, 10**9), 10**4, True, 3, 3, 4, agents, RateLimits(100, NOW, 10080), None, long)
-    assert len(render_status(report)) <= TEXT_LIMIT
+        GoalSummary(long, long, 10**9, 10**9), 10**4, True, 3, 3, 4, agents, RateLimits(100, NOW, 10080), None, StatusSummary(long, long))
+    text = render_status(report)
+    assert len(text) <= TEXT_LIMIT and "\n 🟢" in text
     assert set(ICON) == set(R)
 
 
@@ -272,22 +274,22 @@ def test_live_map_is_bounded_oldest_first_and_cleared_on_reconnect():
 
 
 def header(report):
-    return next(x for x in render_status(report).splitlines() if x.startswith("Субагенты"))
+    return next(x for x in render_status(report).splitlines() if x.startswith("🤖"))
 
 
 def test_zero_counts_are_not_shown_in_the_header():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
     children(src, 4)
-    assert header(collect(svc)) == "Субагенты: 4 · ⚪ 4 простаивают"
+    assert header(collect(svc)) == "🤖 <b>Субагенты 4</b> · ⚪ 4"
     kids = [dataclasses.replace(k, state=R.NOT_LOADED) for k in src.children["r1"]]
     kids[0] = dataclasses.replace(kids[0], state=R.WORKING)
     src.children["r1"] = tuple(kids)
-    assert header(collect(svc)) == "Субагенты: 4 · 🟢 1 работают · ⚪ 3 простаивают"
+    assert header(collect(svc)) == "🤖 <b>Субагенты 4</b> · 🟢 1 · ⚪ 3"
     src.children["r1"] = tuple(dataclasses.replace(k, state=R.WAITING_INPUT) for k in kids)
-    assert header(collect(svc)) == "Субагенты: 4 · 🟡 4 ждут"
+    assert header(collect(svc)) == "🤖 <b>Субагенты 4</b> · 🟡 4"
     src.children["r1"] = ()
-    assert header(collect(svc)) == "Субагенты: нет"
+    assert header(collect(svc)) == "🤖 <b>Субагенты</b> · нет"
 
 
 def test_the_cap_counts_and_shows_the_plus_only_in_the_header():
@@ -297,11 +299,11 @@ def test_the_cap_counts_and_shows_the_plus_only_in_the_header():
     src.more = True
     report = collect(svc)
     assert (report.agents_total, report.agents_more) == (300, True)
-    assert header(report) == "Субагенты: 300+ · ⚪ 300 простаивают"
-    assert "\nи ещё 292\n" in render_status(report)
+    assert header(report) == "🤖 <b>Субагенты 300+</b> · ⚪ 300"
+    assert "\n … и ещё 294\n" in render_status(report)
 
 
-def test_the_eight_lines_are_working_then_waiting_then_most_recent():
+def test_the_six_lines_are_working_then_waiting_then_most_recent():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
     kids = [snapshot(f"i{i}", R.IDLE, updated=NOW - 10 * (i + 1), parent="r1", nickname=f"Idle{i}") for i in range(6)]
@@ -310,7 +312,7 @@ def test_the_eight_lines_are_working_then_waiting_then_most_recent():
     kids.append(snapshot("q", R.WAITING_APPROVAL, updated=NOW - 4000, parent="r1", nickname="Waits"))
     src.children["r1"] = tuple(kids)
     labels = [a.label for a in collect(svc).agents]
-    assert labels == ["WorkNew", "WorkOld", "Waits", "Idle0", "Idle1", "Idle2", "Idle3", "Idle4"]
+    assert labels == ["WorkNew", "WorkOld", "Waits", "Idle0", "Idle1", "Idle2"]
 
 
 def test_title_from_the_agent_path_and_the_depth_prefix():
@@ -324,9 +326,9 @@ def test_title_from_the_agent_path_and_the_depth_prefix():
         snapshot("a3", R.WORKING, parent="r1", nickname="Bob", role="worker", agent_path="//", depth=0),
     )
     text = render_status(collect(svc))
-    assert " • Tl 008 oracle known lifecycle · " in text
-    assert " • ↳ Oracle run lifecycle · " in text
-    assert " • Bob · " in text and "↳ Bob" not in text and "↳ Tl" not in text
+    assert "\n 🟢 Tl 008 oracle known lifecycle · " in text
+    assert "\n ↳ 🟢 Oracle run lifecycle · " in text
+    assert "\n 🟢 Bob · " in text and "↳ Bob" not in text and "↳ 🟢 Tl" not in text
     assert "/root" not in text and "Faraday" not in text
 
 
@@ -334,5 +336,5 @@ def test_long_title_is_clipped():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
     src.children["r1"] = (snapshot("a1", parent="r1", agent_path="/root/" + "word_" * 20),)
-    line = next(x for x in render_status(collect(svc)).splitlines() if x.startswith(" •"))
+    line = next(x for x in render_status(collect(svc)).splitlines() if x.startswith(" ⚪"))
     assert "Word word" in line and "… ·" in line and len(line.split(" · ")[0]) <= 3 + 32

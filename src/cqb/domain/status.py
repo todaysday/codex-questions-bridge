@@ -4,6 +4,10 @@ from dataclasses import dataclass
 
 from cqb.domain.enums import ItemKind, RunState
 
+AGENT_LINES = 6  # subagent lines the card can show; the service reads 'now' data for exactly these
+SUMMARY_MAX = 350  # characters of the Status Agent summary in all
+NEXT_MAX = 120  # of them at most this many for its `Дальше` part
+
 
 @dataclass(frozen=True, slots=True)
 class ThreadSnapshot:
@@ -111,6 +115,14 @@ class AgentLine:
 
 
 @dataclass(frozen=True, slots=True)
+class StatusSummary:
+    """The Status Agent's answer, already parsed, bounded and redacted: what is going on, and what comes next."""
+
+    progress: str  # one to three short lines
+    next_steps: str | None = None  # one or two short lines; None when the reports do not say
+
+
+@dataclass(frozen=True, slots=True)
 class StatusReport:
     now: int
     title: str | None
@@ -130,4 +142,4 @@ class StatusReport:
     agents: tuple[AgentLine, ...]  # already capped for display
     limits: RateLimits | None
     activity: Activity | None = None  # the root's own 'now'
-    summary: str | None = None  # the Status Agent's text; None = unavailable
+    summary: StatusSummary | None = None  # None = the Status Agent was unavailable

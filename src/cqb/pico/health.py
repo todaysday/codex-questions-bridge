@@ -18,6 +18,8 @@ import aiohttp
 log = logging.getLogger(__name__)
 
 HEALTH_TIMEOUT = 3.0
+HEALTH_FAILING = "health-проверка PicoClaw не проходит"  # what the owner reads in the chat
+HOOK_SILENT = "хук не отвечает"
 
 
 def health_url(pico_url: str) -> str:
@@ -38,28 +40,30 @@ class PicoHealth:
         self._last_beat: float | None = None
         self._started = clock()  # the hook gets one interval of grace after the Bridge starts
         self.ok = True
-        self.reason = ""
+        self.reason = ""  # for the log
+        self.user_reason = ""  # for the chat: short, Russian, no ids
 
     def beat(self) -> None:
         self._last_beat = self._clock()
 
     async def check(self) -> bool:
-        reason = await self._probe()
+        reason, shown = await self._probe()
         if reason and self.ok:
             log.error("consultant chat unavailable: %s; messages are refused until it recovers", reason)
         elif not reason and not self.ok:
             log.warning("consultant chat recovered")
-        self.ok, self.reason = not reason, reason
+        self.ok, self.reason, self.user_reason = not reason, reason, shown
         return self.ok
 
-    async def _probe(self) -> str:
+    async def _probe(self) -> tuple[str, str]:
+        """(log reason, chat reason); both empty when healthy."""
         try:
             async with self._http.get(self._url, timeout=aiohttp.ClientTimeout(total=HEALTH_TIMEOUT)) as r:
                 if r.status != 200:
-                    return f"PicoClaw /health answered {r.status}"
+                    return f"PicoClaw /health answered {r.status}", f"{HEALTH_FAILING}, ответ {r.status}"
         except (aiohttp.ClientError, TimeoutError, OSError):
-            return "PicoClaw gateway is not reachable"
+            return "PicoClaw gateway is not reachable", HEALTH_FAILING
         age = self._clock() - (self._last_beat if self._last_beat is not None else self._started)
         if age > self._max_age:
-            return "the PicoClaw scope hook process is silent (dead hook: restart the PicoClaw gateway)"
-        return ""
+            return "the PicoClaw scope hook process is silent (dead hook: restart the PicoClaw gateway)", HOOK_SILENT
+        return "", ""

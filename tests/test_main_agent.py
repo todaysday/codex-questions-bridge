@@ -41,7 +41,7 @@ def test_agent_question_end_to_end(tmp_path, caplog):
         fox = tg.topic_named("FoxProfile")[0]
         await wait_until(lambda: any("Where store settings?" in m["text"] for m in tg.live_messages(fox)), 5)
         card = next(i for i, m in tg.messages.items() if m["thread_id"] == fox and "Where store" in m["text"])
-        tg.push_callback(tg.button(card, "B. B")["callback_data"], card)
+        tg.push_callback(tg.button(card, "B")["callback_data"], card)
         await wait_until(lambda: "Выбрано: B" in tg.messages[card]["text"])
         tg.push_callback(tg.button(card, "Отправить")["callback_data"], card)
         await wait_until(lambda: "turn/start" in app.methods())

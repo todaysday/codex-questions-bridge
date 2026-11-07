@@ -16,7 +16,8 @@ from typing import Protocol
 
 from cqb.domain.enums import RunState
 from cqb.domain.status import (
-    Activity, AgentLine, Descendants, GoalSummary, RateLimits, StatusReport, ThreadSnapshot, UsageSnapshot,
+    AGENT_LINES, Activity, AgentLine, Descendants, GoalSummary, RateLimits, StatusReport, StatusSummary, ThreadSnapshot,
+    UsageSnapshot,
 )
 from cqb.security import redact
 from cqb.services.live_state import LiveState
@@ -24,7 +25,6 @@ from cqb.services.live_state import LiveState
 log = logging.getLogger(__name__)
 
 AGENT_FETCH_LIMIT = 300  # three daemon pages; more shows as `300+`
-AGENT_LINES = 8
 STALL_SECONDS = 600
 LIMITS_TTL = 30
 COLLECT_TIMEOUT = 15  # stats and 'now' lines; the summary has its own, much longer deadline
@@ -49,11 +49,11 @@ class StatusSource(Protocol):
 class StatusNarrator(Protocol):
     """A short summary from a separate Status Agent; None when it is unavailable or ran out of time."""
 
-    async def summarize(self, source_id: str, root_id: str, timeout: float) -> str | None: ...
+    async def summarize(self, source_id: str, root_id: str, timeout: float) -> StatusSummary | None: ...
 
 
 class NoNarrator:
-    async def summarize(self, source_id: str, root_id: str, timeout: float) -> str | None:
+    async def summarize(self, source_id: str, root_id: str, timeout: float) -> StatusSummary | None:
         return None
 
 
@@ -102,7 +102,7 @@ class StatusService:
         except TimeoutError:
             raise StatusUnavailable("timeout") from None
 
-    async def _summarize(self, root_id: str) -> str | None:
+    async def _summarize(self, root_id: str) -> StatusSummary | None:
         try:
             async with asyncio.timeout(self._summary_timeout + SUMMARY_GRACE):
                 text = await self._narrator.summarize(self._source_id, root_id, self._summary_timeout)

@@ -6,6 +6,7 @@ import logging
 
 
 from conftest import connected_client
+from cqb.codex.agent_reply import answered_questions, build_reply
 from cqb.codex.events import ThreadArchiveChanged, ThreadStatusChanged, agent_questions_from_item
 from cqb.dao import db
 from cqb.dao.agent_questions import AgentQuestionDao
@@ -62,7 +63,7 @@ def test_pending_question_from_items_keeps_titles_and_options_only(conn):
             await svc.scan_thread("r1")
             [q] = svc.open_questions("r1")
             assert (q.thread_id, q.root_thread_id, q.item_id, q.turn_id, q.state) == ("r1", "r1", "call_1", "t1", S.PENDING)
-            assert q.items[0].title == Q1[0]["title"] and q.items[0].options == ("Existing table", "Separate table")
+            assert q.title == Q1[0]["title"] and q.options == ("Existing table", "Separate table") and q.index == 0
             assert q.answerable and q.card_message_id is None and q.sent_at is None
             assert events == [("pending", q.agent_question_id)]
             dump = "\n".join(conn.iterdump())
@@ -257,7 +258,7 @@ def test_logs_have_ids_and_counts_but_never_text(conn, caplog):
             await svc.scan_thread("r1")
     run(main())
     log = caplog.text
-    assert "pending" in log and "answered" in log and "items=1" in log
+    assert "pending" in log and "answered" in log and "index=0" in log
     for secret in ("PRIVATE", "Where to store", "Existing table"):
         assert secret not in log
 
@@ -265,28 +266,32 @@ def test_logs_have_ids_and_counts_but_never_text(conn, caplog):
 def test_questions_over_the_limits_are_cut_and_not_answerable(conn):
     async def main():
         async with watcher(conn) as (svc, fake, dao, events):
-            long = [{"title": "T" * 5000, "options": ["o" * 900, *[f"{i}" for i in range(20)]]}]
+            long = [{"title": "T" * 25000, "options": ["o" * 9000, *[f"{i}" for i in range(30)]]}]
             put(fake, "r1", agent_message("c1", long))
             await svc.scan_thread("r1")
             [q] = svc.open_questions()
-            assert not q.answerable and len(q.items[0].title) == 1500 and len(q.items[0].options) == 10
-            assert len(q.items[0].options[0]) == 300
+            assert not q.answerable and len(q.title) == 20000 and len(q.options) == 26 and len(q.options[0]) == 8000
+            # a question within the bounds is stored whole, however long for one Telegram message
+            put(fake, "r1", other_item("x"), agent_message("c2", [{"title": "L" * 19000, "options": ["o" * 7900]}]))
+            await svc.scan_thread("r1")
+            whole = next(x for x in svc.open_questions() if x.item_id == "c2")
+            assert whole.answerable and len(whole.title) == 19000 and len(whole.options[0]) == 7900
     run(main())
 
 
 def test_item_parser_shapes():
     ok = agent_message("i", [{"title": "t", "options": None}])
-    assert agent_questions_from_item(ok) == ((agent_questions_from_item(ok)[0][0],), True)
-    assert agent_questions_from_item(ok)[0][0].options == ()
+    (item,) = agent_questions_from_item(ok)
+    assert (item.title, item.options, item.complete) == ("t", (), True)
     for bad in (
         agent_message("i", None), agent_message("i", []), other_item("i"), None, "x",
         agent_message("i", [{"title": 1, "options": []}]), agent_message("i", [{"title": "t", "options": [1]}]),
         agent_message("i", ["t"]), agent_message("i", [{"title": "t", "options": "ab"}]),
     ):
         assert agent_questions_from_item(bad) is None
-    many = agent_message("i", [{"title": str(n), "options": []} for n in range(11)])
-    items, answerable = agent_questions_from_item(many)
-    assert len(items) == 8 and not answerable
+    many = agent_message("i", [{"title": str(n), "options": []} for n in range(25)])
+    items = agent_questions_from_item(many)
+    assert len(items) == 20 and [i.title for i in items] == [str(n) for n in range(20)]  # positions are indexes
 
 
 def test_memory_stays_bounded(conn, monkeypatch):
@@ -330,13 +335,14 @@ def test_dao_unique_key_counts_postable_and_prune(conn):
             put(fake, "r1", agent_message("c1", Q1))
             await svc.scan_thread("r1")
             q = svc.open_questions()[0]
-            assert dao.insert_if_new(q) is False  # (source, thread, item) is the key
+            assert dao.insert_if_new(q) is False  # (source, thread, item, index) is the key
             assert dao.open_counts_by_root("s1") == {"r1": 1}
             assert dao.list_postable("s1") == []  # no open consultant topic
-            conn.execute("INSERT INTO consultants VALUES (1,'s1','r1',1,5,'cqb-x','open',1,1)")
+            conn.execute("INSERT INTO consultants VALUES (1,'s1','r1',1,5,'cqb-x','open',1,1,NULL)")
             assert [x.agent_question_id for x in dao.list_postable("s1")] == [q.agent_question_id]
-            dao.set_card_message(q.agent_question_id, 77)
+            dao.set_card_messages(q.agent_question_id, [77, 78, 79])
             assert dao.find_by_card_message(77).agent_question_id == q.agent_question_id and dao.list_postable("s1") == []
+            assert dao.find_by_card_message(79).card_extra_ids == (78, 79) and dao.find_by_card_message(7) is None
             dao.set_state(q.agent_question_id, S.ANSWERED, 10)
             assert dao.prune_closed("s1", 5) == 0 and dao.prune_closed("s1", 11) == 1
     run(main())
@@ -348,7 +354,110 @@ def test_migration_is_forward_only_and_adds_the_table():
     c.execute("INSERT INTO codex_sources VALUES ('s1','S1','app_server',1)")
     assert db.migrate(c) == len(db.MIGRATIONS) >= 4
     cols = {r[1] for r in c.execute("PRAGMA table_info(agent_questions)")}
-    assert {"agent_question_id", "source_id", "thread_id", "root_thread_id", "turn_id", "item_id", "items_json",
-            "state", "staged_json", "sent_at", "card_message_id", "created_at", "updated_at"} <= cols
+    assert {"agent_question_id", "source_id", "thread_id", "root_thread_id", "turn_id", "item_id", "item_index", "title",
+            "options_json", "state", "staged", "sent_at", "card_message_id", "card_extra_ids", "display_no",
+            "created_at", "updated_at"} <= cols
     assert c.execute("SELECT COUNT(*) FROM questions").fetchone()[0] == 0  # request_user_input table untouched
+    assert db.migrate(c) == len(db.MIGRATIONS)
+
+
+# --- one question per row: a message with several questions ------------------------------------------------
+
+def reply(item_id, *answers):
+    """The user message the Codex app (and the Bridge) writes for answered questions: (index, title, answer)."""
+    reply.n += 1
+    return user_message("".join(build_reply(item_id, i, t, a) for i, t, a in answers), item_id=f"um-reply-{reply.n}")
+
+
+reply.n = 0
+
+
+def test_a_message_with_several_questions_gives_one_pending_question_each(conn):
+    async def main():
+        async with watcher(conn) as (svc, fake, dao, events):
+            put(fake, "r1", agent_message("m1", Q3))
+            await svc.scan_thread("r1")
+            qs = sorted(svc.open_questions("r1"), key=lambda q: q.display_no)
+            assert [(q.index, q.title, q.display_no) for q in qs] == [(i, f"Question {i}", i + 1) for i in range(3)]
+            assert len({q.agent_question_id for q in qs}) == 3 and all(q.item_id == "m1" for q in qs)
+            assert [e[0] for e in events] == ["pending"] * 3 and svc.open_count() == 3
+            await svc.scan_thread("r1")  # a rescan finds the same three: nothing new, numbers stay
+            put(fake, "r1", other_item("x"))
+            await svc.scan_thread("r1")
+            assert len(events) == 3 and sorted(q.display_no for q in svc.open_questions("r1")) == [1, 2, 3]
+            put(fake, "r1", agent_message("m2", Q1))
+            await svc.scan_thread("r1")
+            assert max(q.display_no for q in svc.open_questions("r1")) == 4
+    run(main())
+
+
+def test_a_reply_naming_a_question_answers_exactly_that_one_and_the_walk_goes_on(conn):
+    async def main():
+        async with watcher(conn) as (svc, fake, dao, events):
+            put(fake, "r1", agent_message("m1", Q3))
+            await svc.scan_thread("r1")
+            by_index = {q.index: q for q in svc.open_questions("r1")}
+            put(fake, "r1", other_item("x"), reply("m1", (1, "Question 1", "B1")))
+            await svc.scan_thread("r1")
+            assert svc.get(by_index[1].agent_question_id).state is S.ANSWERED
+            assert svc.get(by_index[0].agent_question_id).state is S.PENDING and svc.get(by_index[2].agent_question_id).state is S.PENDING
+            put(fake, "r1", reply("m1", (0, "Question 0", "A0")))
+            await svc.scan_thread("r1")
+            assert [q.index for q in svc.open_questions("r1")] == [2]
+            assert [e for e in events if e[0] == "answered"] == [("answered", by_index[1].agent_question_id), ("answered", by_index[0].agent_question_id)]
+    run(main())
+
+
+def test_a_fresh_service_reads_replies_through_to_the_older_message_and_never_reopens_answered_ones(conn):
+    async def main():
+        async with watcher(conn) as (svc, fake, dao, events):
+            put(fake, "r1", agent_message("m1", Q3), reply("m1", (0, "Question 0", "A0")), other_item("x"),
+                reply("m1", (2, "Question 2", "A2")))
+            await svc.scan_thread("r1")  # first look: the walk meets the replies first, then the message
+            assert [q.index for q in svc.open_questions("r1")] == [1] and [e[0] for e in events] == ["pending"]
+    run(main())
+
+
+def test_a_plain_user_message_answers_every_question_before_it_but_not_the_ones_after(conn):
+    async def main():
+        async with watcher(conn) as (svc, fake, dao, events):
+            put(fake, "r1", agent_message("m1", Q3))
+            await svc.scan_thread("r1")
+            put(fake, "r1", user_message("just text, no question id"), agent_message("m2", Q3[:2]))
+            await svc.scan_thread("r1")
+            assert sorted((q.item_id, q.index) for q in svc.open_questions("r1")) == [("m2", 0), ("m2", 1)]
+            assert [e[0] for e in events].count("answered") == 3
+    run(main())
+
+
+def test_reply_parsing_names_questions_and_ignores_garbage():
+    text = build_reply("m1", 2, 'Title with "quotes"', "A\nB") + build_reply("m9", 0, "t", "x")
+    assert answered_questions(text) == {("m1", 2), ("m9", 0)}
+    assert answered_questions("plain") is None and answered_questions("") is None
+    assert answered_questions("<send_user_message_question_reply>\nnot json\n</send_user_message_question_reply>") is None
+    broken = '<send_user_message_question_reply>\n[{"questionItemId":"[\\"other_tag\\",\\"m\\",0]"}]\n</send_user_message_question_reply>'
+    assert answered_questions(broken) is None
+    assert build_reply("m1", 1, "T", "A") == (
+        '<send_user_message_question_reply>\n[{"question":"T","answer":"A","questionItemId":'
+        '"[\\"request_user_input_async\\",\\"m1\\",1]"}]\n</send_user_message_question_reply>')
+
+
+def test_migration_6_splits_the_table_into_one_row_per_question(tmp_path):
+    c = db.connect(str(tmp_path / "v5.db"))
+    c.executescript("BEGIN;\n" + "\n".join(db.MIGRATIONS[:5]) + "\nPRAGMA user_version = 5;\nCOMMIT;")
+    c.execute("INSERT INTO codex_sources VALUES ('s1','S1','app_server',1)")
+    row = ("INSERT INTO agent_questions(agent_question_id, source_id, thread_id, root_thread_id, turn_id, item_id, items_json, "
+           "answerable, state, staged_json, sent_at, card_message_id, display_no, created_at, updated_at) "
+           "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)")
+    one = '[{"title":"Где?","options":["А","Б"]}]'
+    two = '[{"title":"a","options":[]},{"title":"b","options":[]}]'
+    c.execute(row, ("a_one", "s1", "r1", "r1", "u", "m1", one, 1, "pending", '{"0":"Б"}', None, 77, 3, 1, 1))
+    c.execute(row, ("a_two", "s1", "r1", "r1", "u", "m2", two, 1, "pending", None, None, 78, 4, 1, 1))
+    assert db.migrate(c) == len(db.MIGRATIONS) >= 6
+    dao = AgentQuestionDao(c)
+    assert dao.get("a_two") is None  # a merged row is dropped: the next scan finds its questions again
+    q = dao.get("a_one")
+    assert (q.title, q.options, q.index, q.staged, q.card_message_id, q.display_no) == ("Где?", ("А", "Б"), 0, "Б", 77, 3)
+    assert dao.find_by_card_message(77).agent_question_id == "a_one"
+    assert {r[1] for r in c.execute("PRAGMA index_list(agent_questions)")} >= {"idx_agent_question_root", "idx_agent_question_card"}
     assert db.migrate(c) == len(db.MIGRATIONS)

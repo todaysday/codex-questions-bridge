@@ -17,7 +17,8 @@ answer buttons, and an optional read-only LLM consultant per thread.
 - 💬 **A consultant per thread.** You create it by hand. It is an LLM chat in its own topic that reads the thread's
   history through read-only tools and cannot change anything.
 - 📊 **`/status`.** A snapshot with deterministic numbers (state, model, context fill, cache, subagents, limits),
-  `сейчас:` ("now") lines, and a short summary from a separate Status Agent that never reaches the consultant.
+  a "now" phrase per thread, and a two-part summary (`В процессе` / `Дальше`) from a separate Status Agent that never
+  reaches the consultant. One HTML message, sent once when everything is ready.
 
 **Why it exists.** Codex sessions run for hours and stop on questions while you are away from the desktop. This
 bridge lets you answer them and check on progress from a phone, without taking over or owning the session.
@@ -83,12 +84,23 @@ A *question* is a card the Codex apps show as "Question / Answer question". Ther
 | Kind | What it is | How the Bridge finds it | How an answer goes back |
 | --- | --- | --- | --- |
 | Blocking `request_user_input` | A server request. The turn waits (`waitingOnUserInput`). | Live, as a subscriber of the shared daemon. | A JSON-RPC response to that request. Delivered when `serverRequest/resolved` arrives. |
-| Agent-message question | A final `agentMessage` item with `delivery: async` and a `questions` list. The turn does not wait. | By reading thread items (`thread/items/list`, no resume, no subscribe) on a status broadcast of a root thread and in a periodic sweep (`[questions] agent_scan_seconds`). | A **normal user message** in the thread, in the format the Codex app itself writes (`<send_user_message_question_reply>` with one JSON entry per question). Delivered when that user message shows up in the thread. |
+| Agent-message question | A final `agentMessage` item with `delivery: async` and a `questions` list. The turn does not wait. | By reading thread items (`thread/items/list`, no resume, no subscribe) on a status broadcast of a root thread and in a periodic sweep (`[questions] agent_scan_seconds`). | A **normal user message** in the thread, in the format the Codex app itself writes (`<send_user_message_question_reply>`, one message per answered question). Delivered when that user message shows up in the thread. |
 
-An agent-message question is pending while no user message follows it in the thread. With several questions in one message you pick one
-answer per question (buttons, or `✍️ Другое` by replying `N: text` to the card) and confirm once: one combined message is sent, with
+An agent-message question is pending while no user message follows it in the thread. A message with several questions gives one card per question, each with its own number (`Q3`, `Q4`), its own buttons and its own confirmation. You answer
+(a letter button, or `✍️ Ответить текстом` and then a reply to the card), confirm, and one user message with that one answer is sent, as the Codex app does, with
 `turn/steer` if the thread has a turn in progress and with `turn/start` otherwise, never with any model, sandbox or approval override.
 If you answered in the app first, the card says so and nothing is sent. Only root threads are scanned.
+
+### Discussing a question with the consultant
+
+When several cards pile up in a topic, tell the consultant which one you mean:
+
+- **Q-numbers.** Every question of a thread has a stable number, `Q3` (one per question, also for the questions of one agent message), in the card header and in `/questions`. A number is never reused. Write `Q3` (or `вопрос 3`) in a message and the consultant knows what you mean.
+- **Full text, no cut.** A card shows the whole question and the whole text of every option (`A.`, `B.` ...); buttons carry only the letters. A very long card continues in further messages (`↪ Q3 · 2/3`), with the buttons under the last one.
+- **Reply to the card.** A reply to a question card goes to the consultant, with the card (title and options) as context, even if the question is already answered. A secret question is never discussed: Bridge refuses and sends nothing.
+- **A reply is an answer only after `✍️ Ответить текстом`.** The button arms the card for 10 minutes (the card says `следующий ответ на это сообщение уйдёт в Codex`, `↩️ Отмена` disarms it). Then the next reply to that card is your answer, and the usual confirm step follows. Any other reply is a discussion.
+- **Focus.** Bridge remembers the question you pointed at last (reply, Q-number, button), or else the newest pending one, and puts one `[Context: ...]` line in front of every message to the consultant, so follow-ups need no repeated explanation. The consultant reads details with `get_questions` (both kinds, optional `number`) and never answers for you.
+- **Failures say why.** `Консультант временно недоступен (хук не отвечает)`: the reason (connection dropped, hook silent, health probe failing, model error) is appended; PicoClaw's own error text is shown as is.
 
 ### Design principles
 
@@ -182,8 +194,12 @@ The layout used on the reference server. The service never runs from a working t
 - `IOSchedulingClass=realtime` is left commented out on purpose: it can starve other services if the process ever loops.
 
 **Update procedure.** From a checkout: `git pull && sudo deploy/update.sh`. The script exports git `HEAD` with
-`git archive`, installs it into `/opt/cqb/.venv` and restarts `cqb.service`, so only committed code is deployed.
+`git archive`, installs it into `/opt/cqb/.venv`, refreshes the scope hook and the PicoClaw workspace `AGENT.md` files and
+restarts `cqb.service`, then the gateway (after waiting for the MCP port), so only committed code is deployed.
 Start order is `cqb.service` first, then `picoclaw-gateway.service`.
+
+**Auto-deploy.** A pull-based variant (a timer polling `origin/main` every minute, tests on the server, a health check,
+rollback) is described in [deploy/AUTODEPLOY.md](deploy/AUTODEPLOY.md).
 
 ```bash
 sudo systemctl status cqb.service            # state
@@ -291,10 +307,10 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 | --- | --- | --- |
 | Control topic | `/threads` | Re-render the registry message now (the command message is deleted if the bot may). |
 | Consultant topic | `/status` | One static snapshot message. A second request while one collects answers `статус уже собирается`. |
-| Consultant topic | `/questions` | Unanswered questions of this thread. Deterministic, no LLM. |
+| Consultant topic | `/questions` | Unanswered questions of this thread (both kinds, with `Q` numbers). Deterministic, no LLM. |
 | Consultant topic | `/thread` | Bound thread id, source, archive state, last activity. Deterministic, no LLM. |
 | Consultant topic | `/stop` | Cancels the running consultant turn (the one command passed to PicoClaw). |
-| Consultant topic | free text | Goes to the consultant. Nothing else is ever forwarded. |
+| Consultant topic | free text | Goes to the consultant, with a context line about pending questions. A reply to a question card is a discussion unless armed by `✍️ Ответить текстом`. |
 
 ### Registry markers
 
@@ -310,11 +326,34 @@ unarchiving reopens the same one.
 
 ### `/status` content
 
-Numbers: state, model and effort, context and cache, turn time, goal, subagent counts (up to 300 read; up to 8 lines named like the Codex app, working first, then `и ещё N`),
-rate limit. A `сейчас:` line for the root and each subagent says what it does right now (`выполняет: <command head>`,
+Numbers: state, model (short, `luna·high`) and effort, context and cache, turn time, goal, subagent counts (up to 300
+read; at most 6 one-line entries named like the Codex app, working first, then waiting, then recent, then `… и ещё N`),
+rate limit. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,
 `правит файлы (N)`, `думает`, `ждёт ответа`, ...), built without an LLM from the kind of the newest item. Command heads are
-redacted and cut at 80 characters, and message text and command output are never read. A short summary from the Status
-Agent follows. The message is sent once when all of it is ready (typing indicator meanwhile) and is never edited.
+redacted and cut at 80 characters, and message text and command output are never read. Two short parts from the Status
+Agent follow: `В процессе` (what the thread as a whole is doing, no per-agent breakdown) and `Дальше` (what remains, only when
+the recent reports say so). The message is Telegram HTML, sent once when all of it is ready (typing indicator meanwhile) and
+never edited; the only absolute time is the limit reset, in UTC. A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
+text Telegram cannot parse is resent as plain text. Example:
+
+```
+📊 FoxProfile
+🟢 работает · sol·low · ход 25м · 🕒 2м назад
+💭 выполняет: pytest -q
+🧠 ctx 160k/475k (34%) · 💾 кэш 80%
+🎯 Ship the profile page · 1.2M
+
+🤖 Субагенты 9 · 🟢 2 · 🟡 1 · ⚪ 6
+ 🟢 Oracle run lifecycle · luna·high · ctx 40% · думает
+ 🟡 Spec review · luna·high · ctx 12% · ждёт ответа
+ ↳ ⚪ Parser · luna·low · 12м назад
+ … и ещё 6
+
+📝 В процессе: Правит тесты статуса.
+➡️ Дальше: прогнать e2e
+
+📈 лимит 41% нед. · сброс 20.01 09:00 UTC
+```
 
 ### Configuration (`config.toml`)
 
@@ -353,7 +392,7 @@ cache and no mmap.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # about 540 tests, no network, fake daemon, fake Telegram, fake PicoClaw
+.venv/bin/python -m pytest -q          # about 650 tests, no network, fake daemon, fake Telegram, fake PicoClaw
 .venv/bin/python -m pytest -q -m e2e tests/e2e   # real PicoClaw binary, mock model, loopback only
 ```
 
@@ -391,7 +430,7 @@ token auth, session isolation, restart persistence, the fail-closed hook, slash 
 
 **Not verified yet**
 
-- Agent-message questions: the real Telegram flow and a live pending question (the format and both send paths were proven on throwaway threads only). The app writes one answer message per question; one combined message is the Bridge's choice. Whether the app accepts free text for these questions is not known.
+- Agent-message questions: the real Telegram flow and a live pending question (the format and both send paths were proven on throwaway threads only). Like the app, the Bridge writes one answer message per question. Whether the app accepts free text for these questions is not known.
 - Simultaneous answers from two clients, Desktop or mobile as co-subscribers, and a Bridge reconnect in the middle of a question.
 - Questions appear in `plan` collaboration mode. In default mode the tool is behind `default_mode_request_user_input`, which was off in Codex 0.164.
 - The Status Agent (routed slots) has been run end to end only with a mock model, not with a real one.

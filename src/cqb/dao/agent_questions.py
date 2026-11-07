@@ -1,8 +1,11 @@
 import json
 import sqlite3
 
+from cqb.dao.cards import CARD_MATCH, extra_ids_from_text, extra_ids_to_text
+from cqb.dao.db import transaction
+from cqb.dao.numbering import next_number
 from cqb.domain.enums import AgentQuestionState
-from cqb.domain.models import AgentQuestion, AgentQuestionItem
+from cqb.domain.models import AgentQuestion
 
 _PENDING = AgentQuestionState.PENDING.value
 
@@ -12,17 +15,38 @@ class AgentQuestionDao:
         self._conn = conn
 
     def insert_if_new(self, q: AgentQuestion) -> bool:
-        cur = self._conn.execute(
+        """Stores a new question and gives it the next `Q` number of its root; False for a replay."""
+        with transaction(self._conn):
+            cur = self._insert(q)
+            if cur.rowcount > 0:
+                self._conn.execute(
+                    "UPDATE agent_questions SET display_no=? WHERE agent_question_id=?",
+                    (next_number(self._conn, q.source_id, q.root_thread_id), q.agent_question_id),
+                )
+        return cur.rowcount > 0
+
+    def _insert(self, q: AgentQuestion) -> sqlite3.Cursor:
+        return self._conn.execute(
             "INSERT INTO agent_questions(agent_question_id, source_id, thread_id, root_thread_id, turn_id, "
-            "item_id, items_json, answerable, state, staged_json, sent_at, created_at, updated_at) "
-            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
+            "item_id, item_index, title, options_json, answerable, state, staged, sent_at, created_at, updated_at) "
+            "VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?,?) ON CONFLICT DO NOTHING",
             (
-                q.agent_question_id, q.source_id, q.thread_id, q.root_thread_id, q.turn_id, q.item_id,
-                json.dumps([{"title": i.title, "options": list(i.options)} for i in q.items], ensure_ascii=False),
-                int(q.answerable), q.state.value, None, None, q.created_at, q.updated_at,
+                q.agent_question_id, q.source_id, q.thread_id, q.root_thread_id, q.turn_id, q.item_id, q.index,
+                q.title, json.dumps(list(q.options), ensure_ascii=False), int(q.answerable), q.state.value,
+                None, None, q.created_at, q.updated_at,
             ),
         )
-        return cur.rowcount > 0
+
+    def list_for_root(
+        self, source_id: str, root_thread_id: str, limit: int, number: int | None = None
+    ) -> list[AgentQuestion]:
+        """Open and closed questions of a root, newest number first; optionally only one number."""
+        sql = "SELECT * FROM agent_questions WHERE source_id=? AND root_thread_id=?"
+        args: list[object] = [source_id, root_thread_id]
+        if number is not None:
+            sql += " AND display_no=?"
+            args.append(number)
+        return [_to_question(r) for r in self._conn.execute(sql + " ORDER BY display_no DESC LIMIT ?", (*args, limit))]
 
     def get(self, agent_question_id: str) -> AgentQuestion | None:
         row = self._conn.execute(
@@ -32,7 +56,7 @@ class AgentQuestionDao:
 
     def find_by_card_message(self, message_id: int) -> AgentQuestion | None:
         row = self._conn.execute(
-            "SELECT * FROM agent_questions WHERE card_message_id=?", (message_id,)
+            f"SELECT * FROM agent_questions WHERE {CARD_MATCH}", (message_id, message_id)
         ).fetchone()
         return _to_question(row) if row else None
 
@@ -42,13 +66,13 @@ class AgentQuestionDao:
         if root_thread_id is not None:
             sql += " AND root_thread_id=?"
             args.append(root_thread_id)
-        sql += " ORDER BY created_at DESC LIMIT ?"
+        sql += " ORDER BY created_at DESC, display_no DESC LIMIT ?"
         args.append(limit)
         return [_to_question(r) for r in self._conn.execute(sql, args)]
 
     def list_open_for_thread(self, source_id: str, thread_id: str) -> list[AgentQuestion]:
         rows = self._conn.execute(
-            "SELECT * FROM agent_questions WHERE source_id=? AND thread_id=? AND state=?",
+            "SELECT * FROM agent_questions WHERE source_id=? AND thread_id=? AND state=? ORDER BY display_no",
             (source_id, thread_id, _PENDING),
         )
         return [_to_question(r) for r in rows]
@@ -66,7 +90,8 @@ class AgentQuestionDao:
         rows = self._conn.execute(
             "SELECT q.* FROM agent_questions q JOIN consultants c ON c.source_id=q.source_id "
             "AND c.root_thread_id=q.root_thread_id AND c.state='open' AND c.tg_topic_id IS NOT NULL "
-            "WHERE q.source_id=? AND q.card_message_id IS NULL AND q.state=? ORDER BY q.created_at LIMIT ?",
+            "WHERE q.source_id=? AND q.card_message_id IS NULL AND q.state=? "
+            "ORDER BY q.created_at, q.display_no LIMIT ?",
             (source_id, _PENDING, limit),
         )
         return [_to_question(r) for r in rows]
@@ -95,10 +120,10 @@ class AgentQuestionDao:
             (state.value, now, agent_question_id),
         )
 
-    def set_staged(self, agent_question_id: str, staged: dict[int, str] | None, now: int) -> None:
+    def set_staged(self, agent_question_id: str, staged: str | None, now: int) -> None:
         self._conn.execute(
-            "UPDATE agent_questions SET staged_json=?, updated_at=? WHERE agent_question_id=?",
-            (json.dumps(staged, ensure_ascii=False) if staged else None, now, agent_question_id),
+            "UPDATE agent_questions SET staged=?, updated_at=? WHERE agent_question_id=?",
+            (staged, now, agent_question_id),
         )
 
     def mark_sent(self, agent_question_id: str, now: int) -> None:
@@ -107,9 +132,11 @@ class AgentQuestionDao:
             (now, now, agent_question_id),
         )
 
-    def set_card_message(self, agent_question_id: str, message_id: int | None) -> None:
+    def set_card_messages(self, agent_question_id: str, ids: list[int]) -> None:
+        """The card's message ids in order; none clears the card."""
         self._conn.execute(
-            "UPDATE agent_questions SET card_message_id=? WHERE agent_question_id=?", (message_id, agent_question_id)
+            "UPDATE agent_questions SET card_message_id=?, card_extra_ids=? WHERE agent_question_id=?",
+            (ids[0] if ids else None, extra_ids_to_text(ids[1:]), agent_question_id),
         )
 
     def prune_closed(self, source_id: str, before: int) -> int:
@@ -120,7 +147,6 @@ class AgentQuestionDao:
 
 
 def _to_question(r: sqlite3.Row) -> AgentQuestion:
-    staged = json.loads(r["staged_json"]) if r["staged_json"] else {}
     return AgentQuestion(
         agent_question_id=r["agent_question_id"],
         source_id=r["source_id"],
@@ -128,12 +154,16 @@ def _to_question(r: sqlite3.Row) -> AgentQuestion:
         root_thread_id=r["root_thread_id"],
         turn_id=r["turn_id"],
         item_id=r["item_id"],
-        items=tuple(AgentQuestionItem(i["title"], tuple(i["options"])) for i in json.loads(r["items_json"])),
+        index=r["item_index"],
+        title=r["title"],
+        options=tuple(json.loads(r["options_json"])),
         answerable=bool(r["answerable"]),
         state=AgentQuestionState(r["state"]),
-        staged={int(k): v for k, v in staged.items()},
+        staged=r["staged"],
         sent_at=r["sent_at"],
         created_at=r["created_at"],
         updated_at=r["updated_at"],
         card_message_id=r["card_message_id"],
+        display_no=r["display_no"],
+        card_extra_ids=extra_ids_from_text(r["card_extra_ids"]),
     )

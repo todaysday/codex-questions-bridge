@@ -71,6 +71,20 @@ def test_status_prompt_and_agent_file_state_the_security_rules():
         assert tool in STATUS_PROMPT
 
 
+def test_status_agent_file_asks_for_the_same_two_short_parts_as_the_prompt():
+    from cqb.pico.status_narrator import LABEL, STATUS_PROMPT
+    text = (DEPLOY / "ws-status" / "AGENT.md").read_text()
+    front = text.split("---\n")[1]
+    assert "name: Codex Status" in front and "description:" in front and ": " not in front.split("description: ")[1].split("\n")[0]
+    for source in (text, STATUS_PROMPT):
+        for needle in ("В процессе:", "Дальше:", "350", "EXACTLY two", "single dash"):
+            assert needle in source, needle
+        assert "per agent" in source and "agent names" in source and "working or idle" in source
+        assert "at most 10" not in source and "each running subagent" not in source
+    assert all(LABEL.match(f"{label}: x") for label in ("В процессе", "Дальше"))
+    assert "last reports" in text and "get_recent_events" in text and "thread_id" in text
+
+
 def test_template_pico_channel_is_loopback_token_less_and_origin_locked():
     assert CONFIG["gateway"]["host"] == "127.0.0.1" and CONFIG["gateway"]["hot_reload"] is False
     pico = CONFIG["channel_list"]["pico"]
@@ -99,7 +113,7 @@ def test_template_disables_default_tools_and_sizes_the_context():
         assert tools[name] == {"enabled": False}, name
     d = CONFIG["agents"]["defaults"]
     assert (d["context_window"], d["summarize_token_percent"]) == (1_000_000, 80) and d["summarize_message_threshold"] >= 100_000
-    assert d["max_tool_iterations"] == 8 and d["tool_feedback"] == {"enabled": False}
+    assert d["max_tool_iterations"] == 500 and d["tool_feedback"] == {"enabled": False}
     ids = [a["id"] for a in CONFIG["agents"]["list"]]
     assert ids == ["main", "codex-status"] and CONFIG["agents"]["list"][0]["default"] is True
 
@@ -108,6 +122,16 @@ def test_consultant_prompt_states_the_security_rules():
     text = (DEPLOY / "ws-main" / "AGENT.md").read_text().lower()
     for phrase in ("read-only", "untrusted", "russian", "never reveal", "session keys", "cannot run commands"):
         assert phrase in text, phrase
+
+
+def test_consultant_prompt_explains_the_context_line_and_the_focus_question():
+    text = (DEPLOY / "ws-main" / "AGENT.md").read_text()
+    for phrase in ("[Context: ...]", "`focus`", "`assumed`", "WITHOUT asking again", "get_questions FIRST",
+                   "never claim an answer was sent", "не подтверждено", "Q1, Q2"):
+        assert phrase in text, phrase
+    assert "list them in one line each and ask" not in text  # the user is never asked "which question?" every time
+    assert re.search(r"^description: [^:]*$", text, re.M)  # no colon inside the description (YAML)
+    assert len([ln for ln in text.splitlines() if re.match(r"^(\d+)\. ", ln)]) == 10  # rules 1..10 in order
 
 
 def test_secrets_example_has_only_placeholders():

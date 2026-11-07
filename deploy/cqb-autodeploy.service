@@ -1,0 +1,13 @@
+# Pull-based auto-deploy, started by cqb-autodeploy.timer. Install with deploy/install-autodeploy.sh.
+[Unit]
+Description=Codex Questions Bridge auto-deploy (fetch main, test, deploy, health-check, roll back)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+# a root-owned copy installed by install-autodeploy.sh; a failed run leaves this unit in the failed state
+ExecStart=/opt/cqb/bin/autodeploy.sh
+Nice=10
+IOSchedulingClass=idle
+TimeoutStartSec=15min

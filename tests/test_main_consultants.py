@@ -115,7 +115,7 @@ def test_status_snapshot_gets_its_summary_from_a_slot_session_and_never_touches_
                 async with http.get(f"http://127.0.0.1:{port}/internal/scope/{sid}", headers=auth) as r:
                     seen[sid] = (r.status, await r.json() if r.status == 200 else None)
             await asyncio.sleep(0.3)  # the agent "works": the card must not be posted yet
-            return [create("Корень правит тесты.\nСубагент Ада читает логи.", "m1")]
+            return [create("В процессе: Корень правит тесты.\nДальше: прогнать e2e", "m1")]
 
         app, tg, pico = FakeAppServer(), FakeTelegram(), FakePico(agent)
         for srv in (app, tg, pico):
@@ -131,11 +131,11 @@ def test_status_snapshot_gets_its_summary_from_a_slot_session_and_never_touches_
             topic = await create_consultant(tg, "FoxProfile")
             tg.push_message("/status", topic)
             await asyncio.sleep(0.15)
-            assert not any("Статус" in m["text"] for m in tg.live_messages(topic))  # nothing yet, no placeholder
+            assert not any("📊" in m["text"] for m in tg.live_messages(topic))  # nothing yet, no placeholder
             await wait_until(lambda: any(p.get("message_thread_id") == topic for p in tg.methods("sendChatAction")))
-            await wait_until(lambda: any("📊 Статус" in m["text"] for m in tg.live_messages(topic)), 5)
-            card = next(m["text"] for m in tg.live_messages(topic) if "📊 Статус" in m["text"])
-            assert "Резюме:\nКорень правит тесты.\nСубагент Ада читает логи." in card and "резюме недоступно" not in card
+            await wait_until(lambda: any("📊" in m["text"] for m in tg.live_messages(topic)), 5)
+            card = next(m["text"] for m in tg.live_messages(topic) if "📊" in m["text"])
+            assert "📝 <b>В процессе:</b> Корень правит тесты.\n➡️ <b>Дальше:</b> прогнать e2e" in card and "резюме недоступно" not in card
             assert list(pico.sockets) == ["cqb-status-1"] and pico.texts("cqb-status-1")[0].startswith("Status request")
             assert seen == {"cqb-status-1": (200, {"source_id": "local", "root_id": "t1"})}  # bound during the call
             async with aiohttp.ClientSession() as http:  # and unbound afterwards

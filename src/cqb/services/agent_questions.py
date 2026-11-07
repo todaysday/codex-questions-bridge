@@ -11,15 +11,18 @@ Findings (schema v2 ThreadItem -> agentMessage, checked on the real daemon, read
 * The app's answer text (what the Bridge must reproduce, see codex/agent_reply.py) is
   `<send_user_message_question_reply>\\n[{"question": <title>, "answer": <option or free text>,
   "questionItemId": "[\\"request_user_input_async\\",\\"<agentMessage item id>\\",<index>]"}]\\n</...>`.
-  The app sends one entry per answered question (sometimes entries of several questions in one message);
-  the Bridge sends one message with one entry per question after one confirmation.
+  The app sends one message per answered question. The Bridge does the same: every question of a message is its
+  own row (item id + index), has its own card and Q number, and is staged, confirmed and sent on its own.
+  A reply message names its question in questionItemId, which marks exactly that question answered; a user
+  message that names none answers every question before it.
 * Only roots were seen with such items: 0 of 1581 items in 40 subagent threads, so only roots are scanned.
 * thread/items/list (descending, no turnId) walks the whole thread newest-first and works on notLoaded and
   archived threads without resume or subscribe; a limit-1 call costs about 5 ms.
 
 Detection reads items only: a limit-1 probe tells whether the newest item changed since the last look, and
-only then pages of 40 are walked newest-first, stopping at the first userMessage (everything older is
-answered), at the item seen last time, or after 5 pages. Triggers: a status broadcast of a root (debounced)
+only then pages of 40 are walked newest-first, stopping at the first userMessage that names no question
+(everything older is answered), at the item seen last time, or after 5 pages. A reply message that names
+questions answers those and the walk goes on. Triggers: a status broadcast of a root (debounced)
 and a periodic sweep over roots that are working, recently updated or hold a pending question (at most
 25 per sweep, the least recently read first). Kept in memory per thread: one item id and one time.
 Message text is never stored or logged: only titles and options (cut) of pending questions.
@@ -35,7 +38,7 @@ from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from typing import Any
 
-from cqb.codex.agent_reply import build_reply
+from cqb.codex.agent_reply import answered_questions, build_reply
 from cqb.codex.appserver import AppServerClient, NotConnected, RpcError
 from cqb.codex.events import Event, ThreadArchiveChanged, ThreadStatusChanged, agent_questions_from_item
 from cqb.dao.agent_questions import AgentQuestionDao
@@ -48,7 +51,7 @@ log = logging.getLogger(__name__)
 
 PAGE_SIZE = 40
 MAX_PAGES = 5
-MAX_PER_THREAD = 3  # pending questions kept per scan of one thread
+MAX_PER_THREAD = 3  # agent messages with pending questions kept per scan of one thread
 SWEEP_MAX_THREADS = 25
 RECENT_SECONDS = 600
 DEBOUNCE_SECONDS = 1.0
@@ -62,10 +65,19 @@ Hook = Callable[[AgentQuestion], Awaitable[None]]
 
 @dataclass(frozen=True, slots=True)
 class _Found:
+    """One agentMessage with questions seen in the walk (the questions that are not known to be answered)."""
+
     item_id: str
     turn_id: str
-    items: tuple[AgentQuestionItem, ...]
-    answerable: bool
+    questions: tuple[tuple[int, AgentQuestionItem], ...]  # (index in the message, question)
+
+
+@dataclass(frozen=True, slots=True)
+class _Walk:
+    found: list[_Found]  # newest first
+    answered: set[tuple[str, int]]  # (item id, index) named by reply messages
+    sweep: bool  # a user message naming no question was met: every older question is answered
+    newest: str | None
 
 
 class AgentQuestionService:
@@ -114,8 +126,8 @@ class AgentQuestionService:
     def postable_without_card(self, limit: int = 50) -> list[AgentQuestion]:
         return self._questions.list_postable(self._source, limit)
 
-    def bind_card_message(self, agent_question_id: str, message_id: int | None) -> None:
-        self._questions.set_card_message(agent_question_id, message_id)
+    def bind_card_messages(self, agent_question_id: str, ids: list[int]) -> None:
+        self._questions.set_card_messages(agent_question_id, ids)
 
     def by_card_message(self, message_id: int) -> AgentQuestion | None:
         return self._questions.find_by_card_message(message_id)
@@ -191,7 +203,7 @@ class AgentQuestionService:
                 if first == known:
                     self._remember(thread_id, known)
                     return
-            found, answered, newest = await self._walk(thread_id, known)
+            walk = await self._walk(thread_id, known)
         except NotConnected:
             return
         except RpcError:
@@ -200,21 +212,24 @@ class AgentQuestionService:
         except Exception as exc:  # timeout and the like: the next trigger reads again
             log.debug("agent question read failed: %s", type(exc).__name__)
             return
-        if newest is not None:
-            self._remember(thread_id, newest)
+        if walk.newest is not None:
+            self._remember(thread_id, walk.newest)
         thread = self._threads.get(self._source, thread_id)
         root = thread.root_thread_id if thread else thread_id
-        for f in reversed(found):  # oldest first, so cards come out in the thread's order
-            await self._add(thread_id, root, f)
-        if answered:
-            keep = {f.item_id for f in found}
+        for f in reversed(walk.found):  # oldest message first, so cards come out in the thread's order
+            for index, item in f.questions:
+                await self._add(thread_id, root, f, index, item)
+        if walk.answered or walk.sweep:
+            still = {(f.item_id, i) for f in walk.found for i, _ in f.questions}
             for q in self._questions.list_open_for_thread(self._source, thread_id):
-                if q.item_id not in keep:
+                key = (q.item_id, q.index)
+                if key in walk.answered or (walk.sweep and key not in still):
                     await self._close(q, AgentQuestionState.ANSWERED)
 
-    async def _walk(self, thread_id: str, known: str | None) -> tuple[list[_Found], bool, str | None]:
-        """Newest-first until a userMessage (answered), the item seen last time, or the page cap."""
+    async def _walk(self, thread_id: str, known: str | None) -> _Walk:
+        """Newest-first until a user message that names no question, the item seen last time, or the page cap."""
         found: list[_Found] = []
+        answered: set[tuple[str, int]] = set()
         newest: str | None = None
         cursor: str | None = None
         for _ in range(MAX_PAGES):
@@ -227,16 +242,22 @@ class AgentQuestionService:
                     continue
                 newest = newest or item_id
                 if item_id == known:
-                    return found, False, newest
+                    return _Walk(found, answered, False, newest)
                 if item.get("type") == "userMessage":
-                    return found, True, newest
+                    named = answered_questions(_user_text(item))
+                    if named is None:
+                        return _Walk(found, answered, True, newest)
+                    answered |= named
+                    continue
                 parsed = agent_questions_from_item(item)
                 if parsed is not None and len(found) < MAX_PER_THREAD:
-                    found.append(_Found(item_id, str(entry.get("turnId") or ""), parsed[0], parsed[1]))
+                    open_ones = tuple((i, q) for i, q in enumerate(parsed) if (item_id, i) not in answered)
+                    if open_ones:
+                        found.append(_Found(item_id, str(entry.get("turnId") or ""), open_ones))
             cursor = page.get("nextCursor")
             if not cursor or not entries:
                 break
-        return found, False, newest
+        return _Walk(found, answered, False, newest)
 
     async def _items(self, thread_id: str, limit: int, cursor: str | None) -> dict[str, Any]:
         params: dict[str, Any] = {"threadId": thread_id, "limit": limit, "sortDirection": "desc"}
@@ -263,19 +284,19 @@ class AgentQuestionService:
         while len(self._seen) > MAX_TRACKED:
             self._seen.popitem(last=False)
 
-    async def _add(self, thread_id: str, root: str, f: _Found) -> None:
+    async def _add(self, thread_id: str, root: str, f: _Found, index: int, item: AgentQuestionItem) -> None:
         now = self._now()
-        key = "\0".join((self._source, thread_id, f.item_id))
+        key = "\0".join((self._source, thread_id, f.item_id, str(index)))
         fresh = AgentQuestion(
             agent_question_id="a_" + hashlib.sha1(key.encode()).hexdigest()[:12],
             source_id=self._source, thread_id=thread_id, root_thread_id=root, turn_id=f.turn_id,
-            item_id=f.item_id, items=f.items, answerable=f.answerable, state=AgentQuestionState.PENDING,
-            staged={}, sent_at=None, created_at=now, updated_at=now,
+            item_id=f.item_id, index=index, title=item.title, options=item.options, answerable=item.complete,
+            state=AgentQuestionState.PENDING, staged=None, sent_at=None, created_at=now, updated_at=now,
         )
         if self._questions.insert_if_new(fresh):
-            log.info("agent question %s pending thread=%s root=%s items=%d",
-                     fresh.agent_question_id, thread_id, root, len(f.items))
-            await self._fire(self._question_hooks, fresh)
+            log.info("agent question %s pending thread=%s root=%s index=%d",
+                     fresh.agent_question_id, thread_id, root, index)
+            await self._fire(self._question_hooks, self._questions.get(fresh.agent_question_id) or fresh)
 
     async def _close(self, q: AgentQuestion, state: AgentQuestionState) -> None:
         self._questions.set_state(q.agent_question_id, state, self._now())
@@ -291,38 +312,34 @@ class AgentQuestionService:
 
     # --- answering -----------------------------------------------------------------------
 
-    def choose(self, agent_question_id: str, question_index: int, option_index: int) -> AgentQuestion:
+    def choose(self, agent_question_id: str, option_index: int) -> AgentQuestion:
         q = self._editable(agent_question_id)
-        if not 0 <= question_index < len(q.items):
-            raise QuestionError("Нет такого вопроса")
-        options = q.items[question_index].options
-        if not 0 <= option_index < len(options):
+        if not 0 <= option_index < len(q.options):
             raise QuestionError("Нет такого варианта")
-        return self._stage(q, question_index, options[option_index])
+        return self._stage(q, q.options[option_index])
 
-    def answer_text(self, agent_question_id: str, question_index: int, text: str) -> AgentQuestion:
+    def answer_text(self, agent_question_id: str, text: str) -> AgentQuestion:
         q = self._editable(agent_question_id)
-        if not 0 <= question_index < len(q.items):
-            raise QuestionError("Нет такого вопроса")
         text = text.strip()
         if not text or len(text) > ANSWER_MAX_CHARS:
             raise QuestionError(f"Ответ: от 1 до {ANSWER_MAX_CHARS} символов")
-        return self._stage(q, question_index, text)
+        return self._stage(q, text)
 
     def unstage(self, agent_question_id: str) -> AgentQuestion:
         q = self._editable(agent_question_id)
         self._questions.set_staged(agent_question_id, None, self._now())
-        return replace(q, staged={})
+        return replace(q, staged=None)
 
     async def send(self, agent_question_id: str) -> None:
-        """One message with every answer. A fresh read first: if the thread already moved on, nothing is sent."""
+        """One message with this question's answer. A fresh read first: if the thread already moved on, nothing is sent."""
         q = self._editable(agent_question_id)
-        if len(q.staged) != len(q.items):
-            raise QuestionError("Ответьте на все вопросы")
+        if q.staged is None:
+            raise QuestionError("Сначала выберите ответ")
         await self.scan_thread(q.thread_id)
         q = self._editable(agent_question_id)  # raises when the scan found it answered elsewhere
+        assert q.staged is not None
         try:
-            await self._client.send_user_message(q.thread_id, build_reply(q.item_id, q.items, q.staged))
+            await self._client.send_user_message(q.thread_id, build_reply(q.item_id, q.index, q.title, q.staged))
         except TimeoutError:
             raise QuestionError("Codex не ответил: проверьте тред, прежде чем повторять") from None
         except (NotConnected, RpcError, ValueError):
@@ -344,10 +361,9 @@ class AgentQuestionService:
             raise QuestionError("Ответ уже отправлен; ждём подтверждения")
         return q
 
-    def _stage(self, q: AgentQuestion, index: int, answer: str) -> AgentQuestion:
-        staged = {**q.staged, index: answer}
-        self._questions.set_staged(q.agent_question_id, staged, self._now())
-        return replace(q, staged=staged)
+    def _stage(self, q: AgentQuestion, answer: str) -> AgentQuestion:
+        self._questions.set_staged(q.agent_question_id, answer, self._now())
+        return replace(q, staged=answer)
 
     def _now(self) -> int:
         return int(self._clock())
@@ -357,3 +373,11 @@ def _item_id(entry: Any) -> str | None:
     item = entry.get("item") if isinstance(entry, dict) else None
     item_id = item.get("id") if isinstance(item, dict) else None
     return item_id if isinstance(item_id, str) and item_id else None
+
+
+def _user_text(item: dict[str, Any]) -> str:
+    """The text parts of a userMessage item (nothing else is read)."""
+    parts = item.get("content")
+    if not isinstance(parts, list):
+        return ""
+    return "\n".join(p["text"] for p in parts if isinstance(p, dict) and isinstance(p.get("text"), str))

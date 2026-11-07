@@ -6,10 +6,12 @@ import aiohttp
 import pytest
 
 from cqb.codex.history import HistoryUnavailable
+from cqb.dao.agent_questions import AgentQuestionDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import ThreadDao
-from cqb.domain.enums import ConsultantState, RunState
+from cqb.domain.enums import AgentQuestionState, ConsultantState, QuestionLifecycle, RunState
+from cqb.domain.models import AgentQuestion
 from cqb.mcp.server import PROTOCOLS, McpServer
 from cqb.mcp.tools import build_tools
 from cqb.services.context import MAX_AGENTS, ContextService
@@ -67,7 +69,9 @@ class World:
         self.history.items["c1"] = [entry("t2", "w1", text="child note")]
         self.history.items["g1"] = [entry("t3", "z1", text="grandchild note")]
         self.history.items["r2"] = [entry("t4", "x1", text="OTHER-ROOT-SECRET")]
-        self.ctx = ContextService(self.consultants, self.threads, self.questions, self.source, self.history, "s1")
+        self.agent_questions = AgentQuestionDao(conn)
+        self.ctx = ContextService(self.consultants, self.threads, self.questions, self.source, self.history, "s1",
+                                  self.agent_questions)
         self.tools = build_tools(self.ctx)
 
 
@@ -374,9 +378,78 @@ def test_questions_never_return_secret_text(conn):
             assert not err
             by_id = {q["question_id"]: q for q in body["questions"]}
             assert set(by_id) == {"pub", "sec"}  # only this root's questions
-            assert by_id["pub"]["items"][0]["text"] == "Pick?" and by_id["pub"]["thread_id"] == "c1"
+            assert by_id["pub"]["items"][0]["title"] == "H: Pick?" and by_id["pub"]["thread_id"] == "c1"
+            assert by_id["pub"]["items"][0]["options"] == ["A — da", "B"] and by_id["pub"]["kind"] == "request_user_input"
             assert by_id["sec"]["is_secret"] is True and by_id["sec"]["items"] == []
             assert "Pick?" not in json.dumps(by_id["sec"])
+    arun(main())
+
+
+def agent_question(aqid, root="r1", title="Which table?", options=("Existing", "Separate"), state=AgentQuestionState.PENDING, index=0):
+    return AgentQuestion(
+        agent_question_id=aqid, source_id="s1", thread_id=root, root_thread_id=root, turn_id="u1", item_id=aqid,
+        index=index, title=title, options=tuple(options), answerable=True, state=state, staged=None,
+        sent_at=None, created_at=1, updated_at=1,
+    )
+
+
+def test_get_questions_returns_both_kinds_with_numbers_states_and_the_number_filter(conn):
+    async def main():
+        async with server(conn) as w:
+            w.questions.insert_if_new(question("old", root_thread_id="r1", origin_thread_id="r1"))  # Q1
+            w.agent_questions.insert_if_new(agent_question("a_two"))  # Q2
+            for n, (title, options) in enumerate((("First?", ("Yes", "No")), ("Second?", ()), ("Third?", ("Red",)))):
+                w.agent_questions.insert_if_new(agent_question(f"a_m{n}", title=title, options=options, index=n))  # Q3..Q5
+            w.questions.insert_if_new(question("sec", root_thread_id="r1", origin_thread_id="r1", is_secret=True))  # Q6
+            w.agent_questions.insert_if_new(agent_question("a_other", root="r2"))  # r2's Q1, never visible from r1
+            w.questions.set_lifecycle("old", QuestionLifecycle.RESOLVED_OBSERVED, 5)
+            w.agent_questions.set_state("a_two", AgentQuestionState.STALE, 5)
+            body, err = await call(w, "get_questions", root_id="r1")
+            assert not err
+            rows = {q["question_id"]: q for q in body["questions"]}
+            assert set(rows) == {"old", "a_two", "a_m0", "a_m1", "a_m2", "sec"} and body["truncated"] is False
+            assert [q["number"] for q in body["questions"]] == ["Q3", "Q4", "Q5", "Q6", "Q2", "Q1"]  # pending first, then newest closed
+            assert (rows["old"]["kind"], rows["old"]["state"]) == ("request_user_input", "answered")
+            assert (rows["a_two"]["kind"], rows["a_two"]["state"]) == ("agent_message", "stale")
+            assert rows["a_m0"]["state"] == "pending" and rows["a_m0"]["is_secret"] is False
+            assert [(i["title"], i["options"]) for q in ("a_m0", "a_m1", "a_m2") for i in rows[q]["items"]] == [
+                ("First?", ["Yes", "No"]), ("Second?", []), ("Third?", ["Red"])]  # one question per number
+            assert rows["a_two"]["items"][0]["options"] == ["Existing", "Separate"] and "label" not in rows["a_two"]["items"][0]
+            assert rows["sec"]["is_secret"] is True and rows["sec"]["items"] == [] and "Pick?" not in json.dumps(rows["sec"])
+
+            for wanted in ("Q4", "q4", "4", 4, "Q4.1"):
+                body, err = await call(w, "get_questions", root_id="r1", number=wanted)
+                assert not err and [q["question_id"] for q in body["questions"]] == ["a_m1"], wanted
+            body, _ = await call(w, "get_questions", root_id="r1", number="Q9")
+            assert body["questions"] == []
+            for bad in ("Q", "abc", 0, -1, True, 2.5):
+                body, err = await call(w, "get_questions", root_id="r1", number=bad)
+                assert err and body["error"] == "invalid_arguments", bad
+            assert (await call(w, "get_thread_overview", root_id="r1"))[0]["pending_questions"] == 4  # three agent + the secret
+            listing = (await rpc(w, "tools/list"))[1]["result"]["tools"]
+            schema = next(t for t in listing if t["name"] == "get_questions")["inputSchema"]["properties"]
+            assert "number" in schema
+    arun(main())
+
+
+def test_get_questions_bounds_the_overview_gives_detail_by_number_and_redacts(conn):
+    async def main():
+        async with server(conn) as w:
+            long_options = tuple(f"option {i} " + "word " * 80 for i in range(15))
+            w.agent_questions.insert_if_new(agent_question("a_big", title="long title " * 100, options=long_options))  # Q1
+            w.agent_questions.insert_if_new(agent_question(
+                "a_leak", title="use token=abcd1234secretvalue here", options=("Bearer abcdefgh12345678",)))  # Q2
+            body, err = await call(w, "get_questions", root_id="r1")
+            assert not err
+            big = next(q for q in body["questions"] if q["question_id"] == "a_big")["items"][0]
+            assert len(big["title"]) <= 500 and len(big["options"]) == 10 and all(len(o) <= 200 for o in big["options"])
+            assert big["text_truncated"] is True  # the consultant is told that something was cut
+            text = json.dumps(body)
+            assert "abcd1234secretvalue" not in text and "abcdefgh12345678" not in text and "[REDACTED]" in text
+            body, _ = await call(w, "get_questions", root_id="r1", number="Q1")  # one question: the detail
+            full = body["questions"][0]["items"][0]
+            assert len(full["options"]) == 15 and all(len(o) > 300 for o in full["options"]) and len(full["title"]) > 1000
+            assert full["text_truncated"] is False
     arun(main())
 
 

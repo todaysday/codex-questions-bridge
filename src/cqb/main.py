@@ -33,6 +33,7 @@ from cqb.services.consultants import ConsultantService
 from cqb.services.context import ContextService
 from cqb.services.inventory import InventoryService
 from cqb.services.live_state import LiveState
+from cqb.services.focus import QuestionFocus
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
@@ -78,7 +79,7 @@ async def _log_question(q: Question) -> None:
 
 async def _log_agent_question(q: AgentQuestion) -> None:
     # Ids and counts only: question text may be sensitive and never goes to logs.
-    log.info("agent question %s thread=%s root=%s items=%d", q.agent_question_id, q.thread_id, q.root_thread_id, len(q.items))
+    log.info("agent question %s thread=%s root=%s index=%d", q.agent_question_id, q.thread_id, q.root_thread_id, q.index)
 
 
 async def _log_agent_closed(q: AgentQuestion) -> None:
@@ -162,7 +163,9 @@ async def run(
             closers.append(http.close)
             health = PicoHealth(health_url(config.pico.url), http)
             gateway = PicoGateway(config.pico, consultant_tokens.pico, http, health)
-            context = ContextService(consultant_dao, threads, question_dao, reader, HistoryReader(client), source_id)
+            context = ContextService(
+                consultant_dao, threads, question_dao, reader, HistoryReader(client), source_id, agent_dao
+            )
             scopes = SessionScopes(consultants.scope_for_session)
             mcp = McpServer(
                 consultant_tokens.mcp, build_tools(context), scopes.lookup, health.beat, port=config.mcp.port,
@@ -180,11 +183,12 @@ async def run(
             tg.chat_id, source_id,
         )
         closers.append(status.close)
+        focus = QuestionFocus(consultant_dao, questions, agent_questions, source_id)
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
             api, keys, topics, publisher, cards, agent_cards, consultants, tg_topics, registry, questions,
             agent_questions,
-            ConsultantRelay(gateway, tg_topics), status, source_id, inventory.poke,
+            ConsultantRelay(gateway, tg_topics, context=focus), focus, status, source_id, inventory.poke,
         )
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
         questions.subscribe(on_question=cards.on_question, on_resolved=cards.on_resolved)

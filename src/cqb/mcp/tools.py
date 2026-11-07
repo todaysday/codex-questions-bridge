@@ -55,7 +55,7 @@ def build_tools(ctx: ContextService) -> dict[str, Tool]:
         return await ctx.read_event(a.get("root_id"), a.get("event_ref"), a.get("source_id"), a.get("max_bytes"))
 
     async def questions(a: dict[str, Any]) -> Any:
-        return await ctx.questions(*common(a))
+        return await ctx.questions(*common(a), number=a.get("number"))
 
     tools = [
         Tool("get_thread_overview",
@@ -80,8 +80,12 @@ def build_tools(ctx: ContextService) -> dict[str, Tool]:
                  "max_bytes": {"type": "integer", "description": "1024..16384, default 8192."},
              }, read_event),
         Tool("get_questions",
-             "Unanswered request_user_input questions of the bound thread (text of secret questions is never shown).",
-             {}, questions),
+             "Questions Codex asked in the bound thread, both kinds (request_user_input and agent messages), each with "
+             "its Q number, kind, state (pending, answered, stale), titles and options. Pending ones come first. "
+             "Text of secret questions is never shown.",
+             {
+                 "number": {"type": ["string", "integer"], "description": "Only this question: `Q3` or `3`."},
+             }, questions),
     ]
     return {t.name: t for t in tools}
 

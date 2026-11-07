@@ -66,23 +66,29 @@ class Question:
     delivered_to_codex: bool
     created_at: int
     updated_at: int
-    card_message_id: int | None = None  # the question card in the consultant topic of the root
+    card_message_id: int | None = None  # the first message of the question card in the consultant topic
+    display_no: int = 0  # `Q<n>`: unique and stable within the root thread; 0 until stored
+    card_extra_ids: tuple[int, ...] = ()  # continuation messages of a long card
 
 
 @dataclass(frozen=True, slots=True)
 class AgentQuestionItem:
-    """One question of an agentMessage card: a title and plain-string options (no ids on the wire)."""
+    """One question of an agentMessage as parsed: a title and plain-string options (no ids on the wire).
+    `complete` is False when a bound cut the text, so the question cannot be answered from Telegram."""
 
     title: str
     options: tuple[str, ...]
+    complete: bool = True
 
 
 @dataclass(frozen=True, slots=True)
 class AgentQuestion:
-    """Questions an agent put into a final agentMessage (delivery async). They never block the turn.
+    """ONE question an agent put into a final agentMessage (delivery async); a message with several questions
+    gives several of these, each with its own number, card and answer. They never block the turn.
 
-    Pending until a userMessage follows the message in the thread. `staged` holds the owner's choice per
-    question index; `sent_at` is set once the answer message was sent (not yet seen as a userMessage).
+    Identity is the message item id plus `index` (the question's position in the message). Pending until a
+    userMessage answers it: one that names it (questionItemId), or a later one that names no question at all.
+    `staged` is the owner's choice; `sent_at` is set once the answer message was sent (not yet seen).
     """
 
     agent_question_id: str
@@ -91,14 +97,18 @@ class AgentQuestion:
     root_thread_id: str
     turn_id: str
     item_id: str
-    items: tuple[AgentQuestionItem, ...]
-    answerable: bool  # False when the message had more or longer questions than the Bridge keeps
+    index: int
+    title: str
+    options: tuple[str, ...]
+    answerable: bool  # False when a bound cut the text: the answer would not quote it exactly
     state: AgentQuestionState
-    staged: dict[int, str]
+    staged: str | None
     sent_at: int | None
     created_at: int
     updated_at: int
-    card_message_id: int | None = None
+    card_message_id: int | None = None  # the first message of the card
+    display_no: int = 0  # `Q<n>`, shared with request_user_input questions of the same root
+    card_extra_ids: tuple[int, ...] = ()  # continuation messages of a long card
 
     @property
     def is_open(self) -> bool:
@@ -116,6 +126,7 @@ class Consultant:
     state: ConsultantState
     created_at: int
     updated_at: int
+    focus_no: int | None = None  # the Q number the owner pointed at last (the conversation's topic)
 
 
 @dataclass(frozen=True, slots=True)

@@ -5,9 +5,12 @@ import aiohttp
 import pytest
 
 from cqb.config import PicoConfig
-from cqb.pico.gateway import QUEUE_MAX, PicoGateway, ReplyAssembler, escape_command
-from cqb.pico.health import PicoHealth, health_url
-from cqb.services.relay import Outcome, Submit
+from cqb.pico.gateway import (
+    BAD_SESSION, CONN_FAILED, CONN_LOST, EXCHANGE_FAILED, QUEUE_MAX, TOO_MANY_SOCKETS, PicoGateway, ReplyAssembler,
+    escape_command,
+)
+from cqb.pico.health import HEALTH_FAILING, HOOK_SILENT, PicoHealth, health_url
+from cqb.services.relay import UNAVAILABLE, Outcome, Submit, present
 from fake_appserver import wait_until
 from fake_pico import TOKEN, FakePico, create, echo, update
 
@@ -476,4 +479,136 @@ def test_consultant_turns_still_use_the_configured_timeout_not_the_ask_timeout()
             inbox = Inbox()
             gw.submit(SID, "x", inbox)
             assert (await inbox.wait(1, 5))[0].outcome is Outcome.TIMEOUT
+    arun(main())
+
+
+# --- the reason shown to the owner with every "unavailable" / error line ------------------------------
+
+def shown(result):
+    return present(result)
+
+
+def test_reason_connection_refused_or_rejected():
+    async def main():
+        async with stack(token="nope") as (gw, fake, _):
+            inbox = Inbox()
+            gw.submit(SID, "hi", inbox)
+            (r,) = await inbox.wait()
+            assert (r.outcome, r.text) == (Outcome.UNAVAILABLE, CONN_FAILED)
+            assert shown(r) == f"{UNAVAILABLE} ({CONN_FAILED})" and "nope" not in shown(r) and SID not in shown(r)
+    arun(main())
+
+
+def test_reason_socket_lost_mid_turn():
+    async def main():
+        async with stack() as (gw, fake, _):
+            fake.turn_delay = 5
+            inbox = Inbox()
+            gw.submit(SID, "lost", inbox)
+            await wait_until(lambda: fake.texts(SID) == ["lost"])
+            await fake.drop_connections()
+            (r,) = await inbox.wait(1, 8)
+            assert (r.outcome, r.text) == (Outcome.UNAVAILABLE, CONN_LOST)
+            assert shown(r) == "Консультант временно недоступен (соединение с PicoClaw оборвано)"
+    arun(main())
+
+
+def test_reason_unhealthy_gateway_and_silent_hook_and_bad_session():
+    class Clock:
+        now = 1000.0
+
+        def __call__(self):
+            return self.now
+
+    async def main():
+        clock = Clock()
+        fake = FakePico()
+        await fake.start()
+        async with aiohttp.ClientSession() as http:
+            health = PicoHealth(f"http://127.0.0.1:{fake.port}/health", http, beat_max_age=30, clock=clock)
+            gw = PicoGateway(PicoConfig(url=fake.url), TOKEN, http, health, quiet=0.05, backoff=0.01, liveness=0.05)
+            assert gw.submit("other-" + "a" * 26, "hi", Inbox()) is Submit.UNAVAILABLE
+            assert gw.unavailable_reason() == BAD_SESSION and SID not in BAD_SESSION
+            clock.now += 31
+            assert not await health.check()  # no heartbeat: the hook process is silent
+            assert gw.submit(SID, "hi", Inbox()) is Submit.UNAVAILABLE
+            assert gw.unavailable_reason() == HOOK_SILENT == "хук не отвечает"
+            health.beat()
+            await fake.stop()
+            assert not await health.check()  # the gateway itself does not answer
+            assert gw.submit(SID, "hi", Inbox()) is Submit.UNAVAILABLE
+            assert gw.unavailable_reason() == HEALTH_FAILING == "health-проверка PicoClaw не проходит"
+            await gw.close()
+    arun(main())
+
+
+def test_reason_health_answering_with_an_error_status_names_the_status():
+    async def main():
+        from aiohttp import web
+        app = web.Application()
+
+        async def bad(request):
+            return web.Response(status=503)
+        app.router.add_get("/health", bad)
+        runner = web.AppRunner(app, access_log=None)
+        await runner.setup()
+        site = web.TCPSite(runner, "127.0.0.1", 0)
+        await site.start()
+        port = runner.addresses[0][1]
+        async with aiohttp.ClientSession() as http:
+            health = PicoHealth(f"http://127.0.0.1:{port}/health", http)
+            assert not await health.check()
+            assert health.user_reason == f"{HEALTH_FAILING}, ответ 503"
+        await runner.cleanup()
+    arun(main())
+
+
+def test_reason_model_error_frame_is_shown_cut_and_redacted():
+    async def script(sid, text):
+        return [{"type": "error", "payload": {"code": "model_error", "message":
+                 "upstream said:\n  rate limit exceeded api_key=abcdefgh12345678 " + "z " * 300}}]
+
+    async def main():
+        async with stack(script) as (gw, _, _):
+            inbox = Inbox()
+            gw.submit(SID, "q", inbox)
+            (r,) = await inbox.wait()
+            assert r.outcome is Outcome.ERROR and r.text.startswith("модель вернула ошибку: upstream said: rate limit exceeded")
+            assert len(r.text) <= len("модель вернула ошибку: ") + 200 and r.text.endswith("…")
+            assert "abcdefgh12345678" not in r.text and "\n" not in r.text
+            assert shown(r) == f"Консультант вернул ошибку ({r.text})"
+    arun(main())
+
+
+def test_reason_model_error_frame_without_a_message_falls_back_to_its_code():
+    async def script(sid, text):
+        return [{"type": "error", "payload": {"code": "unknown_type"}}]
+
+    async def main():
+        async with stack(script) as (gw, _, _):
+            inbox = Inbox()
+            gw.submit(SID, "q", inbox)
+            assert (await inbox.wait())[0].text == "модель вернула ошибку: unknown_type"
+    arun(main())
+
+
+def test_reason_connection_cap_and_exchange_failure(monkeypatch):
+    async def main():
+        async with stack(max_connections=1) as (gw, fake, _):
+            fake.turn_delay = 0.3
+            inbox = Inbox()
+            gw.submit(SID, "long", inbox)
+            await wait_until(lambda: fake.texts(SID))
+            gw.submit(SID2, "other", inbox)
+            await inbox.wait(2, 5)
+            busy = next(r for r in inbox.results if r.outcome is Outcome.BUSY)
+            assert busy.text == TOO_MANY_SOCKETS and shown(busy) == f"Консультант занят, повторите чуть позже ({TOO_MANY_SOCKETS})"
+        async with stack() as (gw, fake, _):
+            async def boom(*a, **k):
+                raise RuntimeError("private /srv/x")
+            monkeypatch.setattr(gw, "_await_reply", boom)
+            inbox = Inbox()
+            gw.submit(SID, "hi", inbox)
+            (r,) = await inbox.wait()
+            assert (r.outcome, r.text) == (Outcome.ERROR, EXCHANGE_FAILED) and "private" not in shown(r)
     arun(main())

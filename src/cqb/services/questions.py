@@ -69,8 +69,8 @@ class QuestionService:
     def postable_without_card(self, limit: int = 50) -> list[Question]:
         return self._questions.list_postable(self._source, limit)
 
-    def bind_card_message(self, question_id: str, message_id: int | None) -> None:
-        self._questions.set_card_message(question_id, message_id)
+    def bind_card_messages(self, question_id: str, ids: list[int]) -> None:
+        self._questions.set_card_messages(question_id, ids)
 
     def by_card_message(self, message_id: int) -> Question | None:
         return self._questions.find_by_card_message(message_id)
@@ -180,7 +180,7 @@ class QuestionService:
         )
         if self._questions.insert_if_new(fresh):
             self._live[qid] = e.request_id
-            await self._fire(self._question_hooks, fresh)
+            await self._fire(self._question_hooks, self._questions.get(qid) or fresh)  # with its Q number
             return
         existing = self._questions.get(qid)
         if existing is None or existing.lifecycle not in OPEN_LIFECYCLES:

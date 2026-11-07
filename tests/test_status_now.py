@@ -99,21 +99,21 @@ def test_activity_reads_the_newest_item_with_two_cheap_calls():
 # --- the card ------------------------------------------------------------------------------
 
 @pytest.mark.parametrize("item, phrase", [
-    (ItemBrief(K.COMMAND, False, "pytest -q"), "сейчас: выполняет: pytest -q"),
-    (ItemBrief(K.COMMAND, True, "pytest -q"), "сейчас: выполнил: pytest -q"),
-    (ItemBrief(K.FILES, False, None, 3), "сейчас: правит файлы (3)"),
-    (ItemBrief(K.FILES, True, None, 1), "сейчас: правил файлы (1)"),
-    (ItemBrief(K.TOOL, False, "cqb.list_agents"), "сейчас: вызывает cqb.list_agents"),
-    (ItemBrief(K.TOOL, True, "cqb.list_agents"), "сейчас: вызывал cqb.list_agents"),
-    (ItemBrief(K.MESSAGE, False), "сейчас: пишет ответ"),
-    (ItemBrief(K.REASONING, False), "сейчас: думает"),
-    (ItemBrief(K.SPAWN, False, "spawnAgent"), "сейчас: запускает субагента"),
-    (ItemBrief(K.COLLAB, False, "wait"), "сейчас: ждёт субагентов"),
-    (ItemBrief(K.COLLAB, False, "sendInput"), "сейчас: общается с субагентами"),
-    (ItemBrief(K.WEB, False), "сейчас: ищет в сети"),
-    (ItemBrief(K.OTHER, False), "сейчас: —"),
-    (ItemBrief(K.TOOL, False, None), "сейчас: —"),
-    (None, "сейчас: —"),
+    (ItemBrief(K.COMMAND, False, "pytest -q"), "💭 выполняет: pytest -q"),
+    (ItemBrief(K.COMMAND, True, "pytest -q"), "💭 выполнил: pytest -q"),
+    (ItemBrief(K.FILES, False, None, 3), "💭 правит файлы (3)"),
+    (ItemBrief(K.FILES, True, None, 1), "💭 правил файлы (1)"),
+    (ItemBrief(K.TOOL, False, "cqb.list_agents"), "💭 вызывает cqb.list_agents"),
+    (ItemBrief(K.TOOL, True, "cqb.list_agents"), "💭 вызывал cqb.list_agents"),
+    (ItemBrief(K.MESSAGE, False), "💭 пишет ответ"),
+    (ItemBrief(K.REASONING, False), "💭 думает"),
+    (ItemBrief(K.SPAWN, False, "spawnAgent"), "💭 запускает субагента"),
+    (ItemBrief(K.COLLAB, False, "wait"), "💭 ждёт субагентов"),
+    (ItemBrief(K.COLLAB, False, "sendInput"), "💭 общается с субагентами"),
+    (ItemBrief(K.WEB, False), "💭 ищет в сети"),
+    (ItemBrief(K.OTHER, False), "💭 —"),
+    (ItemBrief(K.TOOL, False, None), "💭 —"),
+    (None, "💭 —"),
 ])
 def test_root_now_line_per_item_kind(item, phrase):
     svc, src = make()
@@ -124,17 +124,17 @@ def test_root_now_line_per_item_kind(item, phrase):
 
 def test_waiting_states_idle_age_and_missing_data():
     svc, src = make()
-    for state, phrase in ((R.WAITING_INPUT, "сейчас: ждёт ответа"), (R.WAITING_APPROVAL, "сейчас: ждёт одобрения")):
+    for state, phrase in ((R.WAITING_INPUT, "💭 ждёт ответа"), (R.WAITING_APPROVAL, "💭 ждёт одобрения")):
         src.threads["r1"] = snapshot("r1", state, updated=NOW - 5)
         src.activities["r1"] = running(ItemBrief(K.COMMAND, False, "never shown"))
         assert card_of(svc).splitlines()[2] == phrase
     src.threads["r1"] = snapshot("r1", R.IDLE, updated=NOW - 5)
     src.activities["r1"] = Activity(False, NOW - 900, NOW - 720, None)
-    assert card_of(svc).splitlines()[2] == "сейчас: ход завершён 12 мин назад"
+    assert card_of(svc).splitlines()[2] == "💭 ход завершён 12м назад"
     src.activities["r1"] = Activity(False, None, None, None)
-    assert card_of(svc).splitlines()[2] == "сейчас: —"
+    assert card_of(svc).splitlines()[2] == "💭 —"
     del src.activities["r1"]  # the daemon could not say
-    assert card_of(svc).splitlines()[2] == "сейчас: —"
+    assert card_of(svc).splitlines()[2] == "💭 —"
 
 
 def test_waiting_flag_costs_no_item_read_and_only_working_threads_read_items():
@@ -156,7 +156,7 @@ def test_command_head_is_redacted_then_cut_to_eighty_characters():
     assert token not in line and "[REDACTED]" in line
     src.activities["r1"] = running(ItemBrief(K.COMMAND, False, "echo " + "word " * 60))
     line = card_of(svc).splitlines()[2]
-    detail = line.removeprefix("сейчас: выполняет: ")
+    detail = line.removeprefix("💭 выполняет: ")
     assert len(detail) == DETAIL_MAX and detail.endswith("…")
     # a secret that straddles the cut is redacted before the cut, never half shown
     src.activities["r1"] = running(ItemBrief(K.COMMAND, False, "x" * 70 + " password=hunter2hunter2 tail"))
@@ -176,7 +176,7 @@ def test_no_message_text_or_output_reaches_the_card_through_the_real_reader():
                     "type": kind, "id": "i", "text": SECRET_TEXT, "summary": [SECRET_TEXT], "content": [SECRET_TEXT]}}]
             svc = StatusService(DaemonStatusReader(client), LiveState(), lambda p: None, "local", clock=lambda: NOW)
             text = render_status(await svc.collect("local", "r1"))
-            assert "сейчас: пишет ответ" in text and "   сейчас: думает" in text and SECRET_TEXT not in text
+            assert "💭 пишет ответ" in text and " · думает" in text and SECRET_TEXT not in text
             assert set(fake.methods()) <= {"thread/read", "thread/list", "thread/goal/get", "account/rateLimits/read",
                                            "thread/turns/list", "thread/items/list"}
     run(main())
@@ -200,10 +200,10 @@ def test_subagent_lines_get_now_data_concurrently_with_a_small_semaphore_and_onl
 
     src.activity = slow
     report = run(svc.collect("s1", "r1"))
-    assert len(report.agents) == 8
+    assert len(report.agents) == 6
     assert 1 < live["peak"] <= NOW_FETCHES
-    assert src.calls.count("turn") <= 1 + 8  # the root and the lines shown; the other four are never read
-    assert render_status(report).count("   сейчас: думает") >= 1
+    assert src.calls.count("turn") <= 1 + 6  # the root and the lines shown; the other six are never read
+    assert render_status(report).count(" · думает") >= 1
 
 
 def test_waiting_subagent_line_needs_no_read_and_says_what_it_waits_for():
@@ -219,7 +219,7 @@ def test_waiting_subagent_line_needs_no_read_and_says_what_it_waits_for():
 
     src.activity = spy
     text = card_of(svc)
-    assert "   сейчас: ждёт одобрения" in text and reads == ["r1"]
+    assert " · ждёт одобрения" in text and reads == ["r1"]
 
 
 def test_item_brief_dto_is_immutable_and_slotted():

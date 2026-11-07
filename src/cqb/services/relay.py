@@ -29,6 +29,9 @@ QUEUED = "В очереди: консультант ещё отвечает на
 QUEUE_FULL = "В очереди уже слишком много сообщений; дождитесь ответа консультанта"
 TIMED_OUT = "Консультант не ответил вовремя"
 FAILED = "Консультант вернул ошибку; подробности в логе"
+ERRORED = "Консультант вернул ошибку"
+STOP = "/stop"  # the one command that reaches the consultant unescaped (see pico/gateway.py)
+REASON_MAX_CHARS = 240  # a reason is a short clause, never a dump
 TRUNCATED = "\n…[ответ обрезан]"
 
 
@@ -55,11 +58,15 @@ class DialogResult:
 
 
 Deliver = Callable[[DialogResult], Awaitable[None]]
+ContextLine = Callable[[str], str]  # root thread id -> the context line for the consultant ("" = none)
 
 
 class ConsultantDialog(Protocol):
     def submit(self, session_id: str, text: str, deliver: Deliver) -> Submit:
         """Queue one user message; `deliver` is awaited once with the turn's result."""
+
+    def unavailable_reason(self) -> str:
+        """Short clause (Russian, no ids or tokens) for why the last `submit` returned UNAVAILABLE."""
 
 
 class TopicSink(Protocol):
@@ -68,13 +75,19 @@ class TopicSink(Protocol):
 
 
 class ConsultantRelay:
-    def __init__(self, dialog: ConsultantDialog | None, sink: TopicSink, *, typing_seconds: float = TYPING_SECONDS) -> None:
+    def __init__(
+        self, dialog: ConsultantDialog | None, sink: TopicSink, *, typing_seconds: float = TYPING_SECONDS,
+        context: ContextLine | None = None,
+    ) -> None:
         self._dialog = dialog  # None: consultants are not configured
+        self._context = context
         self._sink = sink
         self._typing_seconds = typing_seconds
         self._pending: dict[int, list] = {}  # topic -> [turns not yet delivered, typing task]
 
-    async def relay(self, consultant: Consultant, text: str) -> None:
+    async def relay(self, consultant: Consultant, text: str, lead: str | None = None) -> None:
+        """Forward the owner's text. `lead` is a ready context line (a reply to a question card) that replaces the
+        pending-questions line, so the consultant gets exactly one. `/stop` is never prefixed."""
         topic = consultant.tg_topic_id
         if consultant.state is not ConsultantState.OPEN or topic is None or not text.strip():
             return
@@ -86,6 +99,8 @@ class ConsultantRelay:
             self._leave(topic)
             await self._say(topic, present(result))
 
+        if text.strip() != STOP:
+            text = (lead if lead is not None else self._pending_line(consultant)) + text
         self._enter(topic)  # typing starts before submit so a fast reply cannot race the task creation
         outcome = self._dialog.submit(consultant.pico_session_key, text, deliver)
         if outcome in (Submit.QUEUE_FULL, Submit.UNAVAILABLE, Submit.STOPPED):
@@ -96,7 +111,15 @@ class ConsultantRelay:
             case Submit.QUEUE_FULL:
                 await self._say(topic, QUEUE_FULL)
             case Submit.UNAVAILABLE:
-                await self._say(topic, UNAVAILABLE)
+                await self._say(topic, with_reason(UNAVAILABLE, self._dialog.unavailable_reason()))
+
+    def _pending_line(self, consultant: Consultant) -> str:
+        try:
+            line = self._context(consultant.root_thread_id) if self._context else ""
+        except Exception as exc:  # context is a courtesy: a failure must never block the owner's message
+            log.warning("context line failed: %s", type(exc).__name__)
+            return ""
+        return line + "\n" if line else ""
 
     def _enter(self, topic: int) -> None:
         entry = self._pending.setdefault(topic, [0, None])
@@ -135,9 +158,19 @@ def present(result: DialogResult) -> str:
             text = result.text.strip() or FAILED
             return text if len(text) <= REPLY_MAX_CHARS else text[: REPLY_MAX_CHARS - len(TRUNCATED)] + TRUNCATED
         case Outcome.UNAVAILABLE:
-            return UNAVAILABLE
+            return with_reason(UNAVAILABLE, result.text)
         case Outcome.BUSY:
-            return BUSY
+            return with_reason(BUSY, result.text)
         case Outcome.TIMEOUT:
             return TIMED_OUT
-    return FAILED
+    return with_reason(ERRORED, result.text) if result.text.strip() else FAILED
+
+
+def with_reason(line: str, reason: str) -> str:
+    """`line (reason)`: one bounded line; no reason leaves the line as it was."""
+    reason = " ".join(reason.split())
+    if not reason:
+        return line
+    if len(reason) > REASON_MAX_CHARS:
+        reason = reason[: REASON_MAX_CHARS - 1] + "…"
+    return f"{line} ({reason})"

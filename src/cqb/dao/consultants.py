@@ -63,6 +63,9 @@ class ConsultantDao:
             (state.value, now, consultant_id),
         )
 
+    def set_focus(self, consultant_id: int, number: int | None) -> None:
+        self._conn.execute("UPDATE consultants SET focus_no=? WHERE consultant_id=?", (number, consultant_id))
+
     def list_by_states(
         self, source_id: str, states: Collection[ConsultantState], limit: int = 500
     ) -> list[Consultant]:
@@ -100,4 +103,5 @@ def _to_consultant(r: sqlite3.Row) -> Consultant:
         state=ConsultantState(r["state"]),
         created_at=r["created_at"],
         updated_at=r["updated_at"],
+        focus_no=r["focus_no"],
     )

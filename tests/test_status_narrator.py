@@ -4,13 +4,13 @@ import asyncio
 
 import pytest
 
-from cqb.pico.status_narrator import (
-    LINE_MAX, STATUS_PROMPT, SUMMARY_LINES, SUMMARY_MAX, PicoStatusNarrator, SlotPool, clean_summary, slot_names,
-)
+from cqb.domain.status import NEXT_MAX, SUMMARY_MAX, StatusSummary
+from cqb.pico.status_narrator import STATUS_PROMPT, PicoStatusNarrator, SlotPool, parse_summary, slot_names
 from cqb.services.relay import DialogResult, Outcome
 from cqb.services.scope import SessionScopes
 
 CONSULTANT = "cqb-" + "a" * 26
+WORKS = StatusSummary("Корень работает.")  # what the default reply parses to
 
 
 def run(coro):
@@ -44,13 +44,14 @@ def make(slots=2, **kw):
 def test_a_summary_goes_through_a_slot_with_the_fixed_prompt_and_the_root_scope():
     async def main():
         narrator, dialog, scopes = make()
-        assert await narrator.summarize("s1", "root-7", 30) == "Корень работает."
+        assert await narrator.summarize("s1", "root-7", 30) == WORKS
         [(sid, prompt, timeout)] = dialog.asked
         assert sid == "cqb-status-1" and 0 < timeout <= 30
         assert "root-7" in prompt and "{root_id}" not in prompt
         for tool in ("list_agents", "get_recent_events", "get_thread_overview", "get_questions"):
             assert tool in prompt
-        for rule in ("Russian", "at most 10", "не подтверждено", "Never quote secrets", "untrusted"):
+        for rule in ("Russian", "EXACTLY two", "В процессе:", "Дальше:", "350", "не подтверждено", "Never quote secrets",
+                     "untrusted", "no agent names"):
             assert rule in prompt
         assert dialog.scope_seen == [("cqb-status-1", ("s1", "root-7"))]  # bound during the call
         assert scopes.lookup("cqb-status-1") is None  # and gone afterwards
@@ -81,7 +82,7 @@ def test_slots_are_reused_one_root_at_a_time_and_a_busy_pool_waits_for_a_release
         assert scopes.lookup("cqb-status-1") == ("s1", "r1") and scopes.lookup("cqb-status-2") == ("s1", "r2")
         assert not third.done()
         hold.set()
-        assert await asyncio.gather(first, second, third) == ["Корень работает."] * 3
+        assert await asyncio.gather(first, second, third) == [WORKS] * 3
         assert len(dialog.asked) == 3
         # each slot only ever served one root at a time: the scope seen inside each call is that call's root
         seen = {sid: root for sid, (_, root) in dialog.scope_seen[:2]}
@@ -100,7 +101,7 @@ def test_exhausted_pool_gives_up_at_the_deadline_without_asking():
         assert len(dialog.asked) == 1
         hold.set()
         await busy
-        assert await narrator.summarize("s1", "r3", 30) == "Корень работает."  # the slot came back
+        assert await narrator.summarize("s1", "r3", 30) == WORKS  # the slot came back
     run(main())
 
 
@@ -121,7 +122,7 @@ def test_an_exception_in_the_dialog_releases_slot_and_scope():
             await narrator.summarize("s1", "r1", 30)
         assert scopes.lookup("cqb-status-1") is None
         dialog.fail = None
-        assert await narrator.summarize("s1", "r2", 30) == "Корень работает."
+        assert await narrator.summarize("s1", "r2", 30) == WORKS
     run(main())
 
 
@@ -136,7 +137,7 @@ def test_cancellation_releases_slot_and_scope():
         await asyncio.gather(task, return_exceptions=True)
         assert scopes.lookup("cqb-status-1") is None
         hold.set()
-        assert await narrator.summarize("s1", "r2", 30) == "Корень работает."
+        assert await narrator.summarize("s1", "r2", 30) == WORKS
     run(main())
 
 
@@ -161,19 +162,52 @@ def test_slot_pool_basics():
     assert slot_names("cqb-", 2) == ["cqb-status-1", "cqb-status-2"]
 
 
-def test_the_reply_is_redacted_bounded_and_cleaned_before_it_can_enter_the_card():
+WELL_FORMED = "В процессе: Правит тесты статуса, часть уже зелёная.\nДальше: прогнать e2e и обновить README."
+
+
+def test_a_well_formed_reply_is_split_into_progress_and_next_steps():
+    assert parse_summary(WELL_FORMED) == StatusSummary(
+        "Правит тесты статуса, часть уже зелёная.", "прогнать e2e и обновить README.")
+    multi = parse_summary("В процессе:\nпервая\nвторая\nтретья\nчетвёртая\nДальше:\n- раз\n- два\n- три")
+    assert multi == StatusSummary("первая\nвторая\nтретья", "раз\nдва")  # three and two lines at most
+    assert parse_summary("**В процессе:** идёт сборка\n**Дальше:** тесты") == StatusSummary("идёт сборка", "тесты")
+    assert parse_summary("в процессе - не метка\nДАЛЬШЕ : x") == StatusSummary("в процессе - не метка", "x")
+
+
+@pytest.mark.parametrize("nxt", ["—", "-", "–", " — ", "нет", "", "не подтверждено"])
+def test_no_next_steps_means_none(nxt):
+    assert parse_summary(f"В процессе: идёт сборка\nДальше: {nxt}") == StatusSummary("идёт сборка", None)
+    assert parse_summary("В процессе: идёт сборка") == StatusSummary("идёт сборка", None)  # the part is missing
+
+
+def test_a_malformed_reply_is_all_progress_up_to_the_limit_and_has_no_next_steps():
+    plain = parse_summary("Корень правит файлы.\nСубагент читает логи.")
+    assert plain == StatusSummary("Корень правит файлы.\nСубагент читает логи.", None)
+    long = parse_summary("слово " * 200)
+    assert len(long.progress) == SUMMARY_MAX and long.progress.endswith("…") and long.next_steps is None
+    only_next = parse_summary("Дальше: раскатать")
+    assert only_next == StatusSummary("—", "раскатать")
+    assert parse_summary("Дальше: —") is None  # nothing at all
+
+
+def test_the_parts_share_the_total_limit():
+    out = parse_summary("В процессе: " + "а" * 400 + "\nДальше: " + "б" * 400)
+    assert len(out.next_steps) == NEXT_MAX and out.next_steps.endswith("…")
+    assert len(out.progress) == SUMMARY_MAX - NEXT_MAX and out.progress.endswith("…")
+    assert len(out.progress) + len(out.next_steps) == SUMMARY_MAX
+
+
+def test_empty_replies_are_no_summary():
+    for text in ("", "   ", " \n\t\n", "\x00\x07", "В процессе:", "- \n•"):
+        assert parse_summary(text) is None, repr(text)
+
+
+def test_the_reply_is_redacted_before_it_can_enter_the_card():
     token = "ghp_" + "b" * 36
-    cleaned = clean_summary(f"Корень правит файлы.\n\n  Ключ: {token}  \nпароль password=hunter2hunter2\n")
-    assert token not in cleaned and "hunter2" not in cleaned and cleaned.splitlines()[0] == "Корень правит файлы."
-    assert "\n\n" not in cleaned
-    many = clean_summary("\n".join(f"строка {i}" for i in range(40)))
-    assert len(many.splitlines()) == SUMMARY_LINES
-    wide = clean_summary("я" * 5000)
-    assert len(wide) == LINE_MAX
-    big = clean_summary("\n".join("слово " * 40 for _ in range(12)))
-    assert len(big) <= SUMMARY_MAX and big.endswith("…")
-    assert clean_summary("") is None and clean_summary(" \n\t\n") is None
-    assert clean_summary("a\x00b\x07c") == "abc"
+    out = parse_summary(f"В процессе: ключ {token} найден\nДальше: пароль password=hunter2hunter2 сменить")
+    assert token not in out.progress and "hunter2" not in out.next_steps
+    assert "\x00" not in parse_summary("a\x00b\x07c").progress
+    assert parse_summary("a\x00b\x07c").progress == "abc"
 
 
 def test_empty_reply_is_no_summary():
@@ -183,10 +217,11 @@ def test_empty_reply_is_no_summary():
     run(main())
 
 
-def test_the_prompt_is_english_and_names_only_the_four_status_tools():
+def test_the_prompt_is_english_names_only_the_four_status_tools_and_asks_for_two_short_parts():
     assert "{root_id}" in STATUS_PROMPT and "read_event" not in STATUS_PROMPT
-    assert STATUS_PROMPT.isascii() is False  # only the quoted Russian phrase is non-ASCII
-    assert STATUS_PROMPT.count("не подтверждено") == 1
+    assert STATUS_PROMPT.count("не подтверждено") == 1  # the labels and this phrase are the only Russian
+    assert "no breakdown per agent" in STATUS_PROMPT.lower() and "single dash" in STATUS_PROMPT
+    assert "working or idle" in STATUS_PROMPT and "at most 10" not in STATUS_PROMPT
 
 
 def test_scope_table_prefers_a_bound_slot_and_falls_back_to_consultants():

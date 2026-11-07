@@ -3,14 +3,18 @@ lifecycle moves (design sections 2.3, 6). A root without an open consultant gets
 
 import asyncio
 import logging
+import time
 from collections.abc import Callable, Mapping, Sequence
 from typing import Protocol
 
-from cqb.domain.enums import OPEN_LIFECYCLES, ConsultantState
+from cqb.domain.enums import OPEN_LIFECYCLES, ConsultantState, QuestionLifecycle as L
+from cqb.domain.labels import question_label
 from cqb.domain.models import Question
 from cqb.services.questions import QuestionError
 from cqb.services.registry import RegistryQuery
-from cqb.telegram.api import BadRequest, BotApi
+from cqb.telegram.api import BotApi
+from cqb.telegram.armed import ArmedAnswers
+from cqb.telegram.card_post import CardPoster, card_parts
 from cqb.telegram.card_view import ANSWER_LIMIT, render_card
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import Reply
@@ -27,7 +31,7 @@ class QuestionPort(Protocol):
     def stage_decision(self, question_id: str, answers: Mapping[str, Sequence[str]]) -> Question: ...
     def unstage_decision(self, question_id: str) -> Question: ...
     async def answer(self, question_id: str, answers: Mapping[str, Sequence[str]] | None = None) -> None: ...
-    def bind_card_message(self, question_id: str, message_id: int | None) -> None: ...
+    def bind_card_messages(self, question_id: str, ids: list[int]) -> None: ...
     def by_card_message(self, message_id: int) -> Question | None: ...
     def postable_without_card(self, limit: int = 50) -> list[Question]: ...
     def open_questions(self, root_thread_id: str | None = None, limit: int = 20) -> list[Question]: ...
@@ -42,16 +46,17 @@ class QuestionCards:
         registry: RegistryQuery,
         chat_id: int,
         on_change: Callable[[], None],
+        clock: Callable[[], float] = time.time,
     ) -> None:
-        self._api = api
+        self._poster = CardPoster(api, chat_id)
         self._keys = keys
         self._questions = questions
         self._registry = registry
-        self._chat_id = chat_id
         self._on_change = on_change
         self._dirty: dict[str, None] = {}
         self._wake = asyncio.Event()
         self._lock = asyncio.Lock()
+        self._armed = ArmedAnswers(clock)
 
     # Listeners for QuestionService.subscribe: they only mark the card dirty, so a slow or
     # rate-limited Telegram never blocks the app-server event stream.
@@ -60,6 +65,7 @@ class QuestionCards:
         self._on_change()  # the registry row shows or loses its ❓
 
     async def on_resolved(self, q: Question) -> None:
+        self._armed.disarm(q.question_id)
         self.mark(q.question_id)
         self._on_change()
 
@@ -87,6 +93,8 @@ class QuestionCards:
             await self.process()
 
     async def process(self) -> None:
+        for question_id in self._armed.drop_expired():  # the hint on the card must not outlive the state
+            self.mark(question_id)
         for q in self._questions.postable_without_card():
             self.mark(q.question_id)
         while self._dirty:
@@ -104,23 +112,17 @@ class QuestionCards:
                 return
             row = self._registry.describe(q.root_thread_id)
             name = thread_name(row) if row else q.root_thread_id[:8]
-            view = render_card(q, name)
-            keyboard = self._keys.bind(view.keyboard)
-            if q.card_message_id is not None:
-                try:
-                    await self._api.edit_message_text(self._chat_id, q.card_message_id, view.text, keyboard)
-                    return
-                except BadRequest as exc:
-                    if exc.not_modified:
-                        return
-                    if not exc.gone:
-                        raise
-            if q.lifecycle not in OPEN_LIFECYCLES:
-                return  # nothing actionable to post for a question that already ended
-            if row is None or row.consultant_state is not ConsultantState.OPEN or not row.topic_id:
-                return  # no open consultant: the registry row shows ❓, nothing is posted
-            sent = await self._api.send_message(self._chat_id, view.text, thread_id=row.topic_id, keyboard=keyboard)
-            self._questions.bind_card_message(question_id, sent.message_id)
+            view = render_card(q, name, self._armed.is_armed(question_id))
+            ids = [q.card_message_id, *q.card_extra_ids] if q.card_message_id is not None else []
+            topic = None  # where a new card may be posted: only for an open question of an open consultant
+            if q.lifecycle in OPEN_LIFECYCLES and row is not None and row.consultant_state is ConsultantState.OPEN:
+                topic = row.topic_id or None
+            if not ids and topic is None:
+                return  # no open consultant (the registry row shows ❓) or nothing actionable left to post
+            await self._poster.sync(
+                ids, card_parts(view.text, question_label(q.display_no)), self._keys.bind(view.keyboard), topic,
+                lambda new_ids: self._questions.bind_card_messages(question_id, new_ids),
+            )
 
     # Button handlers
 
@@ -134,16 +136,18 @@ class QuestionCards:
         return await self._stage_answer(q, options[option_index].label)
 
     async def stage_text(self, message_reply_to: int, text: str) -> Reply | None:
-        """Free text replied to a card stages the `Другое` answer (only for isOther questions)."""
+        """A reply to a card is an answer only while the card is armed by `✍️ Ответить текстом`.
+
+        None means "not an answer": the router then treats the reply as a discussion with the consultant."""
         q = self._questions.by_card_message(message_reply_to)
-        if q is None:
-            return None  # not a card: ordinary consultant chat
-        if q.is_secret:
-            return Reply("Секретный ввод: ответьте в Codex, Bridge его не принимает")
-        if len(q.items) != 1 or not q.items[0].is_other:
-            return Reply("Для этого вопроса используйте кнопки карточки")
+        if q is None or not self._armed.is_armed(q.question_id):
+            return None
+        if q.lifecycle not in OPEN_LIFECYCLES:
+            self._armed.disarm(q.question_id)
+            self.mark(q.question_id)
+            return None
         if len(text) > ANSWER_LIMIT:
-            return Reply(f"Слишком длинный ответ (максимум {ANSWER_LIMIT} символов)")
+            return Reply(f"Слишком длинный ответ (максимум {ANSWER_LIMIT} символов); карточка ждёт ответ")
         return await self._stage_answer(q, text)
 
     async def confirm(self, question_id: str) -> Reply:
@@ -163,13 +167,28 @@ class QuestionCards:
         await self.refresh_card(question_id)
         return Reply("Отменено")
 
-    def other_hint(self) -> Reply:
-        return Reply("Ответьте на сообщение карточки своим текстом", alert=True)
+    async def arm(self, question_id: str) -> Reply:
+        """`✍️ Ответить текстом`: the next reply to this card is the answer (for ten minutes)."""
+        q = self._questions.get(question_id)
+        if (q is None or q.is_secret or len(q.items) != 1 or not q.items[0].is_other
+                or q.lifecycle is not L.PENDING_CONFIRMED):
+            return Reply("Ответ текстом недоступен", alert=True)
+        for key in self._armed.arm(question_id):
+            self.mark(key)
+        await self.refresh_card(question_id)
+        return Reply("Ответьте на это сообщение: текст уйдёт в Codex")
+
+    async def unarm(self, question_id: str) -> Reply:
+        self._armed.disarm(question_id)
+        await self.refresh_card(question_id)
+        return Reply("Отменено")
 
     async def _stage_answer(self, q: Question, answer: str) -> Reply:
+        self._armed.disarm(q.question_id)
         try:
             self._questions.stage_decision(q.question_id, {q.items[0].id: (answer,)})
         except QuestionError as exc:
+            await self.refresh_card(q.question_id)
             return Reply(str(exc), alert=True)
         await self.refresh_card(q.question_id)
         return Reply("Подтвердите отправку")

@@ -12,13 +12,16 @@ import re
 from typing import Any, Protocol
 
 from cqb.codex.history import HistoryReader, HistoryUnavailable, event_from_entry, split_ref
+from cqb.dao.agent_questions import AgentQuestionDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import ThreadDao
 from cqb.domain.context import (
-    AgentInfo, AgentList, EventPage, HistoryEvent, QuestionInfo, QuestionList, ThreadOverview,
+    AgentInfo, AgentList, EventPage, HistoryEvent, QuestionInfo, QuestionItemInfo, QuestionList, ThreadOverview,
 )
-from cqb.domain.enums import ConsultantState
+from cqb.domain.enums import OPEN_LIFECYCLES, ConsultantState, QuestionLifecycle
+from cqb.domain.labels import parse_number, question_label
+from cqb.domain.models import AgentQuestion, Question
 from cqb.domain.status import Descendants, ThreadSnapshot
 from cqb.security import redact
 
@@ -33,6 +36,10 @@ READ_MAX_BYTES = 16 * 1024
 DEFAULT_READ_BYTES = 8 * 1024
 MAX_AGENTS = 50
 MAX_QUESTIONS = 20
+MAX_QUESTION_ITEMS = 10
+# A listing is an overview; asking for one `number` returns that question in detail.
+OVERVIEW = (500, 200, 10)  # title chars, option chars, options
+DETAIL = (4000, 2000, 26)
 SCOPE_FETCH = 100
 _ID = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
@@ -61,7 +68,9 @@ class ContextService:
         reader: ThreadReader,
         history: HistoryReader,
         source_id: str,
+        agent_questions: AgentQuestionDao | None = None,
     ) -> None:
+        self._agent_questions = agent_questions
         self._consultants = consultants
         self._threads = threads
         self._questions = questions
@@ -77,6 +86,8 @@ class ContextService:
         snap = await self._reader.thread(root_id)
         agents = await self._reader.descendants(root_id, MAX_AGENTS)
         pending = len(self._questions.list_open(self._source, root_id, MAX_QUESTIONS))
+        if self._agent_questions is not None:
+            pending += len(self._agent_questions.list_open(self._source, root_id, MAX_QUESTIONS))
         name = (snap.name if snap else None) or (local.display_name if local else None)
         return ThreadOverview(
             source_id=self._source, root_id=root_id, thread_id=root_id,
@@ -152,16 +163,22 @@ class ContextService:
             raise ToolError("not_found", "no such event in this thread")
         return _fit(self._present(event), budget)
 
-    async def questions(self, root_id: str, source_id: str | None = None) -> QuestionList:
+    async def questions(self, root_id: str, source_id: str | None = None, number: Any = None) -> QuestionList:
+        """Questions of both kinds (pending first, then the most recent closed ones), optionally one Q number."""
         self._root(root_id, source_id)
-        rows = self._questions.list_open(self._source, root_id, MAX_QUESTIONS)
-        return QuestionList(self._source, root_id, tuple(
-            QuestionInfo(
-                q.question_id, q.origin_thread_id, q.is_secret, q.lifecycle.value, q.created_at,
-                () if q.is_secret else q.items,  # a secret question never leaves, whatever was stored
-            )
-            for q in rows
-        ))
+        wanted = None
+        if number is not None:
+            wanted = parse_number(number)
+            if wanted is None:
+                raise ToolError("invalid_arguments", "number must look like Q3 or 3")
+        caps = OVERVIEW if wanted is None else DETAIL
+        found = [_request_info(q, caps) for q in
+                 self._questions.list_for_root(self._source, root_id, MAX_QUESTIONS, wanted)]
+        if self._agent_questions is not None:
+            found += [_agent_info(q, caps) for q in
+                      self._agent_questions.list_for_root(self._source, root_id, MAX_QUESTIONS, wanted)]
+        found.sort(key=lambda i: (i.state != "pending", _number(i) if i.state == "pending" else -_number(i)))
+        return QuestionList(self._source, root_id, tuple(found[:MAX_QUESTIONS]), truncated=len(found) > MAX_QUESTIONS)
 
     # --- scope -----------------------------------------------------------------------
 
@@ -216,3 +233,40 @@ def _fit(ev: HistoryEvent, budget: int) -> HistoryEvent:
 
 def _clean(value: str | None) -> str | None:
     return " ".join(value.split())[:200] if value else None
+
+
+def _number(info: QuestionInfo) -> int:
+    return int(info.number[1:])
+
+
+def _cut(text: str, limit: int) -> tuple[str, bool]:
+    clean = " ".join(text.split())
+    return (clean, False) if len(clean) <= limit else (clean[: limit - 1] + "…", True)
+
+
+def _item_info(title: str, options: list[str], caps: tuple[int, int, int]) -> QuestionItemInfo:
+    title_chars, option_chars, option_max = caps
+    shown_title, cut = _cut(title, title_chars)
+    shown = [_cut(o, option_chars) for o in options[:option_max]]
+    return QuestionItemInfo(
+        shown_title, tuple(o for o, _ in shown), text_truncated=cut or len(options) > option_max or any(c for _, c in shown)
+    )
+
+
+def _request_info(q: Question, caps: tuple[int, int, int]) -> QuestionInfo:
+    state = ("pending" if q.lifecycle in OPEN_LIFECYCLES else
+             "answered" if q.lifecycle is QuestionLifecycle.RESOLVED_OBSERVED else "stale")
+    items: tuple[QuestionItemInfo, ...] = ()
+    if not q.is_secret:  # a secret question never leaves, whatever was stored
+        items = tuple(
+            _item_info(f"{i.header}: {i.text}" if i.header else i.text,
+                       [f"{o.label} — {o.description}" if o.description else o.label for o in i.options], caps)
+            for i in q.items[:MAX_QUESTION_ITEMS]
+        )
+    return QuestionInfo(q.question_id, question_label(q.display_no), "request_user_input", state,
+                        q.origin_thread_id, q.is_secret, q.created_at, items)
+
+
+def _agent_info(q: AgentQuestion, caps: tuple[int, int, int]) -> QuestionInfo:
+    return QuestionInfo(q.agent_question_id, question_label(q.display_no), "agent_message", q.state.value,
+                        q.thread_id, False, q.created_at, (_item_info(q.title, list(q.options), caps),))

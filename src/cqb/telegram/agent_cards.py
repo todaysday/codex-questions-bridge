@@ -1,26 +1,28 @@
-"""Cards of agent-message questions: one message per agentMessage in the consultant topic of its root,
-edited as the watcher sees it answered or stale. A root without an open consultant gets no card."""
+"""Cards of agent-message questions: ONE card per question (a message with several questions gives several cards),
+posted in the consultant topic of its root and edited as the watcher sees it answered or stale. A root without an
+open consultant gets no card."""
 
 import asyncio
 import logging
-import re
+import time
 from collections.abc import Callable
 
-from cqb.domain.enums import ConsultantState
+from cqb.domain.labels import question_label
 from cqb.domain.models import AgentQuestion
 from cqb.services.agent_questions import ANSWER_MAX_CHARS, AgentQuestionService
 from cqb.services.questions import QuestionError
 from cqb.services.registry import RegistryQuery
+from cqb.domain.enums import ConsultantState
 from cqb.telegram.agent_card_view import render_agent_card
-from cqb.telegram.api import BadRequest, BotApi
+from cqb.telegram.api import BotApi
+from cqb.telegram.armed import ArmedAnswers
+from cqb.telegram.card_post import CardPoster, card_parts
 from cqb.telegram.cards import MAX_DIRTY, RETRY_SECONDS
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import Reply
 from cqb.telegram.registry_view import thread_name
 
 log = logging.getLogger(__name__)
-
-_NUMBERED = re.compile(r"\s*(\d{1,2})\s*[:.)]\s*(.+)", re.DOTALL)
 
 
 class AgentQuestionCards:
@@ -32,16 +34,17 @@ class AgentQuestionCards:
         registry: RegistryQuery,
         chat_id: int,
         on_change: Callable[[], None],
+        clock: Callable[[], float] = time.time,
     ) -> None:
-        self._api = api
+        self._poster = CardPoster(api, chat_id)
         self._keys = keys
         self._questions = questions
         self._registry = registry
-        self._chat_id = chat_id
         self._on_change = on_change
         self._dirty: dict[str, None] = {}
         self._wake = asyncio.Event()
         self._lock = asyncio.Lock()
+        self._armed = ArmedAnswers(clock)
 
     # Listeners for AgentQuestionService.subscribe: they only mark the card dirty.
     async def on_question(self, q: AgentQuestion) -> None:
@@ -49,6 +52,7 @@ class AgentQuestionCards:
         self._on_change()  # the registry row shows or loses its ❓
 
     async def on_closed(self, q: AgentQuestion) -> None:
+        self._armed.disarm(q.agent_question_id)
         self.mark(q.agent_question_id)
         self._on_change()
 
@@ -76,6 +80,8 @@ class AgentQuestionCards:
             await self.process()
 
     async def process(self) -> None:
+        for agent_question_id in self._armed.drop_expired():  # the hint on the card must not outlive the state
+            self.mark(agent_question_id)
         for q in self._questions.postable_without_card():
             self.mark(q.agent_question_id)
         while self._dirty:
@@ -92,47 +98,38 @@ class AgentQuestionCards:
             if q is None:
                 return
             row = self._registry.describe(q.root_thread_id)
-            view = render_agent_card(q, thread_name(row) if row else q.root_thread_id[:8])
-            keyboard = self._keys.bind(view.keyboard)
-            if q.card_message_id is not None:
-                try:
-                    await self._api.edit_message_text(self._chat_id, q.card_message_id, view.text, keyboard)
-                    return
-                except BadRequest as exc:
-                    if exc.not_modified:
-                        return
-                    if not exc.gone:
-                        raise
-            if not q.is_open:
-                return  # nothing actionable to post for a question that already ended
-            if row is None or row.consultant_state is not ConsultantState.OPEN or not row.topic_id:
-                return  # no open consultant: the registry row shows ❓, nothing is posted
-            sent = await self._api.send_message(self._chat_id, view.text, thread_id=row.topic_id, keyboard=keyboard)
-            self._questions.bind_card_message(agent_question_id, sent.message_id)
+            view = render_agent_card(
+                q, thread_name(row) if row else q.root_thread_id[:8], self._armed.is_armed(agent_question_id))
+            ids = [q.card_message_id, *q.card_extra_ids] if q.card_message_id is not None else []
+            topic = None  # where a new card may be posted: only for an open question of an open consultant
+            if q.is_open and row is not None and row.consultant_state is ConsultantState.OPEN:
+                topic = row.topic_id or None
+            if not ids and topic is None:
+                return  # no open consultant (the registry row shows ❓) or nothing actionable left to post
+            await self._poster.sync(
+                ids, card_parts(view.text, question_label(q.display_no)), self._keys.bind(view.keyboard), topic,
+                lambda new_ids: self._questions.bind_card_messages(agent_question_id, new_ids),
+            )
 
     # Button handlers
 
-    async def stage(self, agent_question_id: str, question_index: int, option_index: int) -> Reply:
-        return await self._staged(
-            agent_question_id, lambda: self._questions.choose(agent_question_id, question_index, option_index)
-        )
+    async def stage(self, agent_question_id: str, option_index: int) -> Reply:
+        return await self._staged(agent_question_id, lambda: self._questions.choose(agent_question_id, option_index))
 
     async def stage_text(self, message_reply_to: int, text: str) -> Reply | None:
-        """Free text replied to a card is the `Другое` answer. With several questions it starts with `N:`."""
+        """A reply to a card is an answer only while the card is armed by `✍️ Ответить текстом`.
+
+        None means "not an answer": the router then treats the reply as a discussion with the consultant."""
         q = self._questions.by_card_message(message_reply_to)
-        if q is None:
-            return None  # not an agent card: ordinary consultant chat
+        if q is None or not self._armed.is_armed(q.agent_question_id):
+            return None
         if not q.is_open or q.sent_at is not None:
-            return Reply("Этот вопрос уже закрыт или ответ отправлен")
-        index, body = 0, text
-        if len(q.items) > 1:
-            m = _NUMBERED.fullmatch(text)
-            if m is None or not 1 <= int(m.group(1)) <= len(q.items):
-                return Reply("Укажите номер вопроса: «2: ваш текст»")
-            index, body = int(m.group(1)) - 1, m.group(2)
-        if len(body.strip()) > ANSWER_MAX_CHARS:
-            return Reply(f"Слишком длинный ответ (максимум {ANSWER_MAX_CHARS} символов)")
-        return await self._staged(q.agent_question_id, lambda: self._questions.answer_text(q.agent_question_id, index, body))
+            self._armed.disarm(q.agent_question_id)
+            self.mark(q.agent_question_id)
+            return None
+        if len(text.strip()) > ANSWER_MAX_CHARS:
+            return Reply(f"Слишком длинный ответ (максимум {ANSWER_MAX_CHARS} символов); карточка ждёт ответ")
+        return await self._staged(q.agent_question_id, lambda: self._questions.answer_text(q.agent_question_id, text))
 
     async def confirm(self, agent_question_id: str) -> Reply:
         try:
@@ -151,16 +148,27 @@ class AgentQuestionCards:
         await self.refresh_card(agent_question_id)
         return Reply("Отменено")
 
-    def other_hint(self, agent_question_id: str) -> Reply:
+    async def arm(self, agent_question_id: str) -> Reply:
+        """`✍️ Ответить текстом`: the next reply to this card is the answer (for ten minutes)."""
         q = self._questions.get(agent_question_id)
-        multi = q is not None and len(q.items) > 1
-        return Reply("Ответьте на сообщение карточки: «N: ваш текст»" if multi
-                     else "Ответьте на сообщение карточки своим текстом", alert=True)
+        if q is None or not q.is_open or not q.answerable or q.sent_at is not None or q.staged is not None:
+            return Reply("Ответ текстом недоступен", alert=True)
+        for key in self._armed.arm(agent_question_id):
+            self.mark(key)
+        await self.refresh_card(agent_question_id)
+        return Reply("Ответьте на это сообщение: текст уйдёт в Codex")
+
+    async def unarm(self, agent_question_id: str) -> Reply:
+        self._armed.disarm(agent_question_id)
+        await self.refresh_card(agent_question_id)
+        return Reply("Отменено")
 
     async def _staged(self, agent_question_id: str, action: Callable[[], AgentQuestion]) -> Reply:
+        self._armed.disarm(agent_question_id)
         try:
-            q = action()
+            action()
         except QuestionError as exc:
+            await self.refresh_card(agent_question_id)
             return Reply(str(exc), alert=True)
         await self.refresh_card(agent_question_id)
-        return Reply("Подтвердите отправку" if len(q.staged) == len(q.items) else "Принято")
+        return Reply("Подтвердите отправку")

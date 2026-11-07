@@ -130,25 +130,30 @@ def q(**kw):
                             (QuestionOption("Existing table", "reuse"), QuestionOption("Separate table"))),),
         is_secret=False, is_blocking=True, lifecycle=L.PENDING_CONFIRMED,
         verification_source=VerificationSource.HOST_RPC, staged=None, delivered_to_codex=False,
-        created_at=NOW, updated_at=NOW,
+        created_at=NOW, updated_at=NOW, display_no=3,
     )
     return Question(**{**base, **kw})
 
 
 def test_card_pending_has_option_buttons():
     v = render_card(q(), "FoxProfile")
-    assert v.header == f"❓ FoxProfile · {time.strftime('%H:%M', time.gmtime(NOW))}"
-    assert "request_user_input · q_1 · pending_confirmed" in v.text
-    assert "Where store profile settings?" in v.text and "A. Existing table — reuse" in v.text
+    assert v.header == f"❓ Q3 · FoxProfile · {time.strftime('%H:%M', time.gmtime(NOW))}"
+    assert "request_user_input" not in v.text and "q_1" not in v.text and "pending" not in v.text  # no internal noise
+    assert "Storage: Where store profile settings?" in v.text and "A. Existing table — reuse" in v.text
+    assert "B. Separate table" in v.text  # the option text is in the body, in full
     texts = [b.text for b in buttons(v)]
-    assert texts == ["A. Existing table", "B. Separate table"]  # the card lives in the consultant topic
+    assert texts == ["A", "B"]  # buttons carry only the short label
+    assert "обсужда" in v.text  # a plain reply is a discussion, not an answer
     assert buttons(v)[0].action == ActionSpec("opt", "thread-0001", "q_1:0")
 
 
 def test_card_other_offers_reply_hint():
     v = render_card(q(items=(QuestionItem("a", "", "Name?", True, ()),)), "T")
-    assert [b.text for b in buttons(v)] == ["✍️ Другое"]
-    assert "ответьте на это сообщение" in v.text.lower()
+    assert [b.text for b in buttons(v)] == ["✍️ Ответить текстом"]
+    assert "следующий ответ" not in v.text and "консультанту" in v.text
+    armed = render_card(q(items=(QuestionItem("a", "", "Name?", True, ()),)), "T", armed=True)
+    assert [b.text for b in buttons(armed)] == ["↩️ Отмена"] and buttons(armed)[0].action.action == "unarm"
+    assert "следующий ответ на это сообщение уйдёт в Codex" in armed.text
 
 
 def test_card_secret_has_no_text_and_no_buttons():
@@ -194,8 +199,18 @@ def test_card_multiple_items_is_read_only():
 
 
 def test_card_limits_with_huge_question():
-    opts = tuple(QuestionOption("L" * 500, "D" * 2000) for _ in range(40))
-    huge = q(items=(QuestionItem("a", "H" * 900, "T" * 20000, True, opts),))
+    opts = tuple(QuestionOption("L" * 500, "D" * 2000) for _ in range(26))
+    huge = q(items=(QuestionItem("a", "H" * 900, "T" * 7000, True, opts),))
     v = render_card(huge, "N" * 900)
-    assert len(v.text) <= TEXT_LIMIT and all(len(b.text) <= 64 for b in buttons(v))
-    assert len([b for b in buttons(v) if b.action.action == "opt" if b.action]) == 10
+    assert "…" not in v.body and "T" * 7000 in v.text and v.text.count("L" * 500) == 26 and v.text.count("D" * 2000) == 26
+    assert all(len(b.text) <= 2 for b in buttons(v) if b.action.action == "opt")  # buttons never carry option text
+    assert len([b for b in buttons(v) if b.action.action == "opt"]) == 26 and len(v.header) < 120  # a long name is clipped
+
+
+def test_card_header_has_a_state_tag_only_when_not_pending():
+    assert render_card(q(), "T").header.count("·") == 2  # ❓ Q3 · T · HH:MM
+    done = render_card(q(lifecycle=L.RESOLVED_OBSERVED, delivered_to_codex=True), "T").header
+    elsewhere = render_card(q(lifecycle=L.RESOLVED_OBSERVED), "T").header
+    stale = render_card(q(lifecycle=L.EXPIRED_OR_STALE), "T").header
+    assert done.endswith("· ✅ отвечено") and elsewhere.endswith("· отвечено в другом месте") and stale.endswith("· устарел")
+    assert render_card(q(lifecycle=L.DECISION_STAGED, staged={"a": ("A",)}), "T").header.count("·") == 2

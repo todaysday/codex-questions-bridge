@@ -27,6 +27,17 @@ def question(qid="q1", **kw):
     return Question(**{**base, **kw})
 
 
+def old_question(c, qid, root="t1", created=1):
+    """A row as schemas before the Q numbers stored it (the DAO now needs the latest schema)."""
+    c.execute(
+        "INSERT INTO questions(question_id, source_id, root_thread_id, origin_thread_id, turn_id, tool_use_id, "
+        "request_id, questions_json, lifecycle, verification_source, created_at, updated_at) "
+        "VALUES (?,?,?,?,?,?,?,?,?,?,?,?)",
+        (qid, "s1", root, root, "u1", qid, "7", '[{"id":"a","header":"H","text":"Pick?","is_other":false,"options":[]}]',
+         "pending_confirmed", "host_rpc", created, created),
+    )
+
+
 def test_pragmas_and_migration_idempotent(tmp_path):
     conn = db.connect(str(tmp_path / "p.db"))
     assert conn.execute("PRAGMA journal_mode").fetchone()[0] == "wal"
@@ -124,7 +135,7 @@ def test_migration_2_upgrades_a_v1_database_in_place(tmp_path):
     c = db.connect(str(tmp_path / "v1.db"))
     c.executescript(f"BEGIN;\n{db.MIGRATIONS[0]}\nPRAGMA user_version = 1;\nCOMMIT;")
     c.execute("INSERT INTO codex_sources VALUES ('s1','S1','app_server',1)")
-    QuestionDao(c).insert_if_new(question())
+    old_question(c, "q1")
     assert db.migrate(c) == len(db.MIGRATIONS) >= 2
     assert QuestionDao(c).get("q1").card_message_id is None  # existing rows survive
     tables = {r[0] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
@@ -137,7 +148,7 @@ def test_migration_3_renames_the_card_column_and_adds_run_state(tmp_path):
         c.executescript(f"BEGIN;\n{db.MIGRATIONS[version]}\nPRAGMA user_version = {version + 1};\nCOMMIT;")
     c.execute("INSERT INTO codex_sources VALUES ('s1','S1','app_server',1)")
     c.execute("INSERT INTO codex_threads VALUES ('s1','t1','t1',NULL,'cli','n','/w',100,'active',1,1)")
-    QuestionDao(c).insert_if_new(question("a"))
+    old_question(c, "a")
     c.execute("UPDATE questions SET inbox_message_id=77 WHERE question_id='a'")  # a card posted before the upgrade
     assert db.migrate(c) == len(db.MIGRATIONS) >= 3
     assert "inbox_message_id" not in {r[1] for r in c.execute("PRAGMA table_info(questions)")}
@@ -211,8 +222,10 @@ def test_question_card_helpers(conn):
     assert dao.list_postable("s1") == []  # still creating
     consultants.open(one.consultant_id, 5, 2)
     assert {q.question_id for q in dao.list_postable("s1")} == {"a", "b"}  # only r1 has an open topic
-    dao.set_card_message("a", 77)
+    dao.set_card_messages("a", [77, 78, 79])  # a long card: the first message and two continuations
     assert dao.find_by_card_message(77).question_id == "a" and dao.get("a").card_message_id == 77
+    assert dao.find_by_card_message(79).question_id == "a" and dao.get("a").card_extra_ids == (78, 79)
+    assert dao.find_by_card_message(7) is None and dao.find_by_card_message(780) is None
     assert {q.question_id for q in dao.list_postable("s1")} == {"b"}
     consultants.set_state(one.consultant_id, ConsultantState.ARCHIVED, 3)
     assert dao.list_postable("s1") == []  # closed consultants get no new cards
@@ -220,3 +233,38 @@ def test_question_card_helpers(conn):
     dao.unstage("a", QuestionLifecycle.PENDING_CONFIRMED, 6)
     got = dao.get("a")
     assert got.staged is None and got.lifecycle is QuestionLifecycle.PENDING_CONFIRMED
+
+
+def test_migration_5_numbers_existing_questions_per_root_across_both_kinds(tmp_path):
+    c = db.connect(str(tmp_path / "v4.db"))
+    c.executescript("BEGIN;\n" + "\n".join(db.MIGRATIONS[:4]) + "\nPRAGMA user_version = 4;\nCOMMIT;")
+    c.execute("INSERT INTO codex_sources VALUES ('s1','S1','app_server',1)")
+    old_question(c, "q_b", "r1", created=20)
+    old_question(c, "q_a", "r1", created=10)
+    old_question(c, "q_other", "r2", created=5)
+    c.execute(
+        "INSERT INTO agent_questions(agent_question_id, source_id, thread_id, root_thread_id, turn_id, item_id, "
+        "items_json, state, created_at, updated_at) VALUES ('a_1','s1','r1','r1','u','i1',?,'pending',15,15)",
+        ('[{"title":"t","options":[]}]',))
+    assert db.migrate(c) == len(db.MIGRATIONS) >= 5
+    numbers = dict(c.execute("SELECT question_id, display_no FROM questions"))
+    assert numbers == {"q_a": 1, "q_b": 3, "q_other": 1}  # by creation time, one counter for both kinds
+    assert c.execute("SELECT display_no FROM agent_questions").fetchone()[0] == 2
+    counters = dict(c.execute("SELECT root_thread_id, last_no FROM question_counters"))
+    assert counters == {"r1": 3, "r2": 1}
+    assert "_numbered" not in {r[0] for r in c.execute("SELECT name FROM sqlite_temp_master")}  # no leftovers
+    QuestionDao(c).insert_if_new(question("q_new", root_thread_id="r1", origin_thread_id="r1"))
+    assert QuestionDao(c).get("q_new").display_no == 4  # the counter continues, never reuses
+    assert db.migrate(c) == len(db.MIGRATIONS)  # idempotent
+
+
+def test_numbers_are_per_root_increasing_never_reused_and_not_burned_by_replays(conn):
+    dao = QuestionDao(conn)
+    assert dao.insert_if_new(question("a", root_thread_id="r1")) and dao.insert_if_new(question("b", root_thread_id="r1"))
+    assert dao.insert_if_new(question("c", root_thread_id="r2"))
+    assert not dao.insert_if_new(question("a", root_thread_id="r1"))  # a replay keeps its number, burns none
+    dao.set_lifecycle("b", QuestionLifecycle.RESOLVED_OBSERVED, 5)
+    assert dao.insert_if_new(question("d", root_thread_id="r1"))
+    assert [dao.get(x).display_no for x in "abcd"] == [1, 2, 1, 3]  # the resolved number 2 is not handed out again
+    assert [q.question_id for q in dao.list_for_root("s1", "r1", 10)] == ["d", "b", "a"]
+    assert [q.question_id for q in dao.list_for_root("s1", "r1", 10, number=2)] == ["b"]

@@ -1,6 +1,9 @@
 import json
 import sqlite3
 
+from cqb.dao.cards import CARD_MATCH, extra_ids_from_text, extra_ids_to_text
+from cqb.dao.db import transaction
+from cqb.dao.numbering import next_number
 from cqb.domain.enums import OPEN_LIFECYCLES, QuestionLifecycle, VerificationSource
 from cqb.domain.models import Question, QuestionItem, QuestionOption
 
@@ -12,7 +15,18 @@ class QuestionDao:
         self._conn = conn
 
     def insert_if_new(self, q: Question) -> bool:
-        cur = self._conn.execute(
+        """Stores a new question and gives it the next `Q` number of its root; False for a replay."""
+        with transaction(self._conn):
+            cur = self._insert(q)
+            if cur.rowcount > 0:
+                self._conn.execute(
+                    "UPDATE questions SET display_no=? WHERE question_id=?",
+                    (next_number(self._conn, q.source_id, q.root_thread_id), q.question_id),
+                )
+        return cur.rowcount > 0
+
+    def _insert(self, q: Question) -> sqlite3.Cursor:
+        return self._conn.execute(
             "INSERT INTO questions(question_id, source_id, root_thread_id, origin_thread_id, "
             "turn_id, tool_use_id, request_id, questions_json, is_secret, is_blocking, "
             "lifecycle, verification_source, staged_json, delivered_to_codex, created_at, "
@@ -25,7 +39,17 @@ class QuestionDao:
                 _staged_to_json(q.staged), int(q.delivered_to_codex), q.created_at, q.updated_at,
             ),
         )
-        return cur.rowcount > 0
+
+    def list_for_root(
+        self, source_id: str, root_thread_id: str, limit: int, number: int | None = None
+    ) -> list[Question]:
+        """Open and closed questions of a root, newest number first; optionally only one number."""
+        sql = "SELECT * FROM questions WHERE source_id=? AND root_thread_id=?"
+        args: list[object] = [source_id, root_thread_id]
+        if number is not None:
+            sql += " AND display_no=?"
+            args.append(number)
+        return [_to_question(r) for r in self._conn.execute(sql + " ORDER BY display_no DESC LIMIT ?", (*args, limit))]
 
     def get(self, question_id: str) -> Question | None:
         row = self._conn.execute(
@@ -105,14 +129,16 @@ class QuestionDao:
             (lifecycle.value, now, question_id),
         )
 
-    def set_card_message(self, question_id: str, message_id: int | None) -> None:
+    def set_card_messages(self, question_id: str, ids: list[int]) -> None:
+        """The card's message ids in order; none clears the card."""
         self._conn.execute(
-            "UPDATE questions SET card_message_id=? WHERE question_id=?", (message_id, question_id)
+            "UPDATE questions SET card_message_id=?, card_extra_ids=? WHERE question_id=?",
+            (ids[0] if ids else None, extra_ids_to_text(ids[1:]), question_id),
         )
 
     def find_by_card_message(self, message_id: int) -> Question | None:
         row = self._conn.execute(
-            "SELECT * FROM questions WHERE card_message_id=?", (message_id,)
+            f"SELECT * FROM questions WHERE {CARD_MATCH}", (message_id, message_id)
         ).fetchone()
         return _to_question(row) if row else None
 
@@ -186,4 +212,6 @@ def _to_question(r: sqlite3.Row) -> Question:
         created_at=r["created_at"],
         updated_at=r["updated_at"],
         card_message_id=r["card_message_id"],
+        display_no=r["display_no"],
+        card_extra_ids=extra_ids_from_text(r["card_extra_ids"]),
     )

@@ -1,4 +1,4 @@
-"""/status in a consultant topic: one static snapshot message per request, posted when everything is ready.
+"""/status in a consultant topic: one static snapshot message (Telegram HTML) per request, posted when everything is ready.
 
 No placeholder, no edits, no auto-update: the Telegram typing indicator (refreshed every few seconds) is the
 only sign of life while the snapshot is collected, and previous snapshots stay in the topic as history.
@@ -50,9 +50,11 @@ class StatusPoster:
 
     async def _post(self, root_thread_id: str, topic_id: int) -> None:
         typing = asyncio.create_task(self._typing(topic_id), name="status-typing")
+        parse_mode = None  # only the card is HTML; the fixed notices are plain text
         try:
             try:
                 text = render_status(await self._service.snapshot(self._source, root_thread_id))
+                parse_mode = "HTML"
             except StatusUnavailable:
                 text = UNAVAILABLE
             except Exception:
@@ -61,7 +63,7 @@ class StatusPoster:
         finally:
             typing.cancel()
         try:
-            await self._api.send_message(self._chat_id, text, thread_id=topic_id)
+            await self._api.send_message(self._chat_id, text, thread_id=topic_id, parse_mode=parse_mode)
         except Exception as exc:  # the Bot API client already retried; the snapshot is lost, the next /status works
             log.warning("could not post the status snapshot to topic %d: %s", topic_id, type(exc).__name__)
 

@@ -1,11 +1,13 @@
 """Read-only status card check against the real daemon (one thread picked by thread/list).
 
 Usage: cd /tmp && sudo -n /path/.venv/bin/python /path/scripts/smoke_status.py [SOCKET] [CODEX_HOME]
-Prints states, counts, model names, percentages and item kinds only (no titles, goal text, paths or commands).
+Prints states, counts, model names, percentages and item kinds only (no titles, goal text, paths or commands),
+then the card as the Bridge would post it, without the Status Agent summary. Thread and subagent names are
+shown; the goal text and command heads are replaced by placeholders, message text is never read.
 """
 
 import asyncio
-import glob
+import dataclasses
 import sys
 
 from cqb.codex.appserver import AppServerClient
@@ -13,6 +15,17 @@ from cqb.codex.rollout_tail import read_usage
 from cqb.codex.status_reader import DaemonStatusReader
 from cqb.services.live_state import LiveState
 from cqb.services.status import StatusService
+from cqb.telegram.status_view import render_status
+
+
+def _masked(r):
+    """The report with the goal text and command heads replaced: what is safe to print from a real daemon."""
+    def activity(a):
+        item = a.item if a else None
+        return a if item is None else dataclasses.replace(a, item=dataclasses.replace(item, detail="…" if item.detail else None))
+    goal = dataclasses.replace(r.goal, objective="(текст цели скрыт)") if r.goal else None
+    agents = tuple(dataclasses.replace(a, activity=activity(a.activity)) for a in r.agents)
+    return dataclasses.replace(r, goal=goal, agents=agents, activity=activity(r.activity))
 
 
 def _now(activity) -> str:
@@ -61,6 +74,8 @@ async def main(socket_path: str, home: str) -> int:
     for a in r.agents[:3]:
         print(f"  agent state={a.state.value} model={a.model} effort={a.effort} ctx={a.context_percent} now: {_now(a.activity)}")
     print(f"limits={r.limits}")
+    print("--- card (HTML as sent; goal text and command heads masked) ---")
+    print(render_status(_masked(r)))
     return 0
 
 

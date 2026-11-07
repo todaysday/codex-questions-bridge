@@ -102,6 +102,69 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX idx_agent_question_thread ON agent_questions(source_id, thread_id, state);
     CREATE INDEX idx_agent_question_card ON agent_questions(card_message_id);
     """,
+    """
+    ALTER TABLE questions ADD COLUMN display_no INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE agent_questions ADD COLUMN display_no INTEGER NOT NULL DEFAULT 0;
+    ALTER TABLE consultants ADD COLUMN focus_no INTEGER;
+    CREATE TABLE question_counters (
+      source_id TEXT NOT NULL,
+      root_thread_id TEXT NOT NULL,
+      last_no INTEGER NOT NULL,
+      PRIMARY KEY(source_id, root_thread_id)
+    );
+    CREATE TEMP TABLE _numbered AS
+      SELECT k, id, ROW_NUMBER() OVER (PARTITION BY source_id, root_thread_id ORDER BY created_at, k, id) AS n
+      FROM (SELECT 'q' AS k, question_id AS id, source_id, root_thread_id, created_at FROM questions
+            UNION ALL
+            SELECT 'a', agent_question_id, source_id, root_thread_id, created_at FROM agent_questions);
+    UPDATE questions SET display_no=(SELECT n FROM _numbered WHERE k='q' AND id=question_id);
+    UPDATE agent_questions SET display_no=(SELECT n FROM _numbered WHERE k='a' AND id=agent_question_id);
+    INSERT INTO question_counters
+      SELECT source_id, root_thread_id, MAX(display_no) FROM
+        (SELECT source_id, root_thread_id, display_no FROM questions
+         UNION ALL SELECT source_id, root_thread_id, display_no FROM agent_questions)
+      GROUP BY source_id, root_thread_id;
+    DROP TABLE _numbered;
+    """,
+    """
+    -- One row per agent-message QUESTION (message item id + index). Rows of messages with several questions held
+    -- them in one row; they are dropped here and the next scan finds them again as separate questions.
+    DELETE FROM agent_questions WHERE json_array_length(items_json) <> 1;
+    CREATE TABLE agent_questions_v2 (
+      agent_question_id TEXT PRIMARY KEY,
+      source_id TEXT NOT NULL,
+      thread_id TEXT NOT NULL,
+      root_thread_id TEXT NOT NULL,
+      turn_id TEXT NOT NULL,
+      item_id TEXT NOT NULL,
+      item_index INTEGER NOT NULL DEFAULT 0,
+      title TEXT NOT NULL,
+      options_json TEXT NOT NULL,
+      answerable INTEGER NOT NULL DEFAULT 1,
+      state TEXT NOT NULL,
+      staged TEXT,
+      sent_at INTEGER,
+      card_message_id INTEGER,
+      card_extra_ids TEXT,
+      display_no INTEGER NOT NULL DEFAULT 0,
+      created_at INTEGER NOT NULL,
+      updated_at INTEGER NOT NULL,
+      UNIQUE(source_id, thread_id, item_id, item_index)
+    );
+    INSERT INTO agent_questions_v2(agent_question_id, source_id, thread_id, root_thread_id, turn_id, item_id,
+        item_index, title, options_json, answerable, state, staged, sent_at, card_message_id, display_no,
+        created_at, updated_at)
+      SELECT agent_question_id, source_id, thread_id, root_thread_id, turn_id, item_id, 0,
+        json_extract(items_json, '$[0].title'), json_extract(items_json, '$[0].options'), answerable, state,
+        json_extract(staged_json, '$."0"'), sent_at, card_message_id, display_no, created_at, updated_at
+      FROM agent_questions;
+    DROP TABLE agent_questions;
+    ALTER TABLE agent_questions_v2 RENAME TO agent_questions;
+    CREATE INDEX idx_agent_question_root ON agent_questions(source_id, root_thread_id, state);
+    CREATE INDEX idx_agent_question_thread ON agent_questions(source_id, thread_id, state);
+    CREATE INDEX idx_agent_question_card ON agent_questions(card_message_id);
+    ALTER TABLE questions ADD COLUMN card_extra_ids TEXT;
+    """,
 )
 
 
