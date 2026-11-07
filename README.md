@@ -134,8 +134,8 @@ root-or-descendant `thread_id`. The same listener serves the hook's `GET /intern
 Tested with PicoClaw v0.3.1 (linux x86_64). Re-check every key against any other version: the config loader rejects
 unknown fields, so `config.json` cannot carry comments.
 
-1. Install the release binary: unpack the `picoclaw` binary of the v0.3.1 release to `/opt/picoclaw/picoclaw`, create a
-   system user `picoclaw` and `/var/lib/picoclaw` (mode 0700).
+1. Install the release binary: unpack the `picoclaw` binary of the v0.3.1 release to `/opt/picoclaw/bin/picoclaw`, create a
+   system user `cqb-pico` and `/var/lib/picoclaw` (mode 0700).
 2. Copy `deploy/picoclaw/config.example.json` to `/var/lib/picoclaw/config.json` (mode 0600, owner `picoclaw`), and the
    two `ws-*` directories next to it (they hold each agent's `AGENT.md`: the tool allowlist, which is what actually
    removes `exec`/file/web tools, and the consultant prompt). Adjust paths, the port, and the hook path
@@ -144,7 +144,7 @@ unknown fields, so `config.json` cannot carry comments.
    `.security.yml` field.
 3. Tokens: copy `deploy/picoclaw/security.example.yml` to `/var/lib/picoclaw/.security.yml` (mode 0600) and fill in the pico
    channel token (the same value as `CQB_PICO_TOKEN` in `/etc/cqb/cqb.env`) and the model key. Put `CQB_MCP_TOKEN=...` and
-   `CQB_MCP_URL=http://127.0.0.1:18791` into `/etc/picoclaw/picoclaw.env` (mode 0600): the scope hook inherits the
+   `CQB_MCP_URL=http://127.0.0.1:18791` into `/etc/cqb/picoclaw.env` (root:cqb-pico, mode 0640): the scope hook inherits the
    gateway's environment and uses them to ask the Bridge which root a session may read.
 4. Model: the template points both agents at the OmniRoute combo through `model_list` (`api_base`
    `http://127.0.0.1:20129/v1`, model `Beam`, 1M context; `context_window` 1000000, summarization at 80%). Use a key
@@ -167,3 +167,36 @@ frontmatter does not parse, allowlist included).
 
 End-to-end check with the real binary (needs the git-ignored `spike/` files; loopback only, kills what it starts):
 `.venv/bin/python -m pytest -q -m e2e tests/e2e`.
+
+## Server install (what runs where)
+
+The layout actually deployed on the production host (secrets are never in this repo):
+
+| What | Where |
+| --- | --- |
+| Bridge | `cqb.service` (root), code in the venv `/opt/cqb/.venv`, config `/etc/cqb/config.toml` (0640), DB `/var/lib/cqb` |
+| Bridge secrets | `/etc/cqb/cqb.env` (root:root 0600): `CQB_TELEGRAM_TOKEN`, `CQB_PICO_TOKEN`, `CQB_MCP_TOKEN`; the unit has this one `EnvironmentFile` |
+| PicoClaw | `picoclaw-gateway.service`, user `cqb-pico` (no login shell, home `/var/lib/picoclaw` 0700), binary `/opt/picoclaw/bin/picoclaw` (root, 0755, v0.3.1) |
+| PicoClaw config | `/var/lib/picoclaw/config.json` (0600, holds the MCP bearer), `/var/lib/picoclaw/.security.yml` (0600: pico channel token, OmniRoute key), `PICOCLAW_HOME=/var/lib/picoclaw` |
+| Workspaces | `/var/lib/picoclaw/ws-main`, `ws-status` (owned by `cqb-pico`; the `AGENT.md` files inside are root-owned, 0644) |
+| Scope hook | `/opt/cqb/integrations/picoclaw_scope_hook.py` (root, python3 stdlib only), started by the gateway; its env (`CQB_MCP_URL`, `CQB_MCP_TOKEN`) comes from `/etc/cqb/picoclaw.env` (root:cqb-pico 0640) |
+| Ports | PicoClaw `127.0.0.1:18790` (pico WebSocket, `/health`), Bridge MCP `127.0.0.1:18791`; nothing else listens |
+| Model | OmniRoute combo `Beam` on the Tailscale host `etc2nd-shlink` (100.116.177.53), reached directly over the tailnet at `http://100.116.177.53:20129/v1` (no SSH tunnel) |
+
+Production secrets live only in `/etc/cqb` and `/var/lib/picoclaw`; no unit, config or env file there references
+`/srv/projects/secrets`, which is only the development source the values were copied from.
+
+OmniRoute listens on 127.0.0.1 of `etc2nd-shlink`; that one TCP port is published to the tailnet only (no Funnel) with
+`sudo tailscale serve --bg --tcp=20129 tcp://127.0.0.1:20129` on that host. Undo: `sudo tailscale serve --tcp=20129 off`
+(`tailscale serve status` shows it). The OmniRoute key is restricted to the combo `Beam`; revoke it in the OmniRoute
+dashboard to cut access.
+
+Start order: `cqb.service` first, then `picoclaw-gateway.service` (`After=cqb.service`; both enabled at boot).
+
+Update the bot: from a checkout run `sudo deploy/update.sh` (installs git HEAD into `/opt/cqb/.venv`, restarts
+`cqb.service`). Restart PicoClaw after any change to its config, the hook or an `AGENT.md`:
+`sudo systemctl restart picoclaw-gateway.service` (a dead hook is never respawned, only a restart brings it back). After a
+`cqb.service` restart nothing else is needed: the gateway reconnects on demand, and the Bridge's `/health` probe
+(`curl http://127.0.0.1:18790/health`) plus the hook heartbeat decide whether consultant topics answer.
+Logs: `journalctl -u cqb.service`, `journalctl -u picoclaw-gateway.service`. Live check without Telegram:
+`sudo bash -c 'set -a; . /etc/cqb/cqb.env; set +a; /opt/cqb/.venv/bin/python scripts/smoke_pico.py --session cqb-smoke-1 "Ответь одним словом: пинг"'`.
