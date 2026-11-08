@@ -237,3 +237,52 @@ def test_example_config_documents_project_files_switched_off():
     assert load_config(str(example)).mcp == McpConfig(18791)
     assert "project_files = false" in example.read_text()
     assert "web_search = false" in example.read_text() and not load_config(str(example)).mcp.web_search
+
+
+# --- the open-in-Codex link of the status card: [status] open_link ---------------------------
+
+TASKS = "https://chatgpt.com/codex/tasks/{thread_id}"
+
+
+def test_open_link_is_off_by_default_and_the_example_config_leaves_it_empty():
+    import pathlib
+    assert parse_config(OK).status.open_link == "" and parse_config({**OK, "status": {}}).status.open_link == ""
+    example = pathlib.Path(__file__).parent.parent / "config.example.toml"
+    assert load_config(str(example)).status.open_link == "" and "open_link" in example.read_text()
+
+
+@pytest.mark.parametrize("link", [
+    "", TASKS, "https://chatgpt.com/codex/cloud/tasks/{thread_id}", "https://chatgpt.com/open-app?thread={thread_id}&x=1",
+    "https://host.example:8443/{thread_id}", "https://h/{thread_id}#frag", "https://h/" + "a" * 160 + "{thread_id}",
+])
+def test_valid_open_link_is_kept_as_it_is(link):
+    assert parse_config({**OK, "status": {"open_link": link}}).status.open_link == link
+
+
+@pytest.mark.parametrize("link", [
+    "http://chatgpt.com/codex/tasks/{thread_id}", "HTTPS://chatgpt.com/{thread_id}", "ftp://h/{thread_id}",
+    "//h/{thread_id}", "chatgpt.com/{thread_id}", "{thread_id}", "https://", "https:///{thread_id}",
+    "https://chatgpt.com/codex/tasks/", "https://h/{thread_id}/{thread_id}", "https://h/{thread_id}{thread_id}",
+    "https://h/{thread_id", "https://h/thread_id}", "https://h/{thread_id}}", "https://h/{{thread_id}",
+    "https://h/{other}/{thread_id}", "https://h/{thread_id}?x={}", "https://h/{ thread_id }", "https://h/{THREAD_ID}",
+    "https://h/ {thread_id}", "https://h/{thread_id} ", " https://h/{thread_id}", "https://h/{thread_id}\n",
+    "https://h/a b/{thread_id}", "https://h/\t{thread_id}", "https://h/\x00{thread_id}", "https://h/é/{thread_id}",
+    "https://h/" + "a" * 200 + "{thread_id}", 5, None, True, ["https://h/{thread_id}"], {"u": TASKS},
+])
+def test_invalid_open_link_fails_fast_without_echoing_the_value(link):
+    with pytest.raises(ConfigError, match="open_link") as exc:
+        parse_config({**OK, "status": {"open_link": link}})
+    assert "{thread_id}" in str(exc.value)  # the message says what is expected
+
+
+def test_the_invalid_open_link_value_is_never_echoed():
+    with pytest.raises(ConfigError, match="open_link") as exc:
+        parse_config({**OK, "status": {"open_link": "http://secret-host.example/s3cr3t"}})
+    assert "secret" not in str(exc.value) and "s3cr3t" not in str(exc.value)
+
+
+def test_open_link_length_limit_is_200_characters():
+    at_limit = "https://h/" + "a" * (200 - len("https://h/") - len("{thread_id}")) + "{thread_id}"
+    assert len(at_limit) == 200 and parse_config({**OK, "status": {"open_link": at_limit}}).status.open_link == at_limit
+    with pytest.raises(ConfigError, match="open_link"):
+        parse_config({**OK, "status": {"open_link": at_limit + "a"}})

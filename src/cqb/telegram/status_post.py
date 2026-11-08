@@ -24,13 +24,15 @@ BUSY = "статус уже собирается"
 
 class StatusPoster:
     def __init__(
-        self, api: BotApi, service: StatusService, chat_id: int, source_id: str, *, typing_seconds: float = TYPING_SECONDS
+        self, api: BotApi, service: StatusService, chat_id: int, source_id: str, *, typing_seconds: float = TYPING_SECONDS,
+        open_link: str = "",
     ) -> None:
         self._api = api
         self._service = service
         self._chat_id = chat_id
         self._source = source_id
         self._typing_seconds = typing_seconds
+        self._open_link = open_link  # [status] open_link: the card's last line; "" = none
         self._running: dict[str, asyncio.Task[None]] = {}  # root -> its collect
 
     def request(self, root_thread_id: str, topic_id: int) -> bool:
@@ -53,7 +55,7 @@ class StatusPoster:
         parse_mode = None  # only the card is HTML; the fixed notices are plain text
         try:
             try:
-                text = render_status(await self._service.snapshot(self._source, root_thread_id))
+                text = render_status(await self._service.snapshot(self._source, root_thread_id), self._open_link)
                 parse_mode = "HTML"
             except StatusUnavailable:
                 text = UNAVAILABLE

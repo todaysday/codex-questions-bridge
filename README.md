@@ -339,7 +339,7 @@ rate limit. The `💭` line for the root and the tail of each subagent line say 
 redacted and cut at 80 characters, and message text and command output are never read. Two parts from the Status
 Agent follow (about 900 characters): `В процессе` (3-5 lines about the thread as a whole, no per-agent breakdown), then after an empty line `Дальше` (2-4 lines about what remains, only as far as
 the recent reports say so). The message is Telegram HTML, sent once when all of it is ready (typing indicator meanwhile) and
-never edited; the only absolute time is the limit reset, in UTC. A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
+never edited; the only absolute time is the limit reset, in UTC. With `[status] open_link` set, the last line is a link `🔗 Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
@@ -361,6 +361,7 @@ text Telegram cannot parse is resent as plain text. Example:
 <2-4 lines in all>
 
 📈 лимит 41% нед. · сброс 20.01 09:00 UTC
+🔗 Открыть в Codex
 ```
 
 ### Configuration (`config.toml`)
@@ -391,6 +392,7 @@ text Telegram cannot parse is resent as plain text. Example:
 | `[mcp] project_file_deny_extra` | `[]` | extra name patterns to deny (up to 100, no `/`); the built-in table is never reduced |
 | `[status] timeout_seconds` | 300 | 30..3600 |
 | `[status] slots` | 2 | 1..8, each needs a dispatch rule in PicoClaw |
+| `[status] open_link` | `""` | empty = no link. Otherwise an `https://` URL template (at most 200 printable ASCII characters, no whitespace, a host, `{thread_id}` exactly once, no other braces); the root thread id is percent-encoded into it and the card gets a last line `🔗 Открыть в Codex`. An invalid value stops the start and is never printed. Candidate: `https://chatgpt.com/codex/tasks/{thread_id}`; the exact format for threads on a remote server in the ChatGPT iOS app is unconfirmed. Telegram accepts only http(s) and `tg://` links, so `codex://` cannot be used |
 | `[questions] agent_scan_seconds` | 20 | 5..600, period of the sweep for agent-message questions (at most 25 roots per sweep) |
 
 Environment: `CQB_TELEGRAM_TOKEN` (always), `CQB_PICO_TOKEN` and `CQB_MCP_TOKEN` (with `[pico]`, must differ),

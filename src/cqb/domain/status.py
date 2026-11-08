@@ -154,3 +154,4 @@ class StatusReport:
     summary: StatusSummary | None = None  # None = the Status Agent was unavailable
     cwd: str | None = None  # the root's working directory
     compactions: int | None = None  # how many times the root's context was compacted; None = unknown
+    thread_id: str | None = None  # the root thread (the only thing that goes into the open link)

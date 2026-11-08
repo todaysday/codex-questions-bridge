@@ -164,7 +164,7 @@ def thread(tid, updated=NOW - 60, name=None, state=ArchiveState.ACTIVE, parent=N
 
 
 class Stack:
-    def __init__(self, conn, fake: FakeTelegram, token=TOKEN, narrator=None, summary_timeout=300):
+    def __init__(self, conn, fake: FakeTelegram, token=TOKEN, narrator=None, summary_timeout=300, open_link=""):
         self.conn, self.fake = conn, fake
         self.clock = Clock()
         self.state = BotStateDao(conn)
@@ -178,7 +178,7 @@ class Stack:
         )
         self.status_service = StatusService(
             self.status_source, self.live, lambda path: None, "s1", narrator, self.clock, summary_timeout=summary_timeout)
-        self.status_cards = StatusPoster(self.api, self.status_service, CHAT_ID, "s1", typing_seconds=0.01)
+        self.status_cards = StatusPoster(self.api, self.status_service, CHAT_ID, "s1", typing_seconds=0.01, open_link=open_link)
         self.inventory = Recorder()
         self.consultant_dao = ConsultantDao(conn)
         self.question_dao = QuestionDao(conn)

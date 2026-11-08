@@ -64,6 +64,7 @@ class StatusConfig:
 
     timeout_seconds: int = 300  # whole collect, Status Agent summary included; then the card goes out without it
     slots: int = 2  # Status Agent sessions cqb-status-1..N (needs a dispatch rule each, see deploy/picoclaw)
+    open_link: str = ""  # https URL template with `{thread_id}`: the card's last line opens the thread; "" = no link
 
 
 @dataclass(frozen=True, slots=True)
@@ -223,11 +224,34 @@ def _mcp(raw: Any) -> McpConfig:
 
 
 def _status(raw: Any) -> StatusConfig:
-    sec = _section({"status": raw}, "status", {"timeout_seconds", "slots"})
+    sec = _section({"status": raw}, "status", {"timeout_seconds", "slots", "open_link"})
     return StatusConfig(
         timeout_seconds=_int(sec, "status", "timeout_seconds", 300, 30, 3600),
         slots=_int(sec, "status", "slots", 2, 1, 8),
+        open_link=_open_link(sec.get("open_link", "")),
     )
+
+
+OPEN_LINK_PLACEHOLDER = "{thread_id}"
+OPEN_LINK_MAX = 200
+
+
+def _open_link(v: Any) -> str:
+    """Empty (no link) or `https://host/...{thread_id}...`: printable ASCII without spaces, the placeholder exactly
+    once and no other braces. The value is operator input: never echoed in the error."""
+    if v == "":
+        return ""
+    ok = (
+        isinstance(v, str) and len(v) <= OPEN_LINK_MAX and re.fullmatch(r"[\x21-\x7e]+", v) is not None
+        and v.startswith("https://") and v.count(OPEN_LINK_PLACEHOLDER) == 1
+        and not re.search(r"[{}]", v.replace(OPEN_LINK_PLACEHOLDER, ""))
+        and bool(urlsplit(v.replace(OPEN_LINK_PLACEHOLDER, "x")).hostname)
+    )
+    if not ok:
+        raise ConfigError(
+            f"[status] open_link must be empty or an https:// URL of at most {OPEN_LINK_MAX} printable characters "
+            f"without spaces that contains {OPEN_LINK_PLACEHOLDER} exactly once and no other braces")
+    return v
 
 
 def _questions(raw: Any) -> QuestionsConfig:

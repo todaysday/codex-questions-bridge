@@ -259,7 +259,7 @@ def test_card_is_sent_as_html_with_escaped_names_and_notices_stay_plain(conn):
 def test_a_card_telegram_cannot_parse_is_resent_as_plain_text_never_lost(conn, monkeypatch):
     async def main():
         import cqb.telegram.status_post as post
-        monkeypatch.setattr(post, "render_status", lambda r: "🟢 Fox &amp; Co\n📝 <b>В процессе:</b> шаг <i>1\n📈 лимит —")  # broken
+        monkeypatch.setattr(post, "render_status", lambda r, link="": "🟢 Fox &amp; Co\n📝 <b>В процессе:</b> шаг <i>1\n📈 лимит —")  # broken
         async with make_stack(conn, thread("r1", name="Fox"), narrator=Says()) as st:
             st.status_source.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
             topic = await consultant_topic(st)
@@ -285,4 +285,36 @@ def test_a_server_side_parse_error_also_falls_back_to_plain_text(conn):
             [(_, card)] = cards(st, topic)
             assert card["parse_mode"] is None and "<b>" not in card["text"] and card["text"].startswith("🟢 Fox\n")
             assert " ctx —\n" in card["text"] and "📝 В процессе: Корень правит тесты." in card["text"]
+    run(main())
+
+
+def test_open_link_line_is_the_last_line_of_the_posted_card_and_telegram_accepts_the_html(conn):
+    async def main():
+        link = "https://chatgpt.com/codex/tasks/{thread_id}?a=1&b=2"
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=Says(), open_link=link) as st:
+            st.status_source.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5, name="Fox")
+            topic = await consultant_topic(st)
+            st.fake.push_message("/status", topic)
+            await st.pump()
+            await st.status_done()
+            [(mid, card)] = cards(st, topic)
+            lines = card["text"].splitlines()
+            assert card["parse_mode"] == "HTML"  # the fake rejects bad HTML like Telegram: it was accepted as it is
+            assert lines[-1] == '🔗 <a href="https://chatgpt.com/codex/tasks/r1?a=1&amp;b=2">Открыть в Codex</a>'
+            assert lines[-2].startswith("📈 лимит") and card["text"].count("🔗") == 1
+            # not in the registry message and not in the opening message of the topic
+            assert not any("🔗" in m["text"] or "chatgpt.com" in m["text"] for i, m in st.fake.messages.items() if i != mid)
+    run(main())
+
+
+def test_no_link_line_by_default(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=Says()) as st:
+            st.status_source.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5, name="Fox")
+            topic = await consultant_topic(st)
+            st.fake.push_message("/status", topic)
+            await st.pump()
+            await st.status_done()
+            [(mid, card)] = cards(st, topic)
+            assert "🔗" not in card["text"] and "<a " not in card["text"] and card["text"].splitlines()[-1].startswith("📈")
     run(main())

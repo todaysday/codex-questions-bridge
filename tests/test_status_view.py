@@ -427,3 +427,72 @@ def test_the_folder_survives_every_shrink_step():
 def test_the_shrunk_card_keeps_the_summary_and_the_footer():
     text = valid(render_status(huge()))
     assert "📝 <b>В процессе:</b>" in text and "➡️ <b>Дальше:</b>" in text and text.endswith(" UTC")
+
+
+# --- the open-in-Codex link: the very last line, under the footer --------------------------------------------
+
+LINK = "https://chatgpt.com/codex/tasks/{thread_id}"
+ANCHOR = '🔗 <a href="https://chatgpt.com/codex/tasks/019a-77ee-r1">Открыть в Codex</a>'
+
+
+def test_no_link_line_without_a_configured_template_or_a_thread_id():
+    assert "🔗" not in render_status(report(thread_id="r1")) and "<a" not in render_status(report(thread_id="r1"), "")
+    assert "🔗" not in render_status(report(thread_id=None), LINK) and "🔗" not in render_status(report(thread_id=""), LINK)
+
+
+def test_the_link_is_one_fixed_text_anchor_on_the_last_line_right_under_the_footer():
+    text = valid(render_status(report(thread_id="019a-77ee-r1"), LINK))
+    lines = text.splitlines()
+    assert lines[-1] == ANCHOR and lines[-2].startswith("📈 лимит") and text.count("🔗") == 1  # footer, then the link
+    assert text.removesuffix("\n" + ANCHOR) == render_status(report(thread_id="019a-77ee-r1"))  # nothing else changed
+    assert re.findall(r"<[^>]+>", lines[-1]) == ['<a href="https://chatgpt.com/codex/tasks/019a-77ee-r1">', "</a>"]
+    other = render_status(report(thread_id="r9"), "https://example.org/open?thread={thread_id}&source=cqb").splitlines()[-1]
+    assert other == '🔗 <a href="https://example.org/open?thread=r9&amp;source=cqb">Открыть в Codex</a>'
+
+
+def test_only_the_root_id_goes_into_the_url_and_it_is_encoded_and_the_href_is_escaped():
+    r = report(thread_id='a b/"<&>\'x', title="<b>Title</b>", cwd="/w/secret-dir", model="secret-model")
+    last = render_status(r, 'https://h/p?q="{thread_id}"&z=1').splitlines()[-1]
+    assert last == '🔗 <a href="https://h/p?q=&quot;a%20b%2F%22%3C%26%3E%27x&quot;&amp;z=1">Открыть в Codex</a>'
+    for leaked in ("secret", "Title", "Fox"):
+        assert leaked not in last
+    assert "{thread_id}" not in last and "<" not in re.sub(r"</?a[^>]*>", "", last)
+    valid(render_status(r, 'https://h/p?q="{thread_id}"&z=1'))
+
+
+def test_the_link_is_the_last_thing_the_shrink_gives_up_and_its_length_is_budgeted():
+    r = dataclasses.replace(huge(), thread_id="r1")
+    link = "https://h/" + "&" * 150 + "{thread_id}"  # escapes to 5 characters each
+    plans = view.PLANS
+    assert all(p.link for p in plans[:-1]) and not plans[-1].link  # only the very last plan drops it
+    assert plans[-2].agent_lines == 0 and plans[-2].goal is False and (plans[-2].progress_max, plans[-2].next_max) == (150, 100)
+    for i, plan in enumerate(plans[:-1]):
+        assert view._card(r, plan, link).splitlines()[-1].startswith('🔗 <a href="https://h/&amp;')
+        assert view._card(r, plan, link).endswith("</a>")
+    assert "🔗" not in view._card(r, plans[-1], link)
+    text = valid(render_status(r, link))
+    assert len(text) <= TEXT_LIMIT and text.splitlines()[-1].endswith("</a>") and text.splitlines()[-2].startswith("📈")
+    assert len(render_status(r, link)) > len(render_status(r)) - 1  # the link took part in the size
+
+
+def test_the_link_makes_the_card_shrink_further_and_a_card_that_fits_with_it_keeps_everything(monkeypatch):
+    r = dataclasses.replace(with_agents([agent(f"Agent {i}", cache_permille=874) for i in range(6)],
+                                        summary=StatusSummary("в" * 600, "д" * 300)), thread_id="r1")
+    plain, linked = view._card(r, view.PLANS[0]), view._card(r, view.PLANS[0], LINK)
+    assert len(linked) > len(plain)
+    monkeypatch.setattr(view, "TEXT_LIMIT", len(plain))  # fits without the link only: the link forces one more step
+    with_link = render_status(r, LINK)
+    assert len(with_link) <= len(plain) and with_link.endswith("</a>") and with_link != linked
+    assert render_status(r) == plain  # without the link nothing shrinks
+    monkeypatch.setattr(view, "TEXT_LIMIT", len(linked))
+    assert render_status(r, LINK) == linked  # with room for the link nothing is dropped
+
+
+def test_the_worst_escaped_card_with_the_longest_link_still_fits():
+    for fill in ("'", '"', "<", "&"):
+        r = dataclasses.replace(huge(), thread_id=fill * 100, title=fill * 400, cwd="/w/" + fill * 400,
+                                summary=StatusSummary(fill * 5000, fill * 5000))
+        link = "https://h/" + fill.replace("<", "x") * 100 + "{thread_id}"  # 200 characters in all
+        text = render_status(r, link)
+        assert len(text) <= TEXT_LIMIT, fill
+        check_html(text)

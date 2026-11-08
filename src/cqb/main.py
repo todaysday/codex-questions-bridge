@@ -194,7 +194,7 @@ async def run(
                 reader, live, lambda path: read_usage(path, home), source_id, narrator,
                 summary_timeout=config.status.timeout_seconds, compactions=CompactionCounter(home),
             ),
-            tg.chat_id, source_id,
+            tg.chat_id, source_id, open_link=config.status.open_link,
         )
         closers.append(status.close)
         focus = QuestionFocus(consultant_dao, questions, agent_questions, source_id)

@@ -3,7 +3,8 @@
 Every dynamic string is clipped first and escaped after (an entity is never cut), and only the fixed tags below
 are ever written, so the text always parses. When the full card is too long it shrinks in a fixed order: fewer
 subagent lines (down to MIN_AGENT_LINES), shorter 'сейчас' fragments, no goal line, and only then a shorter summary.
-The only absolute time is the limit reset, labelled UTC.
+The only absolute time is the limit reset, labelled UTC. With a configured link template the card ends with one
+line that opens the thread (the very last thing the shrink gives up, after the summary).
 
 Header (three lines, then the goal line):
     {state icon} {thread name} · 📁 {project folder, the last path component of the cwd; left out when unknown}
@@ -15,6 +16,7 @@ import html
 import re
 import time
 from dataclasses import dataclass
+from urllib.parse import quote
 
 from cqb.domain.enums import ItemKind, RunState
 from cqb.domain.status import (
@@ -24,6 +26,7 @@ from cqb.domain.status import (
 from cqb.telegram.fmt import TEXT_LIMIT, clip
 
 DASH = "—"
+LINK_TEXT = "Открыть в Codex"
 ICON = {
     RunState.WORKING: "🟢", RunState.WAITING_INPUT: "🟡", RunState.WAITING_APPROVAL: "🟡",
     RunState.IDLE: "⚪", RunState.NOT_LOADED: "💤", RunState.ERROR: "🔴",
@@ -69,6 +72,7 @@ class Plan:
     agent_cache: bool = True  # the `💾 N%` part of a subagent line
     progress_max: int = PROGRESS_MAX  # characters of the summary parts, before escaping
     next_max: int = NEXT_MAX
+    link: bool = True  # the open-in-Codex line: the very last thing to go
 
 
 PLANS = (
@@ -77,25 +81,40 @@ PLANS = (
     Plan(MIN_AGENT_LINES, 24, agent_cache=False), Plan(MIN_AGENT_LINES, 12, agent_cache=False),
     Plan(MIN_AGENT_LINES, 12, False, False),
     Plan(MIN_AGENT_LINES, 12, False, False, 450, 250), Plan(MIN_AGENT_LINES, 12, False, False, 300, 150),  # summary last
-    Plan(0, 0, False, False, 150, 100),  # unreachable in practice, but sized for the worst escaped card: the guarantee is unconditional
+    Plan(0, 0, False, False, 150, 100),
+    Plan(0, 0, False, False, 150, 100, link=False),  # unreachable in practice, but sized for the worst escaped card: the guarantee is unconditional
 )
 
 
-def render_status(r: StatusReport) -> str:
-    """The first plan whose card fits one message; the last one is returned even if it did not (it always does)."""
+def render_status(r: StatusReport, open_link: str = "") -> str:
+    """The first plan whose card fits one message; the last one is returned even if it did not (it always does).
+
+    `open_link` is the configured URL template (`{thread_id}` is replaced by the root's id): when set, the last line
+    of the card opens the thread."""
     for plan in PLANS:
-        text = _card(r, plan)
+        text = _card(r, plan, open_link)
         if len(text) <= TEXT_LIMIT:
             break
     return text
 
 
-def _card(r: StatusReport, plan: Plan) -> str:
+def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
     top = [_title_line(r), _status_line(r), _context(r.usage, r.compactions)]
     if r.goal and plan.goal:
         top.append(_goal(r.goal))
     blocks = ["\n".join(top), "\n".join(_agents(r, plan)), "\n".join(_summary(r.summary, plan)), _limits(r.limits)]
-    return "\n\n".join(blocks)
+    text = "\n\n".join(blocks)
+    link = _link(r, open_link) if plan.link else None
+    return f"{text}\n{link}" if link else text
+
+
+def _link(r: StatusReport, template: str) -> str | None:
+    """`🔗 <a href="https://…">Открыть в Codex</a>` directly under the footer; the text is fixed and the href is
+    the template with the root's own id (percent-encoded) and nothing else, HTML-escaped."""
+    if not template or not r.thread_id:
+        return None
+    url = template.replace("{thread_id}", quote(r.thread_id, safe=""))
+    return f'🔗 <a href="{html.escape(url, quote=True)}">{LINK_TEXT}</a>'
 
 
 def _e(text: str, limit: int) -> str:
