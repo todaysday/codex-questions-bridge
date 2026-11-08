@@ -48,7 +48,6 @@ TITLE_MAX = 32
 FOLDER_MAX = 32  # the project folder on the first line
 NOW_MAX = 40  # a subagent's 'сейчас' fragment
 ROOT_NOW_MAX = 120  # the service already cut a command head at 80
-GOAL_MAX = 60
 MODEL_MAX = 24
 MODEL_NAME = re.compile(r"^gpt-(\d+(?:\.\d+)?)-(.+)$")  # `gpt-6.1-sol` -> version 6.1, name sol
 # (while the item runs, once it has finished): between two steps the newest item of a running turn is a finished one
@@ -99,15 +98,26 @@ def render_status(r: StatusReport, open_link: str = "") -> str:
 
 def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
     top = [_title_line(r), _status_line(r), _context(r.usage, r.compactions, r.subagent_tokens, r.subagent_tokens_incomplete)]
-    if r.goal and plan.goal:
-        top.append(_goal(r.goal))
     agents = _agents(r, plan)
     if len(agents) > 1:
         agents = [agents[0], "<blockquote expandable>\n" + "\n".join(agents[1:]) + "\n</blockquote>"]
     blocks = ["\n".join(top), "\n".join(agents), "\n".join(_summary(r.summary, plan))]
     text = "\n\n".join(b for b in blocks if b)
     link = _link(r, open_link) if plan.link else None
-    return f"{text}\n{link}" if link else text
+    text = f"{text}\n{link}" if link else text
+    if r.goal and plan.goal:
+        available = TEXT_LIMIT - len(text) - 1
+        low, high = 0, len(r.goal.objective or DASH)
+        while low < high:
+            mid = (low + high + 1) // 2
+            if len(_goal(r.goal, mid)) <= available:
+                low = mid
+            else:
+                high = mid - 1
+        if low:
+            header = "\n".join(top)
+            text = header + "\n" + _goal(r.goal, low) + text[len(header):]
+    return text
 
 
 def _link(r: StatusReport, template: str) -> str | None:
@@ -179,11 +189,9 @@ def _context(u: UsageSnapshot | None, compactions: int | None, subagents: int | 
     return f" <b>{total}ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}{_compacted(compactions)}"
 
 
-def _goal(g: GoalSummary) -> str:
-    spent = tokens(g.tokens_used) if g.tokens_used is not None else DASH
-    budget = f"/{tokens(g.token_budget)}" if g.token_budget is not None else ""
+def _goal(g: GoalSummary, max_chars: int) -> str:
     state = f" · {_e(GOAL_WORD.get(g.status, g.status), 20)}" if g.status and g.status != GOAL_ACTIVE else ""
-    return f"🎯 {_e(g.objective or DASH, GOAL_MAX)} · {spent}{budget}{state}"
+    return f"🎯{state}\n<blockquote expandable>{_e(g.objective or DASH, max_chars)}</blockquote>"
 
 
 def _agents(r: StatusReport, plan: Plan) -> list[str]:

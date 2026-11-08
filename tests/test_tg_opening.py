@@ -61,7 +61,7 @@ def test_opening_buttons_route_to_the_bound_topic_and_keep_the_pin(conn):
             st.fake.press(opening, "Статус")
             await st.pump()
             await st.status_done()
-            assert any("📈" in m["text"] for m in st.fake.live_messages(topic))
+            assert any("Субагенты</b>" in m["text"] for m in st.fake.live_messages(topic))
             st.fake.press(opening, "Вопросы")
             await st.pump()
             assert any(m["text"] == "Нет неотвеченных вопросов" for m in st.fake.live_messages(topic))

@@ -63,7 +63,7 @@ def test_full_card_layout():
         "🟢 Fox Profile\n"
         "🧠 sol 6·low · 🕒 25м · 🔄 2м 💭 выполняет: pytest -q\n"
         " <b>ctx</b> 160k/475k (34%) · 💾 80%\n"
-        "🎯 Ship the profile page · 1.2M\n"
+        "🎯\n<blockquote expandable>Ship the profile page</blockquote>\n"
         "\n"
         "🤖 <b>Субагенты 9</b> · 🟢 1 · 🟡 1 · ⚪ 2\n"
         "<blockquote expandable>\n"
@@ -290,9 +290,9 @@ def test_time_and_duration_words_are_abbreviated():
     assert any(x.endswith("только что") for x in idle) and any(x.endswith("2ч назад") for x in idle)  # subagents as before
 
 
-def test_goal_line_is_clipped_and_marks_a_goal_that_is_not_active():
+def test_goal_is_complete_and_marks_a_goal_that_is_not_active():
     text = render_status(report(goal=GoalSummary("ц" * 90, "paused", 900, 50_000)))
-    assert f"🎯 {'ц' * 59}… · 900/50k · пауза\n" in text
+    assert f"🎯 · пауза\n<blockquote expandable>{'ц' * 90}</blockquote>" in text and "900/50k" not in text
 
 
 def test_status_omits_limits_even_when_available():
@@ -326,7 +326,7 @@ def test_every_dynamic_string_is_escaped_and_the_card_still_parses():
 
 def test_the_card_bold_tags_are_exactly_the_fixed_ones():
     text = render_status(with_agents([agent()], summary=StatusSummary("а", "б")))
-    assert re.findall(r"<[^>]+>", text) == ["<b>", "</b>"] * 2 + ["<blockquote expandable>", "</blockquote>"] + ["<b>", "</b>"] * 2
+    assert re.findall(r"<[^>]+>", text) == ["<b>", "</b>"] + ["<blockquote expandable>", "</blockquote>"] + ["<b>", "</b>"] + ["<blockquote expandable>", "</blockquote>"] + ["<b>", "</b>"] * 2
 
 
 def test_clipping_happens_before_escaping_so_an_entity_is_never_cut():
@@ -413,9 +413,8 @@ def test_render_picks_the_first_plan_that_fits(monkeypatch):
             continue  # a plan that changes nothing for this card
         monkeypatch.setattr(view, "TEXT_LIMIT", sizes[i - 1] - 1)  # just too small for the previous plan
         text = render_status(r)
-        assert text == view._card(r, plans[i]) and len(text) <= sizes[i - 1] - 1
-        assert len(kids(text)) == plans[i].agent_lines and ("🎯" in text) is plans[i].goal
-        assert all(("💾" in x) is plans[i].agent_cache for x in kids(text))
+        expected = next(view._card(r, p) for p in plans if len(view._card(r, p)) <= view.TEXT_LIMIT)
+        assert text == expected and len(text) <= sizes[i - 1] - 1
         check_html(text)
     monkeypatch.setattr(view, "TEXT_LIMIT", 10)  # nothing fits: the last plan is still returned
     assert render_status(r) == view._card(r, plans[-1])
@@ -500,3 +499,10 @@ def test_the_worst_escaped_card_with_the_longest_link_still_fits():
         text = render_status(r, link)
         assert len(text) <= TEXT_LIMIT, fill
         check_html(text)
+
+
+def test_long_goal_uses_remaining_space_without_removing_other_content():
+    objective = "т" * 6000
+    text = render_status(report(goal=GoalSummary(objective, "active", 10, None), summary=StatusSummary("текущая работа", "дальше")))
+    assert len(text) <= TEXT_LIMIT and "текущая работа" in text and "дальше" in text
+    assert "<blockquote expandable>" + "т" * 500 in text and "…</blockquote>" in text

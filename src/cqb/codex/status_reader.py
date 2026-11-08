@@ -16,7 +16,6 @@ log = logging.getLogger(__name__)
 
 NAME_MAX = 60
 PAGE_SIZE = 100  # descendants per thread/list page
-OBJECTIVE_MAX = 60
 WEEK_MINUTES = 10080
 DETAIL_MAX = 200  # command head as read; the status service redacts and cuts it further
 _SHELL_WRAPPER = re.compile(r"^(?:\S*/)?(?:bash|sh|zsh) -[a-z]*c ")
@@ -101,7 +100,7 @@ class DaemonStatusReader:
         if not isinstance(raw, dict):
             return None
         return GoalSummary(
-            " ".join(str(raw.get("objective") or "").split())[:OBJECTIVE_MAX],
+            str(raw.get("objective") or ""),
             str(raw.get("status") or ""),
             _int(raw.get("tokensUsed")), _int(raw.get("tokenBudget")),
         )

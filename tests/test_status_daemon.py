@@ -193,7 +193,7 @@ def test_reader_against_the_daemon():
             assert (finished.turn_running, finished.item) == (False, None)  # last turn finished: no item read
             assert await reader.activity("nope", with_item=True) is None
             goal = await reader.goal("r1")
-            assert goal.objective.startswith("Ship the page xxx") and len(goal.objective) == 60 and goal.tokens_used == 5
+            assert goal.objective == "  Ship\nthe   page  " + "x" * 100 and goal.tokens_used == 5
             assert goal.token_budget is None and await reader.goal("a1") is None
             limits = await reader.rate_limits()
             assert (limits.used_percent, limits.resets_at, limits.window_minutes) == (30, 1_800_100_000, 10080)
@@ -257,7 +257,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
                 text = render_status(report)
                 assert " <b>∑1 (404k) · ctx</b> 51k/200k (26%) · 💾 99.0%" in text  # root: rollout tail
                 assert " 🟢 Ada · luna·low · ctx 40%" in text  # subagent: broadcast usage
-                assert "🎯 Ship · 10/100\n" in text and "📈" not in text
+                assert "🎯\n<blockquote expandable>Ship</blockquote>" in text and "📈" not in text
                 assert set(fake.methods()) <= {"thread/read", "thread/list", "thread/goal/get",
                                                "account/rateLimits/read", "thread/turns/list"}
                 assert not any(c.subscribed for c in fake.conns)

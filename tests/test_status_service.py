@@ -214,7 +214,7 @@ def test_goal_line_present_and_skipped_when_live_says_none():
     svc, src, live, _ = make()
     src.threads["r1"] = snapshot("r1")
     src.goals["r1"] = GoalSummary("Ship the profile page", "active", 12_300, 50_000)
-    assert "🎯 Ship the profile page · 12.3k/50k\n" in render_status(collect(svc))
+    assert "🎯\n<blockquote expandable>Ship the profile page</blockquote>\n" in render_status(collect(svc))
     run(live.handle(GoalChanged("r1", False)))
     calls = src.calls.count("goal")
     assert collect(svc).goal is None and src.calls.count("goal") == calls  # no daemon call needed
