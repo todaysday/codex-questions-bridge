@@ -74,9 +74,9 @@ def test_full_card_layout():
         " … и ещё 5\n"
         "</blockquote>\n"
         "\n"
-        "📝 <b>В процессе:</b> Правит тесты статуса.\n"
+        "🔛<b>:</b> Правит тесты статуса.\n"
         "\n"
-        "➡️ <b>Дальше:</b> прогнать e2e\n"
+        "🔜<b>:</b> прогнать e2e\n"
         "\n"
         "📈 осталось 59% нед. · сброс через 5д 1ч 00м")
 
@@ -97,14 +97,14 @@ def test_minimal_card_has_no_goal_agents_next_or_summary():
 
 def test_no_next_line_without_next_steps_and_unreadable_agents_are_a_dash():
     text = valid(render_status(report(agents_total=None, summary=StatusSummary("Идёт сборка."))))
-    assert "📝 <b>В процессе:</b> Идёт сборка.\n" in text and "➡️" not in text and "🤖 <b>Субагенты</b> · —" in text
+    assert "🔛<b>:</b> Идёт сборка.\n" in text and "➡️" not in text and "🤖 <b>Субагенты</b> · —" in text
     multi = valid(render_status(report(summary=StatusSummary("раз\nдва\nтри\nчетыре\nпять", "а\nб\nв\nг"))))
-    assert "📝 <b>В процессе:</b> раз\nдва\nтри\nчетыре\nпять\n\n➡️ <b>Дальше:</b> а\nб\nв\nг\n" in multi
+    assert "🔛<b>:</b> раз\nдва\nтри\nчетыре\nпять\n\n🔜<b>:</b> а\nб\nв\nг\n" in multi
 
 
 def test_one_empty_line_separates_the_progress_from_the_next_steps():
     text = render_status(report(summary=StatusSummary("раз", "два")))
-    assert "📝 <b>В процессе:</b> раз\n\n➡️ <b>Дальше:</b> два\n\n📈" in text and "\n\n\n" not in text
+    assert "🔛<b>:</b> раз\n\n🔜<b>:</b> два\n\n📈" in text and "\n\n\n" not in text
 
 
 def test_zero_counts_are_hidden_in_the_header():
@@ -371,7 +371,7 @@ def test_a_huge_card_shrinks_to_fit_and_never_cuts_a_tag_or_an_entity():
         assert text.count("<b>") == text.count("</b>") and not re.search(r"&[#\w]*$|&[^;\s]{0,6}…", text)
         shown = sum(x.startswith(" 🟢") for x in text.splitlines())
         assert (shown < 6) is (len(view._card(r, view.PLANS[0])) > TEXT_LIMIT)
-        assert "📝 <b>В процессе:</b>" in text and "➡️ <b>Дальше:</b>" in text
+        assert "🔛<b>:</b>" in text and "🔜<b>:</b>" in text
 
 
 def test_the_last_plan_fits_the_worst_escaped_card_whatever_the_fields_hold():
@@ -437,7 +437,7 @@ def test_the_folder_survives_every_shrink_step():
 
 def test_the_shrunk_card_keeps_the_summary_and_the_footer():
     text = valid(render_status(huge()))
-    assert "📝 <b>В процессе:</b>" in text and "➡️ <b>Дальше:</b>" in text and text.endswith("сброс через 5д 1ч 00м")
+    assert "🔛<b>:</b>" in text and "🔜<b>:</b>" in text and text.endswith("сброс через 5д 1ч 00м")
 
 
 # --- the open-in-Codex link: the very last line, under the footer --------------------------------------------

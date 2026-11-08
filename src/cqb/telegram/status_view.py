@@ -229,9 +229,9 @@ def _summary(s: StatusSummary | None, plan: Plan) -> list[str]:
     """`В процессе`, then (after an empty line) `Дальше` when the reports say what comes next."""
     if s is None:
         return [SUMMARY_UNAVAILABLE]
-    lines = ["📝 <b>В процессе:</b> " + html.escape(clip(s.progress, plan.progress_max))]
+    lines = ["🔛<b>:</b> " + html.escape(clip(s.progress, plan.progress_max))]
     if s.next_steps:
-        lines += ["", "➡️ <b>Дальше:</b> " + html.escape(clip(s.next_steps, plan.next_max))]
+        lines += ["", "🔜<b>:</b> " + html.escape(clip(s.next_steps, plan.next_max))]
     return lines
 
 

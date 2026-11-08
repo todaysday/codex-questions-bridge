@@ -247,7 +247,7 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
             tg.push_message("/status", fox)
             card = await reply_in(tg, fox, n_fox, 40)
             assert card.startswith("⚪ FoxProfile · 📁 w\n🧠 ") and "💭" not in card.splitlines()[1], card
-            assert "📝 <b>В процессе:</b> TOOLRESULT[" in card and "&quot;root_id&quot;:&quot;r1&quot;" in card and "OtherProject" not in card, card
+            assert "🔛<b>:</b> TOOLRESULT[" in card and "&quot;root_id&quot;:&quot;r1&quot;" in card and "OtherProject" not in card, card
             await asyncio.sleep(1.5)
             assert len(tg.live_messages(fox)) == n_fox + 1  # one message: no placeholder, nothing edited in later
             assert all("edits" not in m for m in tg.live_messages(fox) if "📈" in m["text"])

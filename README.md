@@ -362,10 +362,10 @@ text Telegram cannot parse is resent as plain text. Example:
  ↳ ⚪ Parser · luna·low · 12м назад
  … и ещё 6
 
-📝 В процессе: Правит тесты статуса.
+🔛: Правит тесты статуса.
 <3-5 lines in all>
 
-➡️ Дальше: прогнать e2e
+🔜: прогнать e2e
 <2-4 lines in all>
 
 📈 осталось 59% нед. · сброс через 1д 10ч 05м

@@ -181,7 +181,7 @@ def test_subagent_counting_and_the_six_line_cap():
     text = render_status(report)
     assert "🤖 <b>Субагенты 11</b> · 🟢 2 · 🟡 2 · ⚪ 7\n" in text
     assert sum(x.startswith((" 🟢", " 🟡", " ⚪")) for x in text.splitlines()) == 6
-    assert "\n … и ещё 5\n" in text and "+" not in text.split("Субагенты")[1].split("📝")[0]
+    assert "\n … и ещё 5\n" in text and "+" not in text.split("Субагенты")[1].split("🔛")[0]
     assert len(text.splitlines()) <= 20
 
 
