@@ -16,6 +16,19 @@ def test_defaults():
     assert c.codex.codex_home == "/root/.codex"
 
 
+def test_registry_page_size_and_recent_hours_defaults_and_bounds():
+    c = parse_config(OK).telegram
+    assert (c.registry_rows_per_page, c.registry_recent_hours) == (8, 24)
+    ok = parse_config({**OK, "telegram": {**TG, "registry_rows_per_page": 25, "registry_recent_hours": 720}}).telegram
+    assert (ok.registry_rows_per_page, ok.registry_recent_hours) == (25, 720)
+    low = parse_config({**OK, "telegram": {**TG, "registry_rows_per_page": 3, "registry_recent_hours": 1}}).telegram
+    assert (low.registry_rows_per_page, low.registry_recent_hours) == (3, 1)
+    for key, bad in (("registry_rows_per_page", 2), ("registry_rows_per_page", 26), ("registry_recent_hours", 0),
+                     ("registry_recent_hours", 721), ("registry_rows_per_page", True), ("registry_recent_hours", "24")):
+        with pytest.raises(ConfigError, match=key):
+            parse_config({**OK, "telegram": {**TG, key: bad}})
+
+
 def test_codex_home_is_configurable_and_must_be_absolute():
     assert parse_config({**OK, "codex": {"socket": "s", "codex_home": "/srv/codex"}}).codex.codex_home == "/srv/codex"
     for bad in ("relative/dir", "", 5):

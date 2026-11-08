@@ -16,6 +16,8 @@ chat_id = -1001234567890
 allowed_user_ids = [123456789]            # only these users may press buttons or write
 control_topic_name = "📋 Треды Codex"
 registry_refresh_seconds = 5              # 5..3600; at most one edit of the pinned registry message per this many seconds, only if it changed
+registry_rows_per_page = 8                # 3..25: threads on one page of the pinned list
+registry_recent_hours = 24                # 1..720: the list shows threads with a question, working, with a consultant, or updated within this many hours; the rest are on the `🕘 Ранее` page
 # Bot API 10.3 rich messages: the buttons sit inside the message text (question cards, the thread list).
 # true (default) = rich; if Telegram says the method is not available the Bridge logs one warning and uses the
 # classic text + inline keyboard until restart. false = classic always.

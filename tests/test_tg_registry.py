@@ -19,7 +19,8 @@ def rows(st):
     for line in st.fake.messages[st.registry_message]["text"].splitlines():
         head, _, rest = line.partition(". ")
         if head.isdigit():
-            marks = rest.split(" ")[0] if rest[:1] in ("❓", "⚙") else ""
+            head = rest.split(" ")[0]
+            marks = head if head and set(head) <= set("❓🟢⚠🔒\ufe0f") else ""
             out.append((marks, rest[len(marks):].strip()))
     return out
 
@@ -38,10 +39,10 @@ def test_markers_and_order_follow_questions_and_working_threads(conn):
             assert rows(st)[0] == ("❓", "Old") and len(st.control_messages()) == 1
             await status(st, "r3", R.WORKING)
             await st.settle()
-            assert rows(st) == [("❓", "Old"), ("⚙️", "Busy"), ("", "Idle")]
+            assert rows(st) == [("❓", "Old"), ("🟢", "Busy"), ("", "Idle")]
             await st.ask("r3", "i2", request_id=2)  # both markers on one row, and it moves up by the question rule
             await st.settle()
-            assert rows(st)[:2] == [("❓⚙️", "Busy"), ("❓", "Old")]
+            assert rows(st)[:2] == [("❓🟢", "Busy"), ("❓", "Old")]
             await st.resolve("r2")
             await status(st, "r3", R.IDLE)
             await st.resolve("r3", request_id=2)
@@ -80,7 +81,7 @@ def test_stored_poll_status_is_the_fallback_for_the_working_marker(conn):
             import dataclasses
             st.threads.upsert_many([dataclasses.replace(thread("r1", name="Fox"), run_state=R.WORKING)])
             await st.publisher.refresh()
-            assert rows(st) == [("⚙️", "Fox")]
+            assert rows(st) == [("🟢", "Fox")]
             await status(st, "r1", R.IDLE)  # the live broadcast wins over the stored one
             await st.settle()
             assert rows(st) == [("", "Fox")]
@@ -96,13 +97,12 @@ def test_changes_that_alter_the_text_mark_it_and_unchanged_content_is_not_writte
             await st.settle()
             assert edits() == 1
             await st.ask("r1", "i2", request_id=2)  # a second question: the row looks the same
-            st.clock.now += 3600
             await st.settle()
             assert edits() == 1
             await st.consultants.create("r1")
             st.publisher.request_refresh()  # what the create button does
             await st.settle()
-            assert edits() == 2 and "консультант: ✅" in fake.messages[msg]["text"]
+            assert edits() == 2 and fake.button(msg, "Открыть") and "консультант" not in fake.messages[msg]["text"]
             st.threads.set_archive_state("s1", "r1", ArchiveState.ARCHIVED, 9)
             st.publisher.request_refresh()
             await st.consultants.reconcile()
@@ -120,23 +120,23 @@ def test_paging_edits_the_same_message_and_the_page_is_remembered(conn):
             click(st, msg, "▶️")
             await st.pump()  # no settle: the page switch itself edits the message
             assert "Thread 05" in fake.messages[msg]["text"] and st.registry_message == msg
-            assert st.state.get("registry.view") == "1:0" and st.publisher.view() == (1, False)
+            assert st.state.get("registry.view") == "1:0:0" and st.publisher.view() == (1, False, False)
             assert len(fake.methods("sendMessage")) == sent_before and fake.messages[msg]["edits"] == 1
             await st.settle()
             assert st.registry_message == msg
             again = Stack(conn, fake)  # restart: the page comes from bot_state
             await again.api.start()
-            assert again.publisher.view() == (1, False)
+            assert again.publisher.view() == (1, False, False)
             await again.publisher.refresh(force=True)
             assert "Thread 05" in fake.messages[msg]["text"] and "Thread 00" not in fake.messages[msg]["text"]
             await again.api.close()
             click(st, msg, "◀️")
             await st.pump()
-            assert "Thread 00" in fake.messages[msg]["text"] and st.publisher.view() == (0, False)
+            assert "Thread 00" in fake.messages[msg]["text"] and st.publisher.view() == (0, False, False)
             # a page that no longer exists falls back to the first one
             st.publisher.set_view(9, False)
             await st.publisher.refresh()
-            assert st.publisher.view() == (0, False) and "Thread 00" in fake.messages[msg]["text"]
+            assert st.publisher.view() == (0, False, False) and "Thread 00" in fake.messages[msg]["text"]
     run(main())
 
 

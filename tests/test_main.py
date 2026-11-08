@@ -67,7 +67,7 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
         tg.push_message("/status", fox)
         await wait_until(lambda: any("📈" in m["text"] for m in tg.live_messages(fox)))
         card = next(m["text"] for m in tg.live_messages(fox) if "📈" in m["text"])
-        assert "FoxProfile" in card and "📈 лимит 30% нед." in card and "Субагенты</b> · нет" in card
+        assert "FoxProfile" in card and "📈 осталось 70% нед." in card and "Субагенты</b> · нет" in card
         assert "🧠 gpt-6" in card and "📝 резюме недоступно" in card  # no [pico]: the summary is unavailable, the rest is there
         assert len([m for m in tg.live_messages(fox) if "📈" in m["text"]]) == 1  # one static message
         assert set(app.methods()) <= {"thread/list", "thread/read", "thread/resume", "thread/unsubscribe",

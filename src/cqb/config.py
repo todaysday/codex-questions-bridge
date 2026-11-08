@@ -30,6 +30,8 @@ class TelegramConfig:
     control_topic_name: str
     allowed_user_ids: tuple[int, ...]
     registry_refresh_seconds: int
+    registry_rows_per_page: int = 8
+    registry_recent_hours: int = 24  # the thread list shows older threads only on its `Ранее` page
     rich_messages: bool = True  # Bot API 10.3 rich messages with in-text buttons; off = classic text + inline keyboard
 
 
@@ -129,7 +131,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
     db = _section(raw, "db", {"path"})
     tg = _section(raw, "telegram", {
         "chat_id", "control_topic_name", "allowed_user_ids",
-        "registry_refresh_seconds", "rich_messages",
+        "registry_refresh_seconds", "rich_messages", "registry_rows_per_page", "registry_recent_hours",
     })
     return Config(
         pico=_pico(raw["pico"]) if "pico" in raw else None,
@@ -149,6 +151,8 @@ def parse_config(raw: dict[str, Any]) -> Config:
             control_topic_name=_topic_name(tg, "control_topic_name", "📋 Треды Codex"),
             allowed_user_ids=_user_ids(tg.get("allowed_user_ids")),
             registry_refresh_seconds=_int(tg, "telegram", "registry_refresh_seconds", 5, 5, 3600),
+            registry_rows_per_page=_int(tg, "telegram", "registry_rows_per_page", 8, 3, 25),
+            registry_recent_hours=_int(tg, "telegram", "registry_recent_hours", 24, 1, 720),
             rich_messages=_flag(tg, "telegram", "rich_messages", True),
         ),
     )

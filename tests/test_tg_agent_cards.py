@@ -80,7 +80,7 @@ def test_single_question_stage_confirm_send_and_delivered_only_after_the_user_me
             fake, card = st.fake, card_of(st, aqid)
             assert fake.messages[card]["thread_id"] == topic_of(st)
             text = text_of(st, aqid)
-            assert text.startswith("❓ Q1 · FoxProfile · ") and text.splitlines()[0].count("·") == 2  # no state tag: pending
+            assert text.splitlines()[0] == "❓ Q1 · FoxProfile" and text.splitlines()[1] == ""  # no state tag, no clock, own line
             assert "agent question" not in text and "a_" + aqid[2:] not in text and "pending" not in text
             assert "Where to store the settings?" in text and "A. Existing table" in text and "B. Separate table" in text
             assert "обсужда" in text
@@ -254,7 +254,7 @@ def test_nothing_is_cut_a_very_long_option_continues_in_more_messages_with_the_k
             joined = " ".join(" ".join(re.sub(r"↪ Q1 · \d+/\d+", "", m["text"]).split()) for m in messages)
             assert " ".join(LONG_OPTION.split()) in joined and " ".join(long_title.split()) in joined  # whole texts
             assert "A. Short" in joined and "C. Last option" in joined
-            assert messages[0]["text"].startswith("❓ Q1 · Fox ·") and messages[1]["text"].startswith("↪ Q1 · 2/")
+            assert messages[0]["text"].startswith("❓ Q1 · Fox\n\n") and messages[1]["text"].startswith("↪ Q1 · 2/")
             # one-time keys live on exactly one message: the last; buttons are the short labels
             with_keys = [m for m in ids if st.fake.buttons(m)]
             assert with_keys == [ids[-1]]

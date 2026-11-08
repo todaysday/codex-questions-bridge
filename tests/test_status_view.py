@@ -76,7 +76,7 @@ def test_full_card_layout():
         "\n"
         "➡️ <b>Дальше:</b> прогнать e2e\n"
         "\n"
-        "📈 лимит 41% нед. · сброс 20.01 09:00 UTC")
+        "📈 осталось 59% нед. · сброс через 5д 1ч 00м")
 
 
 def test_minimal_card_has_no_goal_agents_next_or_summary():
@@ -90,9 +90,7 @@ def test_minimal_card_has_no_goal_agents_next_or_summary():
         "\n"
         "🤖 <b>Субагенты</b> · нет\n"
         "\n"
-        "📝 резюме недоступно\n"
-        "\n"
-        "📈 лимит —")
+        "📝 резюме недоступно")  # usage unknown: no limits line at all
 
 
 def test_no_next_line_without_next_steps_and_unreadable_agents_are_a_dash():
@@ -285,8 +283,8 @@ def test_the_subagent_cache_part_is_the_first_thing_the_shrink_drops():
 
 
 def test_time_and_duration_words_are_abbreviated():
-    assert render_status(report(limits=RateLimits(55, None, 300))).endswith("📈 лимит 55% 5ч")
-    assert "лимит 7% 90м · сброс" in render_status(report(limits=RateLimits(7, RESET, 90)))
+    assert render_status(report(limits=RateLimits(55, None, 300))).endswith("📈 осталось 45% 5ч")
+    assert "осталось 93% 90м · сброс через" in render_status(report(limits=RateLimits(7, RESET, 90)))
     idle = render_status(with_agents([agent(state=R.IDLE, age=5), agent(state=R.IDLE, age=7200)])).splitlines()
     assert any(x.endswith("только что") for x in idle) and any(x.endswith("2ч назад") for x in idle)  # subagents as before
 
@@ -296,11 +294,22 @@ def test_goal_line_is_clipped_and_marks_a_goal_that_is_not_active():
     assert f"🎯 {'ц' * 59}… · 900/50k · пауза\n" in text
 
 
-def test_the_limit_reset_is_the_only_absolute_time_and_is_labelled_utc():
+def test_the_limits_line_says_what_is_left_and_counts_down_to_the_reset():
     text = render_status(report())
-    assert text.count("UTC") == 1 and text.endswith("📈 лимит 41% нед. · сброс 20.01 09:00 UTC")
-    assert "снимок" not in text and not re.search(r"\b\d\d:\d\d\b", text.replace("09:00 UTC", ""))
-    assert "UTC" not in render_status(report(limits=RateLimits(41, None, 10080)))
+    assert text.endswith("📈 осталось 59% нед. · сброс через 5д 1ч 00м")
+    assert "UTC" not in text and "снимок" not in text and not re.search(r"\b\d\d:\d\d\b", text)  # no absolute time at all
+    assert render_status(report(limits=RateLimits(41, None, 10080))).endswith("📈 осталось 59% нед.")  # unknown reset
+    assert render_status(report(limits=RateLimits(41, NOW - 5, 10080))).endswith("📈 осталось 59% нед.")  # past
+    assert "📈" not in render_status(report(limits=RateLimits(None, RESET, 10080)))  # usage unknown: no line
+    for used, left in ((0, 100), (100, 0), (130, 0), (-5, 100)):  # clamped
+        assert f"осталось {left}% " in render_status(report(limits=RateLimits(used, RESET, 10080)))
+
+
+def test_countdown_formats():
+    count = lambda s: view._countdown(s)  # noqa: E731
+    assert count(5 * 86400 + 3600) == "5д 1ч 00м" and count(86400 + 10 * 3600 + 5 * 60) == "1д 10ч 05м"
+    assert count(10 * 3600 + 5 * 60) == "10ч 05м" and count(3600) == "1ч 00м" and count(45 * 60) == "45м"
+    assert count(59) == "1м" and count(60) == "1м" and count(0) == "1м"
 
 
 # --- escaping ------------------------------------------------------------------------------------------------
@@ -426,7 +435,7 @@ def test_the_folder_survives_every_shrink_step():
 
 def test_the_shrunk_card_keeps_the_summary_and_the_footer():
     text = valid(render_status(huge()))
-    assert "📝 <b>В процессе:</b>" in text and "➡️ <b>Дальше:</b>" in text and text.endswith(" UTC")
+    assert "📝 <b>В процессе:</b>" in text and "➡️ <b>Дальше:</b>" in text and text.endswith("сброс через 5д 1ч 00м")
 
 
 # --- the open-in-Codex link: the very last line, under the footer --------------------------------------------
@@ -443,7 +452,7 @@ def test_no_link_line_without_a_configured_template_or_a_thread_id():
 def test_the_link_is_one_fixed_text_anchor_on_the_last_line_right_under_the_footer():
     text = valid(render_status(report(thread_id="019a-77ee-r1"), LINK))
     lines = text.splitlines()
-    assert lines[-1] == ANCHOR and lines[-2].startswith("📈 лимит") and text.count("🔗") == 1  # footer, then the link
+    assert lines[-1] == ANCHOR and lines[-2].startswith("📈 осталось") and text.count("🔗") == 1  # footer, then the link
     assert text.removesuffix("\n" + ANCHOR) == render_status(report(thread_id="019a-77ee-r1"))  # nothing else changed
     assert re.findall(r"<[^>]+>", lines[-1]) == ['<a href="https://chatgpt.com/codex/tasks/019a-77ee-r1">', "</a>"]
     other = render_status(report(thread_id="r9"), "https://example.org/open?thread={thread_id}&source=cqb").splitlines()[-1]

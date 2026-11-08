@@ -11,7 +11,7 @@ confirm, sent as a normal user message. You get your threads on one self-updatin
 answer buttons, and an optional LLM consultant per thread (read-only on your repository, web access limited as described in the safety model).
 
 - 📋 **One registry.** A single pinned message lists all your Codex threads and edits itself in place.
-  `❓` means a thread waits for your answer, `⚙️` means it is working right now.
+  `❓` means a thread waits for your answer, `🟢` means it is working right now.
 - ❓ **Questions in Telegram.** Both kinds of questions (see [Two kinds of questions](#two-kinds-of-questions)) appear in
   the thread's own topic with answer buttons. Secret questions are never relayed.
 - 💬 **A consultant per thread.** You create it by hand. It is an LLM chat in its own topic that reads the thread's
@@ -96,7 +96,7 @@ If you answered in the app first, the card says so and nothing is sent. Only roo
 When several cards pile up in a topic, tell the consultant which one you mean:
 
 - **Q-numbers.** Every question of a thread has a stable number, `Q3` (one per question, also for the questions of one agent message), in the card header and in `/questions`. A number is never reused. Write `Q3` (or `вопрос 3`) in a message and the consultant knows what you mean.
-- **Full text, no cut.** A card shows the whole question and the whole text of every option (`A.`, `B.` ...); buttons carry only the letters. On the rich path a card is one message with each option's button right after its text; only the classic fallback continues a very long card in further messages (`↪ Q3 · 2/3`), with the buttons under the last one.
+- **Full text, no cut.** A card shows the whole question and the whole text of every option (`A.`, `B.` ...); buttons carry only the letters. On the rich path a card is one message with each option's button right after its text (in-text buttons read `Ответить A`, `Ответить B`; the classic keyboard keeps `A`, `B`); only the classic fallback continues a very long card in further messages (`↪ Q3 · 2/3`), with the buttons under the last one.
 - **Reply to the card.** A reply to a question card goes to the consultant, with the card (title and options) as context, even if the question is already answered. A secret question is never discussed: Bridge refuses and sends nothing.
 - **A reply is an answer only after `✍️ Ответить текстом`.** The button arms the card for 10 minutes (the card says `следующий ответ на это сообщение уйдёт в Codex`, `↩️ Отмена` disarms it). Then the next reply to that card is your answer (at most 1000 characters). The bot echoes it as `Подтвердите отправку:` with `✅ Отправить в Codex` and `↩️ Отмена`; the confirmation is deleted after a send or a cancel, and after a failed send it stays with working buttons. Any other reply is a discussion.
 - **Focus.** Bridge remembers the question you pointed at last (reply, Q-number, button), or else the newest pending one, and puts one `[Context: ...]` line in front of every message to the consultant, so follow-ups need no repeated explanation. The consultant reads details with `get_questions` (both kinds, optional `number`) and never answers for you.
@@ -272,7 +272,7 @@ occasional cleanup.
 | Dead gateway | If `GET /health` fails or the hook heartbeat is silent, the topic answers `Консультант временно недоступен` ("consultant temporarily unavailable"). A dead cached socket is replaced once; an unexpected error in a session worker gives `внутренняя ошибка шлюза: <Type>` and the queue goes on. |
 | Web access | `web_fetch` (PicoClaw) and `web_search` (a Bridge tool, off by default) are for the consultant only, never for Status Agent slots, and take known argument names only. The hook checks every `web_fetch` URL: http/https, ports 80 and 443, no userinfo, no private, loopback, link-local, CGNAT (tailnet), ULA, multicast or metadata address (IP literals in any encoding; DNS answers are checked too, best effort against rebinding), URL up to 300 characters and query up to 120, no token-like runs or key-like parameters; `maxChars` is clamped to 20000. PicoClaw refuses private IPs at dial time, also on redirects (at most 5). A search query is up to 200 characters without key-like runs; results are cut to title, URL and snippet and redacted. A server-only systemd egress drop-in adds a kernel-level guard (`deploy/picoclaw/egress.conf.example`). Residual risks: redirects to public hosts, DNS rebinding, data hidden in queries or URLs made of short words, and prompt injection through public pages. |
 | Project files | Off by default (`[mcp] project_files`). The Bridge runs as root, so confinement is by file descriptor: `O_NOFOLLOW` at every step, no symlinks, no `..`, regular files only, root = the thread's working directory (broad roots such as `/`, home, `/srv`, `/tmp` refused). Secrets, keys, `.git`, `.env*`, databases, `node_modules` and similar names are denied by a built-in table without revealing whether they exist; output is capped (`project_file_max_bytes`) and redacted. Only the consultant can call these tools. |
-| Queue | One turn at a time per consultant, at most 5 queued messages. Replies are plain text, at most 12000 characters, split below 4096 per message. |
+| Queue | One turn at a time per consultant, at most 5 queued messages. Replies are sent as rich Markdown after sanitizing (images become alt text, only http(s) links, control and bidi characters removed, up to 4 parts split between blocks), at most 12000 characters; a refused rich message falls back to plain text, and system and failure lines stay plain. |
 
 ## 🌐 Tailscale: reaching a loopback-only model gateway
 
@@ -314,7 +314,7 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 | --- | --- | --- |
 | Control topic | `/threads` | Re-render the registry message now (the command message is deleted if the bot may). |
 | Consultant topic | `/status` | One static snapshot message. A second request while one collects answers `статус уже собирается`. |
-| Consultant topic | `/questions` | Unanswered questions of this thread (both kinds, with `Q` numbers). Deterministic, no LLM. |
+| Consultant topic | `/questions` | Re-sends the unanswered questions of this thread (both kinds, with `Q` numbers): the old cards and the command message are deleted and fresh full cards follow in number order; `Нет неотвеченных вопросов` (auto-deleted after about 10 s) when none. Deterministic, no LLM. |
 | Consultant topic | `/stop` | Cancels the running consultant turn (the one command passed to PicoClaw). |
 | Consultant topic | free text | Goes to the consultant, with a context line about pending questions. A reply to a question card is a discussion unless armed by `✍️ Ответить текстом`. |
 
@@ -323,8 +323,10 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 | Marker | Meaning |
 | --- | --- |
 | `❓` | A question (of either kind) is pending for this thread. |
-| `⚙️` | The thread is working right now (status `active` without a waiting flag). |
-| `✅` / `🔒` / `⚠️` | Consultant state: open, closed (its thread is archived), error. `—` means none. |
+| `🟢` | The thread is working right now (status `active` without a waiting flag). |
+| `⚠️` / `🔒` | Consultant in error / closed (its thread is archived). No other consultant text is shown. |
+
+Layout: the header `📋 Треды Codex` with the counts `❓ n · 🟢 n · всего N`; each thread is a line `markers name [button]` plus a `📁 folder · age` line, threads separated by a divider; ages are `сейчас`, `5м`, `2ч`, `вчера`, `3д` (no clock times). By default only relevant threads are listed (pending question, working, a consultant, or updated within `registry_recent_hours`); `🕘 Ранее` / `Недавние` toggles the rest and `📦 Архивные` the archive. A page holds `registry_rows_per_page` threads and the page row is `◀️ [n/total] ▶️` (arrows hidden at the edges; on the classic path `стр. n/total` is in the title).
 
 Order: pending questions first, then working threads, then by last activity. The message is edited at most once per
 `registry_refresh_seconds` and not at all when nothing changed. Archiving a thread closes its consultant topic;
@@ -339,7 +341,7 @@ rate limit. The `💭` line for the root and the tail of each subagent line say 
 redacted and cut at 80 characters, and message text and command output are never read. Two parts from the Status
 Agent follow (about 900 characters): `В процессе` (3-5 lines about the thread as a whole, no per-agent breakdown), then after an empty line `Дальше` (2-4 lines about what remains, only as far as
 the recent reports say so). The message is Telegram HTML, sent once when all of it is ready (typing indicator meanwhile) and
-never edited; the only absolute time is the limit reset, in UTC. With `[status] open_link` set, the last line is a link `🔗 Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
+never edited; the footer shows what is left of the weekly limit with a reset countdown, and there is no absolute time on the card. With `[status] open_link` set, the last line is a link `🔗 Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
@@ -360,7 +362,7 @@ text Telegram cannot parse is resent as plain text. Example:
 ➡️ Дальше: прогнать e2e
 <2-4 lines in all>
 
-📈 лимит 41% нед. · сброс 20.01 09:00 UTC
+📈 осталось 59% нед. · сброс через 1д 10ч 05м
 🔗 Открыть в Codex
 ```
 
@@ -378,6 +380,8 @@ text Telegram cannot parse is resent as plain text. Example:
 | `[telegram] allowed_user_ids` | none (required) | 1..50 positive ids |
 | `[telegram] control_topic_name` | `📋 Треды Codex` | 1..128 characters |
 | `[telegram] registry_refresh_seconds` | 5 | 5..3600 |
+| `[telegram] registry_rows_per_page` | 8 | 3..25, threads per registry page |
+| `[telegram] registry_recent_hours` | 24 | 1..720, a thread updated within this window counts as relevant for the default registry filter |
 | `[telegram] rich_messages` | true | Bot API 10.3 rich messages with in-text buttons for question cards and the registry (25 registry rows per page instead of 5); `false` = classic text + inline keyboard only. An unsupported method switches to classic for the rest of the process, a refused message falls back for that message only |
 | `[pico] url` | `ws://127.0.0.1:18790/pico/ws` | Loopback `ws://` only. Presence of `[pico]` enables consultants |
 | `[pico] session_prefix` | `cqb-` | `[a-z0-9-]{2,16}`, do not change after consultants exist |
@@ -410,7 +414,7 @@ cache and no mmap.
 
 ```bash
 python3 -m venv .venv && .venv/bin/pip install -e '.[dev]'
-.venv/bin/python -m pytest -q          # about 940 tests, no network, fake daemon, fake Telegram, fake PicoClaw
+.venv/bin/python -m pytest -q          # about 1400 tests, no network, fake daemon, fake Telegram, fake PicoClaw
 .venv/bin/python -m pytest -q -m e2e tests/e2e   # real PicoClaw binary, mock model, loopback only
 ```
 
@@ -428,7 +432,7 @@ src/cqb/
   dao/         SQLite access (threads, questions, agent questions, consultants, bot state)
   codex/       app-server client with the method whitelist, rollout tail reader, history, status reader
   services/    inventory, questions, agent_questions, registry, consultants, relay, context, scope, status, live state
-  telegram/    api, poller, router, control, cards, status_post, topics, keys, pure views
+  telegram/    api, poller, router, control, cards, status_post, topics, keys, render, present, markdown, pure views
   pico/        PicoClaw gateway client, health probe, status narrator
   mcp/         read-only context API (server, tools)
   config.py  security.py  main.py

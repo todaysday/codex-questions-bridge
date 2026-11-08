@@ -3,15 +3,18 @@
 import logging
 
 from cqb.services.consultants import TopicGone
-from cqb.telegram.api import BadRequest, BotApi, TelegramError
+from cqb.telegram.api import BadRequest, RichRejected, TelegramError
 from cqb.telegram.fmt import chunks
+from cqb.telegram.markdown import markdown_parts
+from cqb.telegram.present import Presenter
 
 log = logging.getLogger(__name__)
 
 
 class TelegramTopics:
-    def __init__(self, api: BotApi, chat_id: int) -> None:
-        self._api = api
+    def __init__(self, present: Presenter, chat_id: int) -> None:
+        self._present = present
+        self._api = present.api
         self._chat_id = chat_id
 
     async def create_topic(self, name: str) -> int:
@@ -39,8 +42,23 @@ class TelegramTopics:
         except TelegramError as exc:
             log.warning("cannot pin the opening message in topic %d: %s", topic_id, exc)
 
-    async def say(self, topic_id: int, text: str) -> None:
-        """Plain text (no parse mode, so a reply can never fail on entities), split below 4096."""
+    async def say(self, topic_id: int, text: str, *, markdown: bool = False) -> None:
+        """A message in the topic. Plain text by default (no parse mode, so it can never fail on entities), split
+        below 4096. `markdown`: a consultant reply, sanitized and sent as rich Markdown (one to a few messages);
+        with rich mode off, or when Telegram refuses the Markdown, it goes as plain text with the markers as they are."""
+        if markdown and self._present.rich:
+            parts = markdown_parts(text)
+            for n, part in enumerate(parts):
+                try:
+                    await self._api.send_rich_markdown(self._chat_id, part, thread_id=topic_id)
+                except RichRejected as exc:
+                    self._present.rejected(exc)
+                    await self._plain(topic_id, "\n\n".join(parts[n:]))  # this part and the rest, markers left as they are
+                    return
+            return
+        await self._plain(topic_id, text)
+
+    async def _plain(self, topic_id: int, text: str) -> None:
         for piece in chunks(text):
             await self._api.send_message(self._chat_id, piece, thread_id=topic_id)
 

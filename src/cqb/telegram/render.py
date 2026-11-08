@@ -7,7 +7,7 @@ import dataclasses
 import html
 
 from cqb.telegram.fmt import BUTTON_TEXT_LIMIT, clip
-from cqb.telegram.models import Bold, Button, Doc, Para, Row, View
+from cqb.telegram.models import Bold, Button, Divider, Doc, Para, Row, View
 
 RICH_TEXT_LIMIT = 32768  # characters of text in one rich message
 RICH_BLOCK_LIMIT = 500
@@ -19,6 +19,8 @@ def rich_size(doc: Doc) -> tuple[int, int]:
     chars = blocks = 0
     for b in doc.blocks:
         blocks += 1
+        if isinstance(b, Divider):
+            continue
         for p in b.buttons if isinstance(b, Row) else b.parts:
             chars += len(p.text) if isinstance(p, (Bold, Button)) else len(p)
     return chars, blocks
@@ -35,7 +37,9 @@ def fits_rich(doc: Doc) -> bool:
 def to_html(doc: Doc) -> str:
     out: list[str] = []
     for b in doc.blocks:
-        if isinstance(b, Row):
+        if isinstance(b, Divider):
+            out.append("<hr/>")
+        elif isinstance(b, Row):
             for i in range(0, len(b.buttons), ROW_BUTTONS):
                 row = "".join(_button(x) for x in b.buttons[i:i + ROW_BUTTONS])
                 out.append(f'<tg-button-row align="left">{row}</tg-button-row>')
@@ -61,6 +65,8 @@ def _inline(para: Para) -> str:
 def _button(b: Button) -> str:
     style = f' style="{b.style}"' if b.style else ""
     label = _esc(clip(b.text, BUTTON_TEXT_LIMIT))
+    if b.disabled:
+        return f'<tg-button type="disabled"{style}>{label}</tg-button>'
     if b.url:
         return f'<tg-button type="url"{style} url="{_esc(b.url)}">{label}</tg-button>'
     if b.callback_data is None:
@@ -89,11 +95,14 @@ def to_view(doc: Doc) -> View:
         pending.clear()
 
     for b in blocks:
+        if isinstance(b, Divider):
+            continue
         if isinstance(b, Row):
             flush()
-            keyboard.append(tuple(_classic(x) for x in b.buttons))
+            if row := tuple(_classic(x) for x in b.buttons if not x.disabled):
+                keyboard.append(row)
             continue
-        pending.extend(_classic(p) for p in b.parts if isinstance(p, Button))
+        pending.extend(_classic(p) for p in b.parts if isinstance(p, Button) and not p.disabled)
         if text := (b.classic if b.classic is not None else _plain(b)):
             body = body + b.glue + text if body else text
     flush()

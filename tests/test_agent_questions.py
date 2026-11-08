@@ -2,6 +2,7 @@
 
 import asyncio
 import contextlib
+import json
 import logging
 
 
@@ -438,8 +439,20 @@ def test_reply_parsing_names_questions_and_ignores_garbage():
     broken = '<send_user_message_question_reply>\n[{"questionItemId":"[\\"other_tag\\",\\"m\\",0]"}]\n</send_user_message_question_reply>'
     assert answered_questions(broken) is None
     assert build_reply("m1", 1, "T", "A") == (
-        '<send_user_message_question_reply>\n[{"question":"T","answer":"A","questionItemId":'
-        '"[\\"request_user_input_async\\",\\"m1\\",1]"}]\n</send_user_message_question_reply>')
+        '<send_user_message_question_reply>\n[{"questionItemId":'
+        '"[\\"request_user_input_async\\",\\"m1\\",1]","question":"T","answer":"A"}]\n'
+        '</send_user_message_question_reply>\n')
+
+
+def test_reply_is_the_apps_shape_and_parsing_accepts_both_key_orders_and_trailing_newline():
+    app = ('<send_user_message_question_reply>\n[{"questionItemId":"[\\"request_user_input_async\\",\\"m1\\",0]",'
+           '"question":"Где?","answer":"B"}]\n</send_user_message_question_reply>\n')
+    assert build_reply("m1", 0, "Где?", "B") == app
+    old = ('<send_user_message_question_reply>\n[{"question":"Где?","answer":"B","questionItemId":'
+           '"[\\"request_user_input_async\\",\\"m1\\",0]"}]\n</send_user_message_question_reply>')
+    for text in (app, app.rstrip("\n"), old, old + "\n"):
+        assert answered_questions(text) == {("m1", 0)}
+    assert list(json.loads(app.split("\n")[1])[0]) == ["questionItemId", "question", "answer"]
 
 
 def test_migration_6_splits_the_table_into_one_row_per_question(tmp_path):

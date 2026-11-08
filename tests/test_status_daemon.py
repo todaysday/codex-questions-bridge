@@ -245,7 +245,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
                 text = render_status(report)
                 assert " <b>ctx</b> 51k/200k (26%) · 💾 99.0%" in text  # root: rollout tail
                 assert " 🟢 Ada · luna·low · ctx 40%" in text  # subagent: broadcast usage
-                assert "🎯 Ship · 10/100\n" in text and "📈 лимит 30% нед." in text
+                assert "🎯 Ship · 10/100\n" in text and "📈 осталось 70% нед." in text
                 assert set(fake.methods()) <= {"thread/read", "thread/list", "thread/goal/get",
                                                "account/rateLimits/read", "thread/turns/list"}
                 assert not any(c.subscribed for c in fake.conns)

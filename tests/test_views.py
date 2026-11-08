@@ -1,4 +1,5 @@
 import dataclasses
+import re
 import time
 
 import pytest
@@ -10,7 +11,7 @@ from cqb.telegram.fmt import CALLBACK_LIMIT, TEXT_LIMIT, callback_key, topic_lin
 from cqb.telegram.card_view import SECRET_NOTICE, render_card
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import ActionSpec
-from cqb.telegram.registry_view import PAGE_SIZE, render_registry
+from cqb.telegram.registry_view import registry_doc, render_registry
 from cqb.dao.actions import ActionDao
 
 CHAT = -1001234567890
@@ -46,77 +47,96 @@ def test_deep_link_format():
     assert topic_link(-12345, 3) is None and topic_link(123, 3) is None
 
 
+def reg(rows, p=0, pages=1, archived=False, older=False, **counts):
+    nxt = p + 1 < pages
+    return RegistryPage(tuple(rows), p, nxt, archived, 30, pages, older, counts.get("pending", 0),
+                        counts.get("working", 0), counts.get("total", len(rows)))
+
+
 def test_registry_page_text_and_buttons():
-    view = render_registry(page([
+    view = render_registry(reg([
         row(1, None, None, 0),
         row(2, S.OPEN, 55, 2, "AVIP — Instagram Scraper", NOW - 5 * 86400),
         row(3, S.ERROR), row(4, S.ARCHIVED, 56),
-    ], nxt=True), CHAT, NOW)
-    assert view.header == f"📋 Активные треды Codex · обновлено {time.strftime('%H:%M', time.gmtime(NOW))}"
-    assert "1. FoxProfile — User Access" in view.text
-    assert "консультант: —" in view.text and "2. ❓ AVIP" in view.text and "консультант: ✅" in view.text
-    assert "⚠️" in view.text and "🔒" in view.text
-    assert "🟢" not in view.text and "🟡" not in view.text  # the old freshness icons are gone
-    texts = [b.text for row_ in view.keyboard[:-1] for b in row_]
+    ], pages=2, total=24), CHAT, NOW)
+    lines = view.text.splitlines()
+    assert lines[0] == "📋 Треды Codex · стр. 1/2" and lines[1] == "всего 24"  # the page is in the text, no clock time
+    assert not re.search(r"\d\d:\d\d", view.text) and "обновлено" not in view.text and "консультант" not in view.text
+    assert "1. FoxProfile — User Access" in view.text and "   📁 w · 5м" in view.text
+    assert "2. ❓ AVIP" in view.text and "   📁 w · 5д" in view.text
+    assert "3. ⚠️ FoxProfile" in view.text and "4. 🔒 FoxProfile" in view.text  # only the exceptional consultant states
+    assert "✅" not in view.text and "⚙️" not in view.text
+    texts = [b.text for row_ in view.keyboard[:-2] for b in row_]
     assert texts == ["1. ➕ Создать консультанта", "2. 💬 Открыть", "3. ➕ Создать консультанта", "4. 💬 Открыть"]
     opens = {b.text: b.url for b in buttons(view) if b.url}
     assert opens["2. 💬 Открыть"] == "https://t.me/c/1234567890/55"
-    nav = [b.text for b in view.keyboard[-1]]
-    assert nav == ["▶️", "📦 Архивные"]  # no refresh button
+    assert [b.text for b in view.keyboard[-2]] == ["▶️"]  # the counter is rich only
+    assert [b.text for b in view.keyboard[-1]] == ["🕘 Ранее", "📦 Архивные"]  # no refresh button
     create = next(b for b in buttons(view) if b.text.startswith("1. ➕"))
     assert create.action == ActionSpec("create", "thread-0001")
     assert not any(b.action and b.action.action in ("status", "refresh") for b in buttons(view))
-    assert not any("🔄" in b.text or "ℹ️" in b.text for b in buttons(view))
 
 
 def test_registry_row_markers_question_working_and_both():
-    view = render_registry(page([
+    view = render_registry(reg([
         row(1, pending=1), row(2, working=True), row(3, pending=2, working=True), row(4),
-    ]), CHAT, NOW)
+    ], pending=2, working=2), CHAT, NOW)
     lines = [ln for ln in view.text.splitlines() if ln[:2] in ("1.", "2.", "3.", "4.")]
-    assert lines[0].startswith("1. ❓ ") and "⚙️" not in lines[0]
-    assert lines[1].startswith("2. ⚙️ ") and "❓" not in lines[1]
-    assert lines[2].startswith("3. ❓⚙️ ")
-    assert lines[3].startswith("4. FoxProfile") and "❓" not in lines[3] and "⚙️" not in lines[3]
+    assert lines[0].startswith("1. ❓ ") and "🟢" not in lines[0]
+    assert lines[1].startswith("2. 🟢 ") and "❓" not in lines[1]
+    assert lines[2].startswith("3. ❓🟢 ")
+    assert lines[3].startswith("4. FoxProfile") and "❓" not in lines[3] and "🟢" not in lines[3]
+    assert "❓ 2 · 🟢 2 · всего 4" in view.text
 
 
 def test_archived_row_without_consultant_has_no_buttons_and_no_empty_keyboard_row():
-    view = render_registry(page([row(1)], archived=True), CHAT, NOW)
-    assert len(view.keyboard) == 1 and all(len(r) > 0 for r in view.keyboard)  # only the navigation row
+    view = render_registry(reg([row(1)], archived=True), CHAT, NOW)
+    assert len(view.keyboard) == 1 and all(len(r) > 0 for r in view.keyboard)  # only the toggles
 
 
-def test_registry_pagination_and_archive_toggle():
-    middle = render_registry(page([row(1)], p=2, nxt=True), CHAT, NOW)
-    nav = {b.text: b.action for b in middle.keyboard[-1]}
-    assert nav["◀️"].payload == "1:0" and nav["▶️"].payload == "3:0" and nav["📦 Архивные"].payload == "0:1"
-    arch = render_registry(page([row(1)], archived=True), CHAT, NOW)
-    assert arch.header.startswith("📦 Архивные треды Codex")
+def test_registry_pagination_and_toggles():
+    middle = render_registry(reg([row(1)], p=2, pages=5), CHAT, NOW)
+    nav = {b.text: b.action for b in middle.keyboard[-2]}
+    assert nav["◀️"].payload == "1:0:0" and nav["▶️"].payload == "3:0:0"
+    toggles = {b.text: b.action for b in middle.keyboard[-1]}
+    assert toggles["🕘 Ранее"].payload == "0:0:1" and toggles["📦 Архивные"].payload == "0:1:0"
+    arch = render_registry(reg([row(1)], archived=True, older=True), CHAT, NOW)
+    assert arch.text.startswith("📦 Архивные треды Codex · ранее")
     assert not any("Создать" in b.text for b in buttons(arch))
-    assert [b.text for b in arch.keyboard[-1]][-1] == "📋 Активные"
-    assert "Нет тредов" in render_registry(page([]), CHAT, NOW).text
+    assert [(b.text, b.action.payload) for b in arch.keyboard[-1]] == [("🕘 Недавние", "0:1:0"), ("📋 Активные", "0:0:1")]
+    assert "Нет тредов ранее" in render_registry(reg([], older=True), CHAT, NOW).text
+    only = render_registry(reg([row(1)]), CHAT, NOW)  # one page: no page row at all
+    assert [[b.text for b in r] for r in only.keyboard][-2:] == [["1. ➕ Создать консультанта"], ["🕘 Ранее", "📦 Архивные"]]
 
 
 def test_registry_limits_with_hostile_names():
-    rows = [row(i, S.OPEN, 5, 99, "Ж" * 5000) for i in range(PAGE_SIZE)]
-    view = render_registry(page(rows, nxt=True), CHAT, NOW)
+    rows = [row(i, S.OPEN, 5, 99, "Ж" * 5000) for i in range(25)]
+    view = render_registry(reg(rows, pages=2), CHAT, NOW)
     assert len(view.text) <= TEXT_LIMIT
     assert all(len(b.text) <= 64 for b in buttons(view))
 
 
-def test_fingerprint_ignores_time_but_not_content():
-    a = render_registry(page([row(1)]), CHAT, NOW)
-    b = render_registry(page([row(1)]), CHAT, NOW + 3600)
-    assert a.text != b.text and a.fingerprint() == b.fingerprint()
-    assert a.fingerprint() != render_registry(page([row(1, S.OPEN, 5)]), CHAT, NOW).fingerprint()
+def test_fingerprint_follows_content_and_coarse_ages_not_the_clock():
+    a = registry_doc(reg([row(1)]), CHAT, NOW)
+    assert a.fingerprint() == registry_doc(reg([row(1)]), CHAT, NOW + 60).fingerprint()  # same age bucket
+    assert a.fingerprint() != registry_doc(reg([row(1)]), CHAT, NOW + 3600).fingerprint()  # 5м became 1ч
+    assert a.fingerprint() != registry_doc(reg([row(1, S.OPEN, 5)]), CHAT, NOW).fingerprint()
+
+
+def test_relative_ages():
+    from cqb.telegram.fmt import age
+    assert [age(NOW - d, NOW) for d in (0, 299, 300, 899, 3599, 3600, 7300, 86399, 86400, 172799, 172800, 3 * 86400 + 5)] == [
+        "сейчас", "сейчас", "5м", "10м", "55м", "1ч", "2ч", "23ч", "вчера", "вчера", "2д", "3д"]
+    assert age(NOW + 100, NOW) == "сейчас"
 
 
 def test_callback_data_is_short_deterministic_and_stored(conn):
     keys = ActionKeys(ActionDao(conn), "s1", clock=lambda: NOW)
     rows = [row(i, None, None, 0, "n" * 300) for i in range(1, 6)]
-    bound = keys.bind(render_registry(page(rows, p=9, nxt=True), CHAT, NOW).keyboard)
+    bound = keys.bind(render_registry(reg(rows, p=9, pages=10), CHAT, NOW).keyboard)
     data = [b.callback_data for r in bound for b in r if b.action]
     assert data and all(d.startswith("a:") and len(d.encode()) <= CALLBACK_LIMIT for d in data)
-    assert bound == keys.bind(render_registry(page(rows, p=9, nxt=True), CHAT, NOW).keyboard)
+    assert bound == keys.bind(render_registry(reg(rows, p=9, pages=10), CHAT, NOW).keyboard)
     long_root = ActionSpec("create", "019f" + "e" * 400, "p" * 400)
     assert len(callback_key(long_root, "s" * 64).encode()) <= CALLBACK_LIMIT
     assert conn.execute("SELECT COUNT(*) FROM telegram_actions").fetchone()[0] == len(set(data))
@@ -137,7 +157,7 @@ def q(**kw):
 
 def test_card_pending_has_option_buttons():
     v = render_card(q(), "FoxProfile")
-    assert v.header == f"❓ Q3 · FoxProfile · {time.strftime('%H:%M', time.gmtime(NOW))}"
+    assert v.header == "❓ Q3 · FoxProfile"  # no clock time: Telegram shows the message time
     assert "request_user_input" not in v.text and "q_1" not in v.text and "pending" not in v.text  # no internal noise
     assert "Storage: Where store profile settings?" in v.text and "A. Existing table — reuse" in v.text
     assert "B. Separate table" in v.text  # the option text is in the body, in full
@@ -208,9 +228,9 @@ def test_card_limits_with_huge_question():
 
 
 def test_card_header_has_a_state_tag_only_when_not_pending():
-    assert render_card(q(), "T").header.count("·") == 2  # ❓ Q3 · T · HH:MM
+    assert render_card(q(), "T").header == "❓ Q3 · T"
     done = render_card(q(lifecycle=L.RESOLVED_OBSERVED, delivered_to_codex=True), "T").header
     elsewhere = render_card(q(lifecycle=L.RESOLVED_OBSERVED), "T").header
     stale = render_card(q(lifecycle=L.EXPIRED_OR_STALE), "T").header
     assert done.endswith("· ✅ отвечено") and elsewhere.endswith("· отвечено в другом месте") and stale.endswith("· устарел")
-    assert render_card(q(lifecycle=L.DECISION_STAGED, staged={"a": ("A",)}), "T").header.count("·") == 2
+    assert render_card(q(lifecycle=L.DECISION_STAGED, staged={"a": ("A",)}), "T").header == "❓ Q3 · T"

@@ -59,7 +59,7 @@ class CardPoster:
                 if not exc.not_modified:
                     if not exc.gone:
                         raise
-                    await self._forget(ids)
+                    await self.forget(ids)
                     bind([])
                     return await self._sync_rich([], doc, topic_id, bind) if topic_id is not None else []
         elif topic_id is not None:
@@ -67,7 +67,7 @@ class CardPoster:
             ids.append(sent.message_id)
             bind(ids)
         if len(ids) > 1:  # it was a classic card of several messages
-            await self._forget(ids[1:])
+            await self.forget(ids[1:])
             ids = ids[:1]
             bind(ids)
         return ids
@@ -92,7 +92,7 @@ class CardPoster:
                         continue
                     if not exc.gone:
                         raise
-                    await self._forget(ids)
+                    await self.forget(ids)
                     bind([])
                     return await self.sync_text([], parts, keyboard, topic_id, bind) if topic_id is not None else []
             elif topic_id is not None:
@@ -100,12 +100,12 @@ class CardPoster:
                 ids.append(sent.message_id)
                 bind(ids)
         if len(ids) > len(parts):  # the card got shorter
-            await self._forget(ids[len(parts):])
+            await self.forget(ids[len(parts):])
             ids = ids[: len(parts)]
             bind(ids)
         return ids
 
-    async def _forget(self, ids: list[int]) -> None:
+    async def forget(self, ids: list[int]) -> None:
         for message_id in ids:
             with contextlib.suppress(Exception):  # best effort: a message that is gone is what we want anyway
                 await self._api.delete_message(self._chat_id, message_id)

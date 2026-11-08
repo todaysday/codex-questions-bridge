@@ -4,10 +4,10 @@ option labelled A., B., C. ..., and short letter buttons; stage, confirm, send. 
 from cqb.domain.enums import AgentQuestionState as S
 from cqb.domain.models import AgentQuestion
 from cqb.telegram.card_view import (
-    ARMED_HINT, DISCUSS_HINT, TAG_ANSWERED, TAG_ELSEWHERE, TAG_STALE, card_header, confirm_row, join_lines, letter,
+    ARMED_HINT, DISCUSS_HINT, TAG_ANSWERED, TAG_ELSEWHERE, TAG_STALE, card_header, confirm_row, join_lines, option_button,
     option_paras, status_paras, text_row,
 )
-from cqb.telegram.models import ActionSpec, Button, Doc, Para, Row, View
+from cqb.telegram.models import Divider, Doc, Para, Row, View
 from cqb.telegram.render import to_view
 
 
@@ -17,13 +17,13 @@ def render_agent_card(q: AgentQuestion, thread_name: str, armed: bool = False) -
 
 
 def agent_card_doc(q: AgentQuestion, thread_name: str, armed: bool = False) -> Doc:
-    header = card_header(q.display_no, thread_name, q.created_at, _tag(q))
+    header = card_header(q.display_no, thread_name, _tag(q))
     root, qid = q.root_thread_id, q.agent_question_id
     can_choose = q.is_open and q.answerable and q.sent_at is None and q.staged is None
-    buttons = [Button(letter(i), ActionSpec("aopt", root, f"{qid}:{i}"), style="primary")
-               for i in range(len(q.options))] if can_choose else None
-    blocks: list[Para | Row] = [header, Para((q.title,)), *option_paras(list(q.options), buttons),
-                                *status_paras(_status(q, armed))]
+    buttons = [option_button(i, "aopt", root, f"{qid}:{i}") for i in range(len(q.options))] if can_choose else None
+    closing = q.state in (S.ANSWERED, S.STALE) or q.sent_at is not None
+    blocks: list[Para | Row | Divider] = [header, Para((q.title,)), *option_paras(list(q.options), buttons),
+                                          *status_paras(_status(q, armed), divided=closing)]
     if can_choose:
         blocks.append(text_row(armed, "aother", root, qid))
     elif q.is_open and q.answerable and q.sent_at is None:  # staged: send or cancel

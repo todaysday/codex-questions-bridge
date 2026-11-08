@@ -1,6 +1,6 @@
 # Codex Questions Bridge — Technical Design
 
-**Version:** 0.15  
+**Version:** 0.16  
 **Date:** 2026-11-07  
 **Status:** Design / implementation-ready with explicitly identified integration spikes  
 **Runtime:** Codex Desktop / Codex App Server + PicoClaw + Telegram Forum Topics + one lightweight Bridge service
@@ -16,7 +16,7 @@
 5. **PicoClaw owns dialogs and model calls.** Each consultant has a persistent conversation scoped to its Telegram topic; it loads Codex context lazily through Bridge's read-only tools. PicoClaw has no Telegram channel here: Bridge owns the single Telegram bot and relays consultant messages to a long-running PicoClaw gateway over PicoClaw's `pico` WebSocket channel (§4.1).
 6. **`/status` is a static snapshot with a Status Agent summary.** Bridge collects numbers and a short 'now' phrase per thread deterministically from the daemon; a PicoClaw Status Agent in its own routed pico session scans the root thread and its descendants through the read-only tools and writes a two-part summary (`В процессе` / `Дальше`, about 900 characters). Worker Codex agents are not asked to produce summaries and need no prompt changes.
 7. **Status is on demand, not periodic, and one message per request.** The message is sent once, when numbers, 'now' phrases and the summary are all ready; it is never edited or refreshed. Keep calls and retrieved bytes bounded; the summary has a 5-minute deadline after which the card goes out without it.
-8. **Read-only is a hard boundary, not merely an instruction, with one narrow write.** PicoClaw and Status Agent cannot edit repositories or Codex history through Bridge. Bridge's own app-server connection is limited to a method whitelist (list/read/resume/unsubscribe, the read-only status methods `thread/turns/list`, `thread/items/list`, `thread/goal/get`, `account/rateLimits/read`, plus answering a captured question request) and exactly one write path, `send_user_message` (v0.8): one plain user message built from `threadId` and text only, sent with `turn/steer` when a turn is in progress, else with `thread/resume` + `turn/start` (then `thread/unsubscribe`), never with an approval policy, sandbox, model, cwd, effort or any other override. It exists only to answer agent-message questions from Telegram (§3.4, §6.4); `call()` still refuses every `turn/*` method, and so does every other method outside the whitelist.
+8. **Read-only is a hard boundary, not merely an instruction, with one narrow write.** PicoClaw and Status Agent cannot edit repositories or Codex history through Bridge. Bridge's own app-server connection is limited to a method whitelist (list/read/resume/unsubscribe, the read-only status methods `thread/turns/list`, `thread/items/list`, `thread/goal/get`, `account/rateLimits/read`, plus answering a captured question request) and exactly one write path, `send_user_message` (v0.8): one plain user message built from `threadId` and text only (plus `expectedTurnId` for steer and, since v0.16, `clientUserMessageId` and, for start, `turnTrigger`; §6.4), sent with `turn/steer` when a turn is in progress, else with `thread/resume` + `turn/start` (then `thread/unsubscribe`), never with an approval policy, sandbox, model, cwd, effort or any other override. It exists only to answer agent-message questions from Telegram (§3.4, §6.4); `call()` still refuses every `turn/*` method, and so does every other method outside the whitelist.
 9. **Bridge is a client of the existing shared Codex app-server daemon and receives live `request_user_input` requests.** Verified 2026-11-06 on Codex 0.164: every connection subscribed to the thread (including one that joins while the question is pending) gets the same request, and any of them can answer it. Telegram may capture, explain and answer, but shows an answer as delivered only after `serverRequest/resolved`; the first answer wins.
 10. **Archive/unarchive mirrors thread state.** Close/reopen existing consultant topics; preserve PicoClaw session and Telegram messages. Do not delete data when a thread is archived.
 11. **No cloud dependency beyond Telegram and chosen LLM provider.** Bridge, SQLite, Codex history and PicoClaw run on a host with access to the same Codex profile. Remote agents are explicitly configured as separate sources.
@@ -68,32 +68,31 @@ flowchart TD
 The topic contains **exactly one message**: a pinned registry message (plus pages if necessary) that the Bridge edits in place. Nothing else is ever posted there by the bot (no status cards, no alerts, no question cards). Example:
 
 ```text
-📋 Активные треды Codex · обновлено 12:26
+📋 Треды Codex
+❓ 1 · 🟢 1 · всего 14
 
-1. ❓ FoxProfile — User Access
-   last activity 12:21 · consultant: —
-   [➕ Создать консультанта]
+❓ FoxProfile — User Access  [➕ Создать]
+📁 foxprofile · 5м
+─────────
+🟢 AVIP — Instagram Scraper  [💬 Открыть]
+📁 avip-scraper · сейчас
+─────────
+Trading — Runtime  [💬 Открыть]
+📁 trading · вчера
 
-2. ⚙️ AVIP — Instagram Scraper
-   last activity 11:48 · consultant: ✅
-   [💬 Открыть]
-
-3. Trading — Runtime
-   last activity вчера · consultant: —
-   [➕ Создать консультанта]
-
-[◀️] [▶️] [📦 Архивные]
+[1/2] [▶️]
+[🕘 Ранее] [📦 Архивные]
 ```
 
-- `❓` marks a root with a pending question (captured / pending_confirmed / decision_staged). `⚙️` marks a root that is working right now: status `active` without a `waitingOn*` flag, taken from the live `thread/status/changed` map first and from the status stored by the last `thread/list` poll otherwise (the renderer never calls the daemon). A row may carry both. Do not present `notLoaded` as completed or idle.
+- `❓` marks a root with a pending question (captured / pending_confirmed / decision_staged). `🟢` marks a root that is working right now (v0.16; it replaces `⚙️`): status `active` without a `waitingOn*` flag, taken from the live `thread/status/changed` map first and from the status stored by the last `thread/list` poll otherwise (the renderer never calls the daemon). A row may carry both. Do not present `notLoaded` as completed or idle.
 - The default inventory shows unarchived **root** threads ordered: rows with a pending question first, then working threads, then everything else by `updatedAt desc` (ties by thread id); nested Codex workers are not individual rows here.
-- Configurable recency window (default: 30 days); older threads remain accessible via pagination/filter. "Active" in this view means **not archived**, not "currently running".
-- Row contents: markers (`❓`, `⚙️`), short display name, last activity, consultant state (`—`, `✅`, `🔒 closed`, `⚠️ error`). Row buttons: `💬 Открыть` when a consultant exists, else `➕ Создать консультанта`; nothing else. There is no refresh button and no per-row status button (`/status` is a consultant-topic command).
+- Relevant-threads filter (v0.16): by default a thread is listed when it has a pending question, is working, has a consultant, or was updated within `[telegram] registry_recent_hours` (default 24, 1..720); a `🕘 Ранее` / `Недавние` toggle shows the rest and an archive toggle the archived ones. Threads older than `[codex] recency_days` (default 30) are not inventoried at all. "Active" in this view means **not archived**, not "currently running".
+- Row contents (v0.16): a paragraph `markers <b>name</b> [button]` plus a separate `📁 folder · age` paragraph; markers `❓`, `🟢`, and `⚠️` / `🔒` for a consultant in error / closed (no text about the consultant state and no clock time); ages `сейчас`, `5м`, `2ч`, `вчера`, `3д`, moving in 5-minute steps. Row buttons: `💬 Открыть` when a consultant exists, else `➕ Создать консультанта`; nothing else. There is no refresh button and no per-row status button (`/status` is a consultant-topic command).
 - Inline callbacks use short opaque IDs (e.g. `tc:17`), **not full thread IDs**: Telegram `callback_data` is length-limited. Persist callback → action, root ID, expiry, and authorization context in SQLite.
 - Buttons `Создать` and `Открыть` are shown based on durable database state. `Открыть` is a Telegram deep link to the existing topic, constructed from configured group identity and the actual API-created topic ID; verify this URL format in acceptance tests.
 - The message refreshes itself, event-driven: a dirty flag is set when a question appears or resolves, a root starts or stops working (a status broadcast marks it only when working/not working flips), a poll changes the thread list or its order, a consultant is created, closed or reopened, or an archive state changes. Marks are coalesced: at most one edit per `registry_refresh_seconds` (default 5), and no edit when the rendered content (without the time header) is unchanged; a periodic safety re-render also keeps callback ids fresh. If the message is gone, recreate and re-pin.
 - Pagination buttons (`◀️ ▶️`, active/archived toggle) edit the same message at once; the current page is remembered in `bot_state`.
-- **Registry on the rich path (v0.15).** One paragraph per thread with its button in the line (`💬 Открыть` url button or `➕ Создать` callback button), 25 rows per page (5 on the classic path), and a navigation row `◀️ ▶️` plus the active/archived toggle. If the existing registry message is still classic and its rich edit is refused, the bot sends a fresh rich registry message, pins it, updates its state and deletes the old one.
+- **Registry on the rich path (v0.15).** Header `📋 <b>Треды Codex</b>` and `❓ n · 🟢 n · всего N`; per thread a paragraph with its button in the line (`💬 Открыть` url button or `➕ Создать` callback button) and the `📁 folder · age` paragraph, with `<hr/>` between threads (an empty line on the classic fallback); `[telegram] registry_rows_per_page` threads per page (default 8, 3..25); the page row is `◀️ [disabled n/total] ▶️` with the arrows hidden at the edges (classic: `стр. n/total` in the title), then the `🕘 Ранее` / `Недавние` toggle and the archive toggle. If the existing registry message is still classic and its rich edit is refused, the bot sends a fresh rich registry message, pins it, updates its state and deletes the old one.
 - Manual `/threads` (control topic) polls the inventory and forces a re-render of the single message; the bot deletes the command message when it has the right to. It must not call any model.
 
 ### 2.2 Manual consultant creation
@@ -139,7 +138,7 @@ Bridge relays only user messages from the consultant topic to PicoClaw, so this 
 There is no Inbox topic. A question belongs to the **branch of its thread**: when the origin thread's root has an **open** consultant (topic exists, not archived/closed), the question card and its answer buttons are posted in that consultant's topic. Example card:
 
 ```text
-❓ Q3 · FoxProfile — User Access · 12:19
+❓ Q3 · FoxProfile — User Access
 
 Where store profile settings?
 A. Existing table
@@ -150,9 +149,9 @@ B. Separate table
 [A] [B] [✍️ Ответить текстом]
 ```
 
-**Q numbers (v0.9).** Every question of a thread, of both kinds, gets `Q<n>` from an increasing per-root counter stored with the row (`display_no`, table `question_counters`, migration 5; existing rows are numbered by creation time). A number is unique within the root and never reused, also after the question resolves and after a restart. An agent message with several questions gives one number, one card and one answer per question. The number is in the card header (`❓ Q3 · <thread name> · HH:MM`, plus a short tag `✅ отвечено`, `отвечено в другом месте` or `устарел` only when the question is no longer pending) and in `/questions`.
+**Q numbers (v0.9).** Every question of a thread, of both kinds, gets `Q<n>` from an increasing per-root counter stored with the row (`display_no`, table `question_counters`, migration 5; existing rows are numbered by creation time). A number is unique within the root and never reused, also after the question resolves and after a restart. An agent message with several questions gives one number, one card and one answer per question. The number is in the card header (`❓ Q3 · <thread name>`, its own paragraph without a time since v0.16, plus a short tag `✅ отвечено`, `отвечено в другом месте` or `устарел` only when the question is no longer pending) and in `/questions`.
 
-**Rich cards (v0.15).** On the rich path a question card (both kinds) is one message: the header, the full question title, one paragraph per option, `A. full text`, with its button right after the option, and a `✍️ Ответить текстом` row. After a choice the same message is edited to show the choice plus a `✅ Отправить в Codex` / `↩️ Отмена` row; the typed-answer confirmation carries the same two buttons. There are no continuation messages on the rich path (they remain only in the classic fallback, below). The status card and the consultant opening message are unchanged.
+**Rich cards (v0.15).** On the rich path a question card (both kinds) is one message: the header, the full question title, one paragraph per option, `A. full text`, with its button right after the option (in-text buttons are labelled `Ответить A`, `Ответить B`; the classic keyboard keeps `A` / `B`), and a `✍️ Ответить текстом` row; a divider precedes the delivered / sent / stale line. After a choice the same message is edited to show the choice plus a `✅ Отправить в Codex` / `↩️ Отмена` row; the typed-answer confirmation carries the same two buttons. There are no continuation messages on the rich path (they remain only in the classic fallback, below). The status card and the consultant opening message are unchanged.
 
 **Cards never cut text (v0.9).** The card body holds the full title and the full text of every option, labelled `A.`, `B.`, `C.` ...; the buttons carry only the short label (`A`, `B`, ...) and `✍️ Ответить текстом`, so Telegram's button limits cut nothing. On the classic fallback a body that does not fit in one Telegram message continues in further messages (`↪ Q3 · 2/3`), split on line or word boundaries and never with `…`; the keyboard, and so the one-time action keys, sits on the last message only, a reply to any message of the card is a reply to the card, and every state change edits all of its messages. The same holds for `request_user_input` cards; a question whose text exceeds Bridge's storage bounds (title 20000, option 8000 characters, 26 options) is shown cut but is not answerable from Telegram.
 
@@ -177,7 +176,7 @@ An option button stages the choice (`decision_staged`) and asks for confirmation
 |---|---|---|
 | Free text / follow-up | Persistent consultant discusses design alternatives; may read Codex context | Consultant model + requested context |
 | `/status` | One static snapshot message of the bound root and all its descendants (consultant topic only): numbers, a 'now' phrase for the root and each listed subagent, and the Status Agent's two-part summary (`В процессе` / `Дальше`) or `📝 резюме недоступно`. Sent once when all of it is ready (typing indicator meanwhile), never edited; a second request while one collects answers `статус уже собирается` | Bridge-handled; 'now' phrases without an LLM; one Status Agent call per request in its own routed slot session; no consultant routing turn, nothing enters the consultant's context |
-| `/questions` | List unanswered questions of the bound Codex root, both kinds, with their `Q` numbers | Deterministic, Bridge-handled; no LLM |
+| `/questions` | Re-sends the unanswered questions of the bound Codex root, both kinds (v0.16): deletes the old cards of the pending questions and the command message, then posts fresh full cards in number order; `Нет неотвеченных вопросов` (auto-deleted after about 10 s) when none | Deterministic, Bridge-handled; no LLM |
 
 **`/thread` (v0.11).** Disabled by the owner (`THREAD_COMMAND_ENABLED = False` in `consultant_view.py`) and may return: it is not handled, not listed in the opening message and, like any other slash text, forwarded to the consultant with the `User says: ` escape.
 
@@ -295,6 +294,7 @@ Operational requirements (from the spike):
 
 - **One WebSocket per active session**, held for the whole turn: replies go only to a connection attached with the same `session_id` and are lost otherwise (history keeps them). `max_connections` (default 100) counts across sessions. Treat a disconnect as a lost reply; ignore `message.create` frames with empty content (tool-call notices).
 - **Serialization per session:** a message sent while a turn is running is merged into that turn, so Bridge sends the next message only after the final reply / `typing.stop`.
+- **Replies as Markdown (v0.16):** a consultant reply is sent as a rich `markdown` message after sanitizing (`telegram/markdown.py`): images become their alt text, only http(s) links are kept (`tg://` is broken), control and bidi characters are removed, `<` is neutralized, `$` is escaped outside code, and a long reply is split into up to 4 parts between blocks. A refused or unsupported rich message falls back to plain text; system and failure lines always stay plain.
 - **Dead sockets and worker crashes (v0.11):** a cached socket found dead is closed and replaced once and the turn goes on a fresh one. The per-session worker catches unexpected exceptions, reports a reason (`внутренняя ошибка шлюза: <Type>`), is restarted by a done callback and continues the queue. The typing indicator always stops (`finally`, an `active()` check and a hard cap). The health probe treats any probe exception as unhealthy.
 - **Supervision:** a dead hook process is not respawned until the gateway restarts, and `approve_tool` then denies every tool call. Bridge health-checks and restarts the gateway and treats this as an alarm (§11). Do not run the `picoclaw agent` CLI against live sessions (it shares session files without locking).
 - **Tool allowlist:** PicoClaw's default tools (`exec`, `write_file`, `edit_file`, `web_fetch`, `web_search`, `spawn`, `subagent`, `cron`, `install_skill`, `message`, `send_file`) must be disabled or denied for consultants. Verified on v0.3.1 (mock): 18 tools are exposed by default (also `append_file`, `find_skills`, `list_dir`, `load_image`, `read_file`, `reaction`, `mcp_history_read_history`); `tools.<name>.enabled=false` (plus `web` and `skills`) leaves only the MCP tool and `reaction`, because `reaction` and `delegate` have no config switch. The reliable mechanism is a per-agent allowlist in `<workspace>/AGENT.md` frontmatter, e.g. `tools: [mcp_history_read_history]` (the main agent additionally lists `delegate`), applied after a gateway restart. Without an allowlist a delegated agent inherits all global tools (`exec`, file writes). `delegate` is auto-registered once 2+ agents exist; the consultant's allowlist does not list it and the template carries no `subagents.allow_agents` (v0.7: status never runs through the consultant, §5.1). Since v0.12 the consultant's allowlist lists `mcp_cqb_web_search` and `web_fetch` (§4.2.2); the Status Agent's never does.
@@ -534,14 +534,14 @@ Verified by the status card spike (§12.1, S0-E). Layout (v0.10). The card is Te
 
 ➡️ Дальше: <2-4 lines: what remains or comes next>
 
-📈 лимит 41% нед. · сброс 20.01 09:00 UTC
+📈 осталось 59% нед. · сброс через 1д 10ч 05м
 🔗 Открыть в Codex
 ```
 
 - **Header (v0.11).** Line 1: the state icon, the thread name and ` · 📁 {project folder}` (ONLY the last path component of the thread's working directory, never the full path; left out when unknown) (🟢 работает, 🟡 ждёт, ⚪ простаивает, 💤 не загружен, 🔴 ошибка; 🟠 is only an icon for a possibly stalled thread, the quiet time shows in 🔄). Line 2: `🧠 {model} {version}·{effort}` (short model name: `gpt-6-luna` + `high` becomes `luna 6·high`, `gpt-6.1-sol` + `low` becomes `sol 6.1·low`), `🕒 {turn duration}` (like `2ч15м`, only while the thread is active), `🔄 {now|N м|N ч|N д}` (last activity) and `💭 {сейчас}` (what the thread does now; left out when unknown). Line 3 (v0.13): ` <b>ctx</b> used/window (pct%) · 💾 {cache} · 🗜️N` (`💾` is the session-wide cache hit, rounded down, one decimal from 99% up such as `99.4%`, `100%` only when exact; `🗜️N` is the compaction count, hidden when zero; each part is left out when unknown). Then the goal line (skipped without a goal).
 - **Subagent block.** Counts per state (a zero count is hidden) and at most 6 one-line agents (the same icons; `↳` for depth 2 and deeper; the name is the humanized last `agent_path` segment); the rest is `… и ещё N`. Since v0.13 an agent line reads `ctx 44% · 💾 95% · {сейчас|age} · 🗜️2` (short context form), for the at most 6 shown agents, from each thread's rollout tail.
 - **Summary (v0.11).** The Status Agent writes EXACTLY two labelled Russian parts, about 900 characters in all: `В процессе` (3-5 short lines: what is implemented or verified overall, the current step, gates, tests, blockers) and `Дальше` (2-4 short lines: what remains or comes next, only as far as the reports say). The parser keeps at most 5 lines / 650 characters of the first and 4 lines / 400 characters of the second; on the card `Дальше` follows after an EMPTY line. The agent writes `—` only when the next step is truly unknown and Bridge then leaves the `Дальше` part out. A card without a summary shows `📝 резюме недоступно`.
-- **Footer.** `📈 лимит N% нед. · сброс dd.mm HH:MM UTC`, the only absolute time on the card. There is no snapshot time: Telegram shows the message time.
+- **Footer (v0.16).** `📈 осталось N% нед. · сброс через 1д 10ч 05м`: remaining = 100 - used, the countdown is computed from `resetsAt`; there is no UTC and no absolute time anywhere on the card. There is no snapshot time either: Telegram shows the message time.
 - **Open link (v0.14, optional).** With `[status] open_link` set, one extra LAST line under the footer, `🔗 Открыть в Codex`, is an HTML anchor whose href is the template with the root thread id percent-encoded into `{thread_id}` (href HTML-escaped). It appears only on the status card (not in the registry or the opening message) and is dropped last by the shrink logic, after the summary is cut; the footer always stays. The template must be an `https://` URL of at most 200 printable ASCII characters, no whitespace, with a host and `{thread_id}` exactly once and no other braces; an invalid value fails fast at config load and is never echoed. Default empty: no link. Telegram links and buttons accept only http(s) and `tg://`, so the desktop-only `codex://threads/<id>` cannot be used. Candidate: `https://chatgpt.com/codex/tasks/{thread_id}` (the ChatGPT iOS app's universal links include `/codex/tasks/*`, `/codex/cloud/tasks/*`, `/codex/pair` and `/open-app`); the exact format for threads on a remote server in the ChatGPT iOS app is unconfirmed, so test it before relying on it.
 - **Size.** Over 4096 characters the card shrinks in a fixed order: the cache part of the subagent lines, then agent lines 6 to 3, then shorter subagent `💭` fragments, then the goal line, and only last shorter summary caps, then the open link (the footer stays). It never exceeds 4096 characters. Missing data is shown as `—`, never invented. It is a snapshot: one NEW message per request in the topic where it was requested, never edited, with no placeholder and no state kept in `bot_state` (earlier snapshots stay as history). While collecting, the topic shows the typing indicator. The collect is bounded by `[status] timeout_seconds` (default 300, 30..3600): numbers and 'now' phrases take well under a second, the summary the rest; if it is not ready in time (or no Status Agent is configured or reachable) the card is sent without it with the line `📝 резюме недоступно`. One collect per root at a time (a second `/status` answers `статус уже собирается`). Bridge never resumes or subscribes to a thread for this (resume has side effects for threads with goals); the whitelist only gains `thread/turns/list`, `thread/items/list`, `thread/goal/get` and `account/rateLimits/read`.
 
@@ -637,9 +637,11 @@ Message format, copied from what the Codex app itself stores after an answer (co
 
 ```
 <send_user_message_question_reply>
-[{"question":"<title>","answer":"<option or free text>","questionItemId":"[\"request_user_input_async\",\"<agentMessage item id>\",<question index>]"}]
+[{"questionItemId":"[\"request_user_input_async\",\"<agentMessage item id>\",<question index>]","question":"<title>","answer":"<option or free text>"}]
 </send_user_message_question_reply>
 ```
+
+(v0.16: the entry keys are ordered `questionItemId`, `question`, `answer`, and a newline follows the closing tag, byte for byte as the app writes it. The investigation found that the app answers with a plain user message exactly like the Bridge: no tool output and no special item. Both `turn/steer` and `turn/start` carry a `clientUserMessageId` (uuid4), and `turn/start` alone carries `turnTrigger: "send_user_message_async_question"`. The whitelist of `send_user_message` is exactly `{threadId, input, expectedTurnId (steer), clientUserMessageId, turnTrigger (start)}`.)
 
 Sending (`send_user_message`, the only write path, §0.8): `turn/steer` with `expectedTurnId` when the latest turn (`thread/turns/list`, limit 1) is in progress, else `thread/resume` (`excludeTurns`) + `turn/start` + `thread/unsubscribe`. A rejected call (the turn ended or began meanwhile) re-reads and retries once; a timeout is not retried because the message may have arrived. Verified on a throwaway thread: both paths store a `userMessage` with exactly the sent text; `turn/start` while a turn runs is accepted by the daemon; a turn that has just begun reads as `interrupted` for about 0.3 s. Before sending, Bridge re-reads the thread: if a `userMessage` already follows the question, nothing is sent and the card says `отвечено в другом месте`. The card says `Доставлено` only after the watcher sees the new `userMessage`; until then it says the answer was sent. Secrets are not applicable (no `isSecret` exists for these questions); a text over the storage bounds is cut and the card then asks to answer in Codex.
 
@@ -819,7 +821,8 @@ codex-questions-bridge/
 │   ├── registry.py              # thread / consultant state transitions
 │   ├── telegram_control.py      # Bridge bot: topics, callbacks, question cards
 │   │                            #   (v0.15: telegram/render.py neutral Doc/Para/Row -> rich HTML or classic text + keyboard;
-│   │                            #    telegram/present.py Presenter: flag, fallback, local limit checks)
+│   │                            #    telegram/present.py Presenter: flag, fallback, local limit checks;
+│   │                            #    telegram/markdown.py sanitizer for rich-markdown consultant replies)
 │   ├── pico_gateway.py          # consultant relay, pico WS sessions, supervision
 │   ├── questions.py             # capture, dedup, lifecycle
 │   ├── status.py                # scope, cursors, reports
@@ -847,6 +850,8 @@ Example **Bridge-only** config (this is project-defined TOML, **not** PicoClaw's
 chat_id = -1001234567890
 control_topic_name = "📋 Треды Codex"
 registry_refresh_seconds = 5   # 5..3600: at most one edit of the pinned registry message per interval
+registry_rows_per_page = 8     # v0.16: 3..25 threads per registry page
+registry_recent_hours = 24     # v0.16: 1..720, threads updated within this window count as relevant
 rich_messages = true           # v0.15: Bot API 10.3 rich messages with in-text buttons; false = classic text + keyboard only
 allowed_user_ids = [123456789]
 
@@ -968,7 +973,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 
 ## 10. Threat model and access control
 
-- The Bot API client targets Bot API 10.1 (rich messages) and 10.3 (in-text buttons); nothing else changes in the trust model, and the classic text + inline keyboard path remains an automatic fallback (§2.1).
+- The Bot API client targets Bot API 10.1 (rich messages) and 10.3 (in-text buttons); nothing else changes in the trust model, and the classic text + inline keyboard path remains an automatic fallback (§2.1). Consultant replies use the rich `markdown` entity type with the sanitizer of §4.1 and fall back to plain text.
 - Telegram supergroup must be **private** and restricted to explicitly allowed user IDs; group ID is also checked. Ignore forwarded/anonymous-admin messages unless identities are reliably resolved.
 - The Bridge bot gets only necessary Telegram permissions (manage topics, post/edit/pin); avoid unnecessary admin rights. PicoClaw has no bot token.
 - Single bot: Bridge receives all group updates it is allowed to see, so **Bridge filters unregistered topics (service topics, unbound topics, unauthorized users) before any model call** and relays only registered consultant-topic messages to PicoClaw. To see free text in consultant topics the bot needs admin rights or Telegram privacy mode off (Telegram bot FAQ; exact setup to verify in the S0-B Telegram flow); Bridge, not Telegram, does the filtering. Do not silently pay tokens for unrelated service-topic messages.
@@ -1007,6 +1012,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 | Telegram rejects an HTML message (`can't parse entities`) | The same text is sent again as plain text, tags stripped (any other error is raised as before) | The card without bold |
 | Project file tool while `[mcp] project_files` is off, or a refused root/path | Typed refusal with a stable code (`disabled`, `denied`, `invalid_path`, `symlink_refused`, `cwd_too_broad`, ...); nothing is logged but codes and counts | Consultant says the file is not available |
 | Pico session worker raises unexpectedly, or a cached socket is dead | Dead socket replaced once; otherwise the turn fails with a reason and the worker continues with the queue | `внутренняя ошибка шлюза: <Type>` |
+| Rich Markdown consultant reply refused or unsupported by Telegram | The same reply is sent again as plain text | Reply without formatting |
 | Web tool refused or unavailable (hook URL/query check, `[mcp] web_search` off, endpoint error) | Fail closed: the call is denied with a generic reason, or `web_search` returns a typed error (`disabled`, `query_rejected`, `unavailable`, `bad_answer`); no upstream body, query or key is logged | Consultant says the lookup was refused or is unavailable |
 | Question captured but actual RPC unknown | Keep `captured`, not pending confirmed | Unverified prompt state |
 | Telegram answer selected | Stage, confirm, answer via shared daemon | `Sent`; `Answered` only after `serverRequest/resolved` |
@@ -1137,3 +1143,4 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 - **v0.13 (2026-11-07):** Status card: context, cache hit (session-wide) and compaction count for the root and each shown subagent, read from the session files; compaction counted with ripgrep (grep fallback).
 - **v0.14 (2026-11-08):** Optional "open in Codex" link as the last line of the status card, configured by a URL template ([status] open_link).
 - **v0.15 (2026-11-08):** Question cards and the registry use Telegram Bot API 10.3 rich messages with buttons inside the text; classic text + keyboard remains as an automatic fallback.
+- **v0.16 (2026-11-08):** Registry redesigned (8 relevant threads per page, two-line rows with dividers, page indicator, green-circle working marker, relative ages, no clock times); /questions re-sends fresh cards; consultant replies rendered as Markdown; status footer shows what is left with a reset countdown; question replies mimic the app exactly.

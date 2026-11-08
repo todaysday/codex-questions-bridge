@@ -3,13 +3,15 @@
 The connection has full rights on the daemon, so the method whitelist below is the
 only boundary. Everything the Bridge sends goes through call(), respond() or send_user_message().
 call() is read-only. send_user_message() is the single write path into a thread: one plain user
-message (the answer to an agent-message question), built from threadId and text only.
+message (the answer to an agent-message question), built from threadId and text only (plus the
+app's own clientUserMessageId and, for turn/start, turnTrigger).
 """
 
 import asyncio
 import contextlib
 import itertools
 import logging
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -28,6 +30,7 @@ ALLOWED_METHODS = frozenset(
 _RESUME_KEYS = frozenset({"threadId", "excludeTurns"})
 # The only writes, reachable solely through send_user_message(): never through call().
 STEER, START = "turn/steer", "turn/start"
+START_TRIGGER = "send_user_message_async_question"  # what the Codex app sets on the turn that carries a question reply
 MAX_USER_MESSAGE_CHARS = 20_000
 RACE_PAUSE = 0.5  # a turn that has just begun reads as "interrupted" for ~0.3 s: look again after this
 
@@ -96,8 +99,8 @@ class AppServerClient:
         """Send `text` into the thread as a normal user message; returns "steer" or "start".
 
         turn/steer when the latest turn is in progress, else thread/resume + turn/start (and an unsubscribe
-        again). The params are built here: threadId, input (one text item) and, for steer, expectedTurnId.
-        Never any approvalPolicy, sandbox, model, cwd, effort or other override. A rejected call (the turn
+        again). The params are built here: threadId, input (one text item), clientUserMessageId (a fresh uuid4,
+        as the app sends), for steer expectedTurnId and for start turnTrigger. Never any approvalPolicy, sandbox, model, cwd, effort or other override. A rejected call (the turn
         ended or a new one began meanwhile) is re-planned once from a fresh read; a timeout is not retried,
         because the message may have gone through.
         """
@@ -108,7 +111,8 @@ class AppServerClient:
             try:
                 turn_id = await self._running_turn(thread_id)
                 if turn_id is not None:
-                    await self._rpc(STEER, {"threadId": thread_id, "input": content, "expectedTurnId": turn_id})
+                    await self._rpc(STEER, {"threadId": thread_id, "input": content, "expectedTurnId": turn_id,
+                                            "clientUserMessageId": str(uuid.uuid4())})
                     return "steer"
                 await self._start_turn(thread_id, content)
                 return "start"
@@ -127,7 +131,8 @@ class AppServerClient:
     async def _start_turn(self, thread_id: str, content: list[dict[str, Any]]) -> None:
         await self._rpc("thread/resume", {"threadId": thread_id, "excludeTurns": True})
         try:
-            await self._rpc(START, {"threadId": thread_id, "input": content})
+            await self._rpc(START, {"threadId": thread_id, "input": content,
+                                    "clientUserMessageId": str(uuid.uuid4()), "turnTrigger": START_TRIGGER})
         finally:
             try:
                 await self._rpc("thread/unsubscribe", {"threadId": thread_id})

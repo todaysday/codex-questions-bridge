@@ -23,6 +23,7 @@ class Button:
     callback_data: str | None = None
     style: str | None = None  # rich messages only: primary | success | danger | link
     classic_text: str | None = None  # the label on the classic inline keyboard, when it differs from `text`
+    disabled: bool = False  # rich only: a label that does nothing (the page counter); left out of the classic keyboard
 
 
 Keyboard = tuple[tuple[Button, ...], ...]
@@ -124,7 +125,7 @@ class Para:
     parts: tuple[Part, ...]
     glue: str = "\n\n"
     classic: str | None = None
-    volatile: bool = False  # the header: carries the time, so it is left out of the fingerprint
+    volatile: bool = False  # the header: the classic View.header, and not part of the fingerprint
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,33 +136,42 @@ class Row:
 
 
 @dataclass(frozen=True, slots=True)
+class Divider:
+    """A thin line between sections (rich: `<hr/>`). The classic text already has a blank line there: nothing."""
+
+
+@dataclass(frozen=True, slots=True)
 class Doc:
     """What a view wants to say, neutral between rich messages and the classic text + inline keyboard.
 
     `per_row`: how many in-line buttons share one classic keyboard row."""
 
-    blocks: tuple[Para | Row, ...]
+    blocks: tuple[Para | Row | Divider, ...]
     per_row: int = 5
 
     def mapped(self, fn: Callable[[Button], Button]) -> "Doc":
         """The same document with every button replaced by `fn(button)` (binding callback ids)."""
-        blocks: list[Para | Row] = []
+        blocks: list[Para | Row | Divider] = []
         for b in self.blocks:
-            if isinstance(b, Row):
+            if isinstance(b, Divider):
+                blocks.append(b)
+            elif isinstance(b, Row):
                 blocks.append(Row(tuple(fn(x) for x in b.buttons)))
             else:
                 blocks.append(dataclasses.replace(b, parts=tuple(fn(p) if isinstance(p, Button) else p for p in b.parts)))
         return dataclasses.replace(self, blocks=tuple(blocks))
 
     def fingerprint(self) -> str:
-        """Stable over the volatile header and over bound callback ids: changes only with what the owner would see."""
+        """Stable over the header paragraph and over bound callback ids: changes only with what the owner would see."""
         raw = repr([_stable(b) for b in self.blocks if not (isinstance(b, Para) and b.volatile)])
         return hashlib.sha1(raw.encode()).hexdigest()
 
 
-def _stable(block: "Para | Row") -> object:
+def _stable(block: "Para | Row | Divider") -> object:
     def one(b: Button) -> tuple[object, ...]:
-        return (b.text, b.action, b.url, b.style)
+        return (b.text, b.action, b.url, b.style, b.disabled)
+    if isinstance(block, Divider):
+        return "---"
     if isinstance(block, Row):
         return tuple(one(b) for b in block.buttons)
     return (block.glue, block.classic, tuple(one(p) if isinstance(p, Button) else p for p in block.parts))

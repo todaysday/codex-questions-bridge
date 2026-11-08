@@ -122,7 +122,7 @@ def test_missing_data_is_a_dash_never_invented():
     lines = text.splitlines()
     assert lines[0] == "🟢 —"
     assert lines[1] == "🧠 — · 🔄 now"  # no turn start: no duration
-    assert lines[2] == " <b>ctx</b> —" and "📈 лимит —" in text and "снимок" not in text
+    assert lines[2] == " <b>ctx</b> —" and "📈" not in text and "снимок" not in text  # no usage: no limits line
     assert "🎯" not in text  # no goal: the line is skipped, not dashed
 
 
@@ -234,17 +234,17 @@ def test_rate_limits_are_cached_for_thirty_seconds():
     assert src.calls.count("limits") == 2
     src.limits = None
     clock.now += 31
-    assert render_status(collect(svc)).endswith("📈 лимит —")
+    assert "📈" not in render_status(collect(svc))
 
 
 def test_limits_rendering_weekly_primary_only():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
     text = render_status(collect(svc))
-    assert "📈 лимит 30% нед. · сброс " in text and text.endswith(" UTC") and "снимок" not in text
+    assert text.endswith("📈 осталось 70% нед. · сброс через 1ч 00м") and "UTC" not in text and "снимок" not in text
     src.limits = RateLimits(55, None, 300)
     svc._limits = None
-    assert render_status(collect(svc)).endswith("📈 лимит 55% 5ч")
+    assert render_status(collect(svc)).endswith("📈 осталось 45% 5ч")
 
 
 def test_every_snapshot_reads_fresh_data():

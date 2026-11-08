@@ -117,3 +117,40 @@ def test_live_flip_hook_fires_only_when_working_actually_flips():
     flips.clear()
     send(RunState.WORKING)
     assert flips == ["t"]
+
+
+def test_relevance_filter_counts_pages_and_the_older_list(conn):
+    threads = ThreadDao(conn)
+    day = 86400
+    threads.upsert_many([
+        thread("fresh", updated=NOW - 3600),
+        thread("asked", updated=NOW - 5 * day), thread("busy", updated=NOW - 6 * day), thread("bound", updated=NOW - 7 * day),
+        *(thread(f"old{i}", updated=NOW - (2 + i) * day) for i in range(5)),
+        thread("edge", updated=NOW - 24 * 3600),  # exactly recent_hours old: still relevant
+        thread("ancient", updated=NOW - 40 * day),  # outside the recency window: in no list
+    ])
+    consultants = ConsultantDao(conn)
+    c = consultants.reserve("s1", "bound", -100, "k", 1)
+    consultants.open(c.consultant_id, 9, 2)
+    questions = QuestionDao(conn)
+    questions.insert_if_new(question("a", tool_use_id="a", root_thread_id="asked"))
+    live = LiveState(clock=lambda: NOW)
+    asyncio.run(live.handle(ThreadStatusChanged("busy", False, False, RunState.WORKING)))
+    q = RegistryQuery(ThreadDao(conn), consultants, questions, "s1", 30, lambda: NOW, live=live, recent_hours=24)
+    ids = lambda page: [r.thread.thread_id for r in page.rows]  # noqa: E731
+    recent = q.page(0, 3, older=False)
+    assert ids(recent) == ["asked", "busy", "fresh"]  # ❓, then 🟢, then the newest
+    assert recent.pages == 2 and recent.has_next and not recent.older
+    assert ids(q.page(1, 3, older=False)) == ["edge", "bound"]
+    older = q.page(0, 3, older=True)
+    assert ids(older) == ["old0", "old1", "old2"] and older.pages == 2 and older.older
+    assert ids(q.page(1, 3, older=True)) == ["old3", "old4"]
+    # the header counts are the same in every list: threads with a question, working, all in the window
+    for page in (recent, older, q.page(0, 3)):
+        assert (page.pending, page.working, page.total) == (1, 1, 10)
+    assert q.page(9, 3, older=False).rows == () and q.page(0, 50, older=False).pages == 1
+    assert len(q.page(0, 50).rows) == 10  # older=None: everything, the old behaviour
+    assert RegistryQuery(ThreadDao(conn), consultants, questions, "s1", 30, lambda: NOW, recent_hours=24 * 3).page(
+        0, 50, older=True).total == 10
+    wide = RegistryQuery(ThreadDao(conn), consultants, questions, "s1", 30, lambda: NOW, recent_hours=24 * 30)
+    assert wide.page(0, 50, older=True).rows == ()  # everything is recent

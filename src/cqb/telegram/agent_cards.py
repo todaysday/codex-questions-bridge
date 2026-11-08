@@ -93,7 +93,8 @@ class AgentQuestionCards:
             except Exception as exc:
                 log.warning("agent card %s not updated: %s", agent_question_id, type(exc).__name__)
 
-    async def refresh_card(self, agent_question_id: str) -> None:
+    async def refresh_card(self, agent_question_id: str, fresh: bool = False) -> None:
+        """Edit the card; `fresh`: delete its old messages first and post the card anew (`/questions`)."""
         async with self._lock:
             q = self._questions.get(agent_question_id)
             if q is None:
@@ -105,6 +106,10 @@ class AgentQuestionCards:
             topic = None  # where a new card may be posted: only for an open question of an open consultant
             if q.is_open and row is not None and row.consultant_state is ConsultantState.OPEN:
                 topic = row.topic_id or None
+            if fresh and ids and topic is not None:
+                await self._poster.forget(ids)  # a failure leaves no card: the periodic pass posts it again
+                self._questions.bind_card_messages(agent_question_id, [])
+                ids = []
             if not ids and topic is None:
                 return  # no open consultant (the registry row shows ❓) or nothing actionable left to post
             await self._poster.sync(

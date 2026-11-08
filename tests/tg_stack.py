@@ -165,7 +165,7 @@ def thread(tid, updated=NOW - 60, name=None, state=ArchiveState.ACTIVE, parent=N
 
 
 class Stack:
-    def __init__(self, conn, fake: FakeTelegram, token=TOKEN, narrator=None, summary_timeout=300, open_link="", rich=False):
+    def __init__(self, conn, fake: FakeTelegram, token=TOKEN, narrator=None, summary_timeout=300, open_link="", rich=False, rows=5):
         self.conn, self.fake = conn, fake
         self.clock = Clock()
         self.state = BotStateDao(conn)
@@ -192,10 +192,10 @@ class Stack:
         self.registry = RegistryQuery(self.threads, self.consultant_dao, self.question_dao, "s1", 30, self.clock, live=self.live,
                                        agent_questions=self.agent_dao)
         self.topics = ControlTopics(self.present, self.state, CHAT_ID, "📋 Треды Codex")
-        self.tg_topics = TelegramTopics(self.api, CHAT_ID)
+        self.tg_topics = TelegramTopics(self.present, CHAT_ID)
         self.publisher = RegistryPublisher(
             self.present, self.topics, self.state, self.keys, self.registry, CHAT_ID,
-            interval=0.05, clock=self.clock,
+            interval=0.05, clock=self.clock, rows=rows,
         )
         self.cards = QuestionCards(
             self.present, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh, self.clock
@@ -212,7 +212,7 @@ class Stack:
         self.router = Router(
             RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.present, self.keys, self.topics,
             self.publisher, self.cards, self.agent_cards, self.consultants, self.registry,
-            self.questions, self.agent, self.relay, self.focus, self.status_cards, "s1", self.inventory.poke, self.clock,
+            self.questions, self.agent, self.relay, self.focus, self.status_cards, "s1", self.inventory.poke, self.clock, notice_seconds=0.05,
         )
         self.poller = Poller(self.api, self.state, self.router.handle, poll_timeout=0)
         self.questions.subscribe(on_question=self.cards.on_question, on_resolved=self.cards.on_resolved)

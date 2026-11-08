@@ -9,8 +9,8 @@ Findings (schema v2 ThreadItem -> agentMessage, checked on the real daemon, read
   The owner answers with a normal user message, stored as a `userMessage` item after the agentMessage.
   So a question is pending while no userMessage follows its agentMessage in the thread.
 * The app's answer text (what the Bridge must reproduce, see codex/agent_reply.py) is
-  `<send_user_message_question_reply>\\n[{"question": <title>, "answer": <option or free text>,
-  "questionItemId": "[\\"request_user_input_async\\",\\"<agentMessage item id>\\",<index>]"}]\\n</...>`.
+  `<send_user_message_question_reply>\\n[{"questionItemId": "[\\"request_user_input_async\\",\\"<agentMessage item id>\\",<index>]",
+  "question": <title>, "answer": <option or free text>}]\\n</send_user_message_question_reply>\\n`.
   The app sends one message per answered question. The Bridge does the same: every question of a message is its
   own row (item id + index), has its own card and Q number, and is staged, confirmed and sent on its own.
   A reply message names its question in questionItemId, which marks exactly that question answered; a user

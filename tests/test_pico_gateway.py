@@ -642,7 +642,7 @@ class TypingSink:
     def __init__(self):
         self.said, self.typed = [], 0
 
-    async def say(self, topic, text):
+    async def say(self, topic, text, markdown=False):
         self.said.append(text)
 
     async def typing(self, topic):

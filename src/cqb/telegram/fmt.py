@@ -33,6 +33,21 @@ def hhmm(ts: int) -> str:
     return time.strftime("%H:%M", time.localtime(ts))
 
 
+def age(ts: int, now: int) -> str:
+    """How long ago, relative and coarse so the text changes rarely: `сейчас`, `5м` (steps of five minutes), `2ч`,
+    `вчера`, `3д`."""
+    delta = max(now - ts, 0)
+    if delta < 300:
+        return "сейчас"
+    if delta < 3600:
+        return f"{delta // 300 * 5}м"
+    if delta < 86400:
+        return f"{delta // 3600}ч"
+    if delta < 172800:
+        return "вчера"
+    return f"{delta // 86400}д"
+
+
 def when(ts: int, now: int) -> str:
     """HH:MM today, `вчера`, else DD.MM."""
     day = time.localtime(ts)[:3]

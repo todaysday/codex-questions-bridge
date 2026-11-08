@@ -9,8 +9,8 @@ split into continuation messages by the card poster (telegram/card_post.py)."""
 from cqb.domain.enums import QuestionLifecycle as L
 from cqb.domain.labels import question_label
 from cqb.domain.models import Question, QuestionOption
-from cqb.telegram.fmt import clip, hhmm
-from cqb.telegram.models import ActionSpec, Bold, Button, Doc, Para, Row, View
+from cqb.telegram.fmt import clip
+from cqb.telegram.models import ActionSpec, Bold, Button, Divider, Doc, Para, Row, View
 from cqb.telegram.render import to_view
 
 ANSWER_LIMIT = 1000
@@ -30,9 +30,10 @@ TAG_ELSEWHERE = "отвечено в другом месте"
 TAG_STALE = "устарел"
 
 
-def card_header(number: int, thread_name: str, created_at: int, tag: str | None = None) -> Para:
-    """`❓ Q3 · <thread name> · HH:MM`, plus a short state tag only when the question is no longer pending."""
-    tail = f" · {clip(thread_name, 80)} · {hhmm(created_at)}" + (f" · {tag}" if tag else "")
+def card_header(number: int, thread_name: str, tag: str | None = None) -> Para:
+    """`❓ Q3 · <thread name>` on its own line, plus a short state tag only when the question is no longer pending.
+    No clock time: Telegram shows the time of the message itself."""
+    tail = f" · {clip(thread_name, 80)}" + (f" · {tag}" if tag else "")
     return Para(("❓ ", Bold(question_label(number)), tail), volatile=True)
 
 
@@ -42,18 +43,19 @@ def render_card(q: Question, thread_name: str, armed: bool = False) -> View:
 
 
 def card_doc(q: Question, thread_name: str, armed: bool = False) -> Doc:
-    header = card_header(q.display_no, thread_name, q.created_at, _tag(q))
+    header = card_header(q.display_no, thread_name, _tag(q))
     if q.is_secret:
         return Doc((header, Para((SECRET_NOTICE,))))
-    blocks: list[Para | Row] = [header]
+    blocks: list[Para | Row | Divider] = [header]
     choose = _can_choose(q)
     for n, item in enumerate(q.items, start=1):
-        buttons = [Button(letter(i), ActionSpec("opt", q.root_thread_id, f"{q.question_id}:{i}"), style="primary")
+        buttons = [option_button(i, "opt", q.root_thread_id, f"{q.question_id}:{i}")
                    for i in range(len(item.options))] if choose else None
         title = f"{item.header}: {item.text}" if item.header else item.text
         blocks.append(Para((f"{n}. {title}" if len(q.items) > 1 else title,)))
         blocks += option_paras([_option_text(o) for o in item.options], buttons)
-    blocks += status_paras(_status(q, armed))
+    closing = q.lifecycle in (L.RESOLVED_OBSERVED, L.EXPIRED_OR_STALE) or q.delivered_to_codex
+    blocks += status_paras(_status(q, armed), divided=closing)
     blocks += _answer_rows(q, armed)
     return Doc(tuple(blocks))
 
@@ -81,8 +83,17 @@ def option_paras(texts: list[str], buttons: list[Button] | None) -> list[Para]:
     ]
 
 
-def status_paras(text: str) -> list[Para]:
-    return [Para((text,))] if text else []
+def status_paras(text: str, divided: bool = False) -> list[Para | Divider]:
+    """The state line; a final one (delivered, sent, stale) is set apart from the question by a divider."""
+    if not text:
+        return []
+    return [Divider(), Para((text,))] if divided else [Para((text,))]
+
+
+def option_button(index: int, action: str, root: str, payload: str) -> Button:
+    """In the text the button says what it does (`Ответить A`); the classic keyboard keeps the short letter."""
+    return Button(f"Ответить {letter(index)}", ActionSpec(action, root, payload), style="primary",
+                  classic_text=letter(index))
 
 
 def _status(q: Question, armed: bool) -> str:

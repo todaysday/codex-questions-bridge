@@ -140,12 +140,14 @@ async def run(
         registry = RegistryQuery(
             threads, consultant_dao, question_dao, source_id, config.codex.recency_days, live=live,
             agent_questions=agent_dao,
+            recent_hours=tg.registry_recent_hours,
         )
         present = Presenter(api, tg.rich_messages)
         topics = ControlTopics(present, state, tg.chat_id, tg.control_topic_name)
-        tg_topics = TelegramTopics(api, tg.chat_id)
+        tg_topics = TelegramTopics(present, tg.chat_id)
         publisher = RegistryPublisher(
-            present, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds
+            present, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds,
+            rows=tg.registry_rows_per_page,
         )
         cards = QuestionCards(present, keys, questions, registry, tg.chat_id, publisher.request_refresh)
         agent_cards = AgentQuestionCards(present, keys, agent_questions, registry, tg.chat_id, publisher.request_refresh)
@@ -206,6 +208,7 @@ async def run(
             agent_questions,
             ConsultantRelay(gateway, tg_topics, context=focus), focus, status, source_id, inventory.poke,
         )
+        closers.append(router.close)
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
         questions.subscribe(on_question=cards.on_question, on_resolved=cards.on_resolved)
         agent_questions.subscribe(on_question=_log_agent_question, on_closed=_log_agent_closed)

@@ -3,7 +3,7 @@
 The router has already authorized the sender and resolved the topic to a consultant, so only
 registered topics reach `relay`; this class still refuses anything that is not an open binding.
 The dialog (PicoClaw gateway) and the messenger are ports: no network code lives here.
-Replies are plain text, bounded, and failures become one readable line, never a stack trace.
+Replies are bounded (the sink renders their Markdown), and failures become one readable line, never a stack trace.
 """
 
 import asyncio
@@ -74,7 +74,7 @@ class ConsultantDialog(Protocol):
 
 
 class TopicSink(Protocol):
-    async def say(self, topic_id: int, text: str) -> None: ...
+    async def say(self, topic_id: int, text: str, *, markdown: bool = False) -> None: ...
     async def typing(self, topic_id: int) -> None: ...
 
 
@@ -102,7 +102,7 @@ class ConsultantRelay:
 
         async def deliver(result: DialogResult) -> None:
             await self._leave(topic)
-            await self._say(topic, present(result))
+            await self._say(topic, present(result), markdown=result.outcome is Outcome.REPLY)
 
         if text.strip() != STOP:
             text = (lead if lead is not None else self._pending_line(consultant)) + text
@@ -172,9 +172,12 @@ class ConsultantRelay:
         except Exception:
             return True
 
-    async def _say(self, topic: int, text: str) -> None:
+    async def _say(self, topic: int, text: str, markdown: bool = False) -> None:
         try:
-            await self._sink.say(topic, text)
+            if markdown:  # a consultant reply: the sink renders its Markdown; failure and system lines stay plain
+                await self._sink.say(topic, text, markdown=True)
+            else:
+                await self._sink.say(topic, text)
         except Exception as exc:  # the Bot API client already retried; a lost reply must not kill a worker
             log.warning("could not post consultant reply to topic %d: %s", topic, type(exc).__name__)
 

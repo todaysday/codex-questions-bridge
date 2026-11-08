@@ -46,7 +46,7 @@ def test_agent_question_end_to_end(tmp_path, caplog):
         tg.push_callback(tg.button(card, "Отправить")["callback_data"], card)
         await wait_until(lambda: "turn/start" in app.methods())
         [start] = [p for m, p in app.calls if m == "turn/start"]
-        assert set(start) == {"threadId", "input"} and start["threadId"] == "t1"
+        assert set(start) == {"threadId", "input", "clientUserMessageId", "turnTrigger"} and start["threadId"] == "t1"
         text = start["input"][0]["text"]
         assert text.startswith("<send_user_message_question_reply>\n[{") and '"answer":"B"' in text
         await wait_until(lambda: "✅ Доставлено" in tg.messages[card]["text"], 8)  # seen as a userMessage item

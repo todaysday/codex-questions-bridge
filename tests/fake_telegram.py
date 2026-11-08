@@ -104,7 +104,7 @@ class FakeTelegram:
         message: dict[str, Any] = {
             "message_id": message_id, "chat": {"id": chat_id if chat_id is not None else self.chat_id},
         }
-        if "rich" in self.messages.get(message_id, {}):
+        if {"rich", "markdown"} & self.messages.get(message_id, {}).keys():
             message["rich_message"] = {"blocks": []}  # a rich message carries `rich_message` and has no `text`
         self._push({"callback_query": {
             "id": qid, "from": {"id": user_id, "is_bot": False}, "data": data, "message": message,
@@ -205,9 +205,13 @@ class FakeTelegram:
         rich = parse_rich(p.get("rich_message"))
         mid = next(self._msg_ids)
         self.messages[mid] = {
-            "text": rich.plain, "rich": rich.html, "rich_buttons": rich.buttons, "rich_rows": rich.rows,
+            "text": rich.plain, "rich_buttons": rich.buttons, "rich_rows": rich.rows,
             "thread_id": thread, "markup": p.get("reply_markup"), "chat_id": p["chat_id"], "parse_mode": None,
         }
+        if rich.markdown is not None:
+            self.messages[mid].update(markdown=rich.markdown, md=rich.features)
+        else:
+            self.messages[mid]["rich"] = rich.html
         return {"message_id": mid}
 
     async def m_editMessageText(self, p: dict[str, Any]) -> bool:
@@ -327,6 +331,8 @@ class Rich:
         self.plain = ""
         self.buttons: list[dict[str, Any]] = []
         self.rows: list[list[dict[str, Any]]] = []
+        self.markdown: str | None = None  # set when the message was given as Markdown
+        self.features: dict[str, Any] = {}
 
 
 class _RichParser(HTMLParser):
@@ -452,8 +458,10 @@ def parse_rich(rich_message: Any) -> Rich:
     given = [k for k in ("html", "markdown", "blocks") if k in rich_message]
     if len(given) != 1:
         raise _Fail(400, "Bad Request: exactly one of html, markdown or blocks must be used in rich_message")
+    if given[0] == "markdown":
+        return parse_markdown(rich_message["markdown"])
     if given[0] != "html":
-        raise _Fail(400, f"Bad Request: the fake supports only rich_message.html, not {given[0]}")
+        raise _Fail(400, f"Bad Request: the fake supports only rich_message.html and markdown, not {given[0]}")
     source = rich_message["html"]
     if not isinstance(source, str) or not source.strip():
         raise _Fail(400, "Bad Request: rich message is empty")
@@ -469,6 +477,42 @@ def parse_rich(rich_message: Any) -> Rich:
     parser.rich.html = source
     parser.rich.plain = re.sub(r"\n\s*\n+", "\n", "".join(parser._plain)).strip()
     return parser.rich
+
+
+_MD_TAG = re.compile(r"</?([A-Za-z][A-Za-z0-9-]*)[^<>]*>")
+
+
+def parse_markdown(source: Any) -> Rich:
+    """`rich_message.markdown`: only what a test needs to see what Telegram would build from it. `features` lists the
+    constructs found (bold, italic, code, items, links, images, tags: raw HTML, buttons: in-text buttons made by
+    `<tg-button>` HTML, tg_links: tg:// links); raw HTML is parsed like the html field, so a forged button is a button."""
+    if not isinstance(source, str) or not source.strip():
+        raise _Fail(400, "Bad Request: rich message is empty")
+    if len(source) > RICH_TEXT_LIMIT:
+        raise _Fail(400, "Bad Request: rich message is too long")
+    rich = Rich()
+    rich.html = ""
+    f: dict[str, Any] = {
+        "bold": re.findall(r"\*\*(.+?)\*\*", source), "code": re.findall(r"`([^`\n]+)`", source),
+        "items": re.findall(r"^\s*(?:[-*+]|\d+\.)\s+(.+)$", source, re.M), "headings": re.findall(r"^#{1,6}\s+(.+)$", source, re.M),
+        "images": re.findall(r"!\[[^\]]*\]\([^)]*\)", source), "links": re.findall(r"(?<!!)\[[^\]]*\]\(([^)]*)\)", source),
+        "tags": [m.group(1).lower() for m in _MD_TAG.finditer(source)], "tg_links": re.findall(r"(?i)tg://\S*", source),
+        "entities": re.findall(r"&lt;|&amp;", source),
+    }
+    for tag in f["tags"]:
+        if tag not in _RICH_TAGS:
+            raise _Fail(400, f"Bad Request: can't parse rich message: unsupported start tag \"{tag}\"")
+    parser = _RichParser()
+    for m in re.finditer(r"<tg-button\b.*?</tg-button>", source, re.S):
+        parser.feed(f"<p>{m.group(0)}</p>")
+    rich.buttons = parser.rich.buttons
+    f["buttons"] = [b.get("callback_data") or b.get("url") for b in rich.buttons]
+    plain = re.sub(r"\*\*(.+?)\*\*", r"\1", source)
+    plain = re.sub(r"`([^`\n]+)`", r"\1", plain)
+    rich.plain = re.sub(r"^\s*(?:[-*+])\s+", "• ", plain, flags=re.M).strip()
+    rich.markdown = source
+    rich.features = f
+    return rich
 
 
 class _Fail(Exception):

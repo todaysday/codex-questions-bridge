@@ -3,7 +3,7 @@
 Every dynamic string is clipped first and escaped after (an entity is never cut), and only the fixed tags below
 are ever written, so the text always parses. When the full card is too long it shrinks in a fixed order: fewer
 subagent lines (down to MIN_AGENT_LINES), shorter 'сейчас' fragments, no goal line, and only then a shorter summary.
-The only absolute time is the limit reset, labelled UTC. With a configured link template the card ends with one
+The limits line says what is LEFT and the reset as a countdown; there is no absolute time on the card. With a configured link template the card ends with one
 line that opens the thread (the very last thing the shrink gives up, after the summary).
 
 Header (three lines, then the goal line):
@@ -14,7 +14,6 @@ Header (three lines, then the goal line):
 
 import html
 import re
-import time
 from dataclasses import dataclass
 from urllib.parse import quote
 
@@ -102,8 +101,8 @@ def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
     top = [_title_line(r), _status_line(r), _context(r.usage, r.compactions)]
     if r.goal and plan.goal:
         top.append(_goal(r.goal))
-    blocks = ["\n".join(top), "\n".join(_agents(r, plan)), "\n".join(_summary(r.summary, plan)), _limits(r.limits)]
-    text = "\n\n".join(blocks)
+    blocks = ["\n".join(top), "\n".join(_agents(r, plan)), "\n".join(_summary(r.summary, plan)), _limits(r.limits, r.now)]
+    text = "\n\n".join(b for b in blocks if b)
     link = _link(r, open_link) if plan.link else None
     return f"{text}\n{link}" if link else text
 
@@ -262,12 +261,23 @@ def _item_phrase(item: ItemBrief) -> str:
     return DASH
 
 
-def _limits(lim: RateLimits | None) -> str:
-    """`📈 лимит 30% нед. · сброс 12.11 09:00 UTC`: the reset is the only absolute time on the card."""
+def _limits(lim: RateLimits | None, now: int) -> str:
+    """`📈 осталось 49% нед. · сброс через 1д 10ч 05м`: what is left, and the reset as a countdown. Empty (no line at
+    all) when the usage is unknown; no countdown when the reset is unknown or already past."""
     if lim is None or lim.used_percent is None:
-        return f"📈 лимит {DASH}"
-    reset = f" · сброс {_utc(lim.resets_at, '%d.%m %H:%M')} UTC" if lim.resets_at else ""
-    return f"📈 лимит {lim.used_percent}% {_window(lim.window_minutes)}{reset}"
+        return ""
+    left = min(max(100 - lim.used_percent, 0), 100)
+    reset = f" · сброс через {_countdown(lim.resets_at - now)}" if lim.resets_at and lim.resets_at > now else ""
+    return f"📈 осталось {left}% {_window(lim.window_minutes)}{reset}"
+
+
+def _countdown(seconds: int) -> str:
+    """`1д 10ч 05м`, `10ч 05м`, `45м` (never below `1м`)."""
+    days, rest = divmod(max(seconds, 0) // 60, 1440)
+    hours, minutes = divmod(rest, 60)
+    if days:
+        return f"{days}д {hours}ч {minutes:02d}м"
+    return f"{hours}ч {minutes:02d}м" if hours else f"{max(minutes, 1)}м"
 
 
 def _window(minutes: int | None) -> str:
@@ -276,10 +286,6 @@ def _window(minutes: int | None) -> str:
     if minutes == 10080:
         return "нед."
     return f"{minutes // 60}ч" if minutes % 60 == 0 else f"{minutes}м"
-
-
-def _utc(ts: int, fmt: str) -> str:
-    return time.strftime(fmt, time.gmtime(ts))
 
 
 def _minutes(seconds: int | None) -> str:

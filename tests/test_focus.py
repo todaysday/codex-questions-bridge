@@ -137,7 +137,7 @@ def test_numbers_are_stable_across_restarts_and_resolution_and_cover_both_kinds(
             assert numbers == {"i1": 1, "i2": 2, "j1": 1}
             assert st.agent.open_questions("r1")[0].display_no == 3
             header = st.fake.messages[st.card_of(st.qid_of("i2"))]["text"].splitlines()[0]
-            assert header.startswith("❓ Q2 · Fox ·")
+            assert header == "❓ Q2 · Fox"
             assert st.fake.messages[st.agent.open_questions("r1")[0].card_message_id]["text"].startswith("❓ Q3 · Fox")
 
             await st.resolve("r1", 1)  # Q1 resolves: its number is not handed out again
@@ -172,11 +172,12 @@ def test_each_question_of_an_agent_message_has_its_own_number_and_questions_list
             texts = [st.fake.messages[q.card_message_id]["text"] for q in agent]
             assert texts[0].startswith("❓ Q2 · Fox") and "A1?" in texts[0] and "A2?" not in texts[0]
             assert texts[1].startswith("❓ Q3 · Fox") and "A2?" in texts[1] and "A1?" not in texts[1]
+            old = [st.card_of(st.qid_of("i1")), *(q.card_message_id for q in agent)]
             st.fake.push_message("/questions", topic)
             await st.pump()
-            listing = st.fake.live_messages(topic)[-1]["text"].splitlines()
-            assert [ln.split(" · ")[0] for ln in listing] == ["❓ Q1", "❓ Q2", "❓ Q3"]
-            assert "First? / Second?" in listing[0] and listing[1].endswith(": A1?") and listing[2].endswith(": A2?")
+            assert all(st.fake.messages[m].get("deleted") for m in old)  # the old cards are gone, fresh ones follow in order
+            fresh = [m for m in st.fake.live_messages(topic) if m["text"].startswith("❓ Q")]
+            assert [m["text"].split("\n")[0] for m in fresh] == ["❓ Q1 · Fox", "❓ Q2 · Fox", "❓ Q3 · Fox"]
     run(main())
 
 

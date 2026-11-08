@@ -173,7 +173,17 @@ class BotApi:
     ) -> SentMessage:
         """Bot API 10.1+: `html` is the rich HTML (in-text `<tg-button>`s since 10.3). A message Telegram refuses raises
         RichRejected; never retried after a lost response, like every send."""
-        params: dict[str, Any] = {"chat_id": chat_id, "rich_message": {"html": html}}
+        return await self._send_rich(chat_id, {"html": html}, thread_id, keyboard)
+
+    async def send_rich_markdown(self, chat_id: int, markdown: str, *, thread_id: int | None = None) -> SentMessage:
+        """The same with `rich_message.markdown`: the caller has sanitized the text (telegram/markdown.py)."""
+        return await self._send_rich(chat_id, {"markdown": markdown}, thread_id, None)
+
+    async def _send_rich(
+        self, chat_id: int, rich: dict[str, str], thread_id: int | None,
+        keyboard: tuple[tuple[Button, ...], ...] | None,
+    ) -> SentMessage:
+        params: dict[str, Any] = {"chat_id": chat_id, "rich_message": rich}
         if thread_id is not None:
             params["message_thread_id"] = thread_id
         if keyboard:

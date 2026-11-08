@@ -1,5 +1,6 @@
 """Authorizes and dispatches Telegram updates. Nothing unauthorized reaches a service."""
 
+import asyncio
 import logging
 import time
 from collections.abc import Callable
@@ -16,7 +17,7 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.telegram.api import TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
-from cqb.telegram.consultant_view import THREAD_COMMAND_ENABLED, render_questions, render_thread
+from cqb.telegram.consultant_view import THREAD_COMMAND_ENABLED, render_thread
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
@@ -32,6 +33,8 @@ DONE_NOTE = "✅ отправлено"
 CANCELLED_NOTE = "↩️ отменено"
 STALE_NOTE = "⌛ устарело"
 CONFIRMATION_DONE = ("send", "asend", "cancel", "acancel")  # presses that end the confirmation of a typed answer
+NO_QUESTIONS = "Нет неотвеченных вопросов"
+NOTICE_TASKS = 20  # pending "delete this notice" timers
 SECRET_REFUSAL = "Секретный ввод: Bridge не обсуждает и не принимает его, ответьте в Codex"
 
 
@@ -62,6 +65,7 @@ class Router:
         source_id: str,
         request_poll: Callable[[], None],
         clock: Callable[[], float] = time.time,
+        notice_seconds: float = 10.0,
     ) -> None:
         self._cfg = config
         self._present = present
@@ -81,6 +85,8 @@ class Router:
         self._source = source_id
         self._request_poll = request_poll
         self._clock = clock
+        self._notice_seconds = notice_seconds
+        self._notices: set[asyncio.Task[None]] = set()
         self.rejected = 0
 
     async def handle(self, update: Update) -> None:
@@ -134,6 +140,51 @@ class Router:
         except TelegramError as exc:
             log.debug("cannot delete the command message: %s", exc)
 
+    async def _questions_command(self, root: str, m: Message) -> None:
+        """Post the pending questions of this thread anew: the old card messages go, fresh full cards follow in the
+        order of their numbers. The command message is removed if the bot may; with nothing pending a short notice
+        answers and is removed after a few seconds."""
+        pending = sorted(
+            [(q.display_no, 0, q.question_id) for q in self._questions.open_questions(root)]
+            + [(a.display_no, 1, a.agent_question_id) for a in self._agent_questions.open_questions(root)]
+        )
+        await self._delete_quietly(m.message_id)
+        if not pending:
+            sent = await self._api.send_message(self._cfg.chat_id, NO_QUESTIONS, thread_id=m.thread_id)
+            self._forget_later(sent.message_id)
+            return
+        for _, kind, question_id in pending:
+            try:
+                await (self._agent_cards if kind else self._cards).refresh_card(question_id, fresh=True)
+            except TelegramError as exc:
+                log.warning("card %s not reposted: %s", question_id, type(exc).__name__)
+
+    async def _delete_quietly(self, message_id: int) -> None:
+        try:
+            await self._api.delete_message(self._cfg.chat_id, message_id)
+        except TelegramError as exc:
+            log.debug("cannot delete message: %s", exc)
+
+    def _forget_later(self, message_id: int) -> None:
+        """Delete a notice after `notice_seconds`. At most NOTICE_TASKS timers at once (more notices simply stay);
+        a timer that never fires, e.g. across a restart, leaves one harmless message."""
+        if len(self._notices) >= NOTICE_TASKS:
+            return
+
+        async def later() -> None:
+            await asyncio.sleep(self._notice_seconds)
+            await self._delete_quietly(message_id)
+
+        task = asyncio.create_task(later(), name="notice-delete")
+        self._notices.add(task)
+        task.add_done_callback(self._notices.discard)
+
+    async def close(self) -> None:
+        tasks = list(self._notices)
+        for t in tasks:
+            t.cancel()
+        await asyncio.gather(*tasks, return_exceptions=True)
+
     async def _consultant_message(self, m: Message, command: str | None) -> None:
         assert m.thread_id is not None
         consultant = self._consultants.by_topic(m.thread_id)
@@ -144,9 +195,7 @@ class Router:
             if row:
                 await self._say(m, render_thread(row, self._source, int(self._clock())))
         elif command == "questions":
-            qs = self._questions.open_questions(consultant.root_thread_id)
-            agent = self._agent_questions.open_questions(consultant.root_thread_id)
-            await self._say(m, render_questions(qs, self._names(), agent))
+            await self._questions_command(consultant.root_thread_id, m)
         elif command == "status":
             if not self._status.request(consultant.root_thread_id, m.thread_id):
                 await self._say(m, STATUS_BUSY)
@@ -192,14 +241,6 @@ class Router:
         if mention and mention.lower() != self._cfg.bot_username.lower():
             return ""
         return name.lower()
-
-    def _names(self) -> dict[str, str]:
-        rows = {}
-        for q in (*self._questions.open_questions(), *self._agent_questions.open_questions()):
-            row = self._registry.describe(q.root_thread_id)
-            if row:
-                rows[q.root_thread_id] = thread_name(row)
-        return rows
 
     async def _say(self, m: Message, text: str) -> None:
         await self._api.send_message(self._cfg.chat_id, text, thread_id=m.thread_id)
@@ -271,8 +312,8 @@ class Router:
             case "create":
                 return await self._create(a.root_thread_id or "")
             case "page":
-                page, _, archived = (a.payload or "0:0").partition(":")
-                self._publisher.set_view(int(page), archived == "1")
+                page, archived, older = ((a.payload or "") + "::").split(":")[:3]
+                self._publisher.set_view(int(page or 0), archived == "1", older == "1")
                 await self._publisher.refresh(force=True)  # edits the same message
                 return Reply()
             case "opt":

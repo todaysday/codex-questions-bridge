@@ -157,7 +157,7 @@ def test_summary_that_does_not_arrive_in_time_gives_the_card_without_it(conn, mo
             await asyncio.wait_for(st.status_done(), 5)
             [(_, card)] = cards(st, topic)
             assert "📝 резюме недоступно" in card["text"] and "В процессе" not in card["text"]
-            assert " <b>ctx</b> —" in card["text"] and "📈 лимит 30%" in card["text"]  # numbers are all there
+            assert " <b>ctx</b> —" in card["text"] and "📈 осталось 70%" in card["text"]  # numbers are all there
     run(main())
 
 
@@ -301,7 +301,7 @@ def test_open_link_line_is_the_last_line_of_the_posted_card_and_telegram_accepts
             lines = card["text"].splitlines()
             assert card["parse_mode"] == "HTML"  # the fake rejects bad HTML like Telegram: it was accepted as it is
             assert lines[-1] == '🔗 <a href="https://chatgpt.com/codex/tasks/r1?a=1&amp;b=2">Открыть в Codex</a>'
-            assert lines[-2].startswith("📈 лимит") and card["text"].count("🔗") == 1
+            assert lines[-2].startswith("📈 осталось") and card["text"].count("🔗") == 1
             # not in the registry message and not in the opening message of the topic
             assert not any("🔗" in m["text"] or "chatgpt.com" in m["text"] for i, m in st.fake.messages.items() if i != mid)
     run(main())

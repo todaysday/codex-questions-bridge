@@ -45,7 +45,7 @@ def test_registry_is_edited_only_when_content_changes(conn):
     async def main():
         async with make_stack(conn, thread("r1", name="FoxProfile")) as st:
             msg, fake = st.registry_message, st.fake
-            st.clock.now += 3600  # only the "updated HH:MM" header differs
+            st.clock.now += 60  # no clock in the registry, and the age text has not changed yet
             assert await st.publisher.refresh() is False
             assert fake.messages[msg].get("edits", 0) == 0
             st.threads.upsert_many([thread("r2", name="Second", updated=NOW)])
@@ -174,6 +174,7 @@ def test_callback_expiry_and_stale_buttons_heal_the_message(conn):
             msg = st.registry_message
             q = click(st, msg, "Создать")
             st.clock.now += ACTION_TTL + 1
+            st.threads.upsert_many([thread("r1", updated=int(st.clock.now) - 60)])  # still a relevant (recent) thread
             await st.pump()
             assert "устарела" in answer_for(st, q)["text"]
             assert st.consultant_dao.get("s1", "r1") is None and len(st.fake.topics) == 1
@@ -213,7 +214,7 @@ def test_unauthorized_input_never_reaches_services(conn):
             fake.push_message("/threads", st.control_topic, user_id=STRANGER)
             fake.push_message("/questions", topic, user_id=STRANGER)
             await st.pump()
-            assert st.relay.got == [] and st.inventory.polls == 0 and st.publisher.view() == (0, False)
+            assert st.relay.got == [] and st.inventory.polls == 0 and st.publisher.view() == (0, False, False)
             assert fake.callback_answers == []  # strangers get no confirmation at all
             assert st.router.rejected == 9
     run(main())
@@ -239,7 +240,7 @@ def test_commands_in_the_right_topics_and_relay_of_free_text(conn):
             topic = await st.open_consultant("r1")
             await st.settle()
             edits_before = fake.messages[st.registry_message].get("edits", 0)
-            st.clock.now += 60  # the forced re-render shows a new time
+            st.clock.now += 3600  # the forced re-render shows the new ages
             cmd = fake.push_message("/threads", st.control_topic)
             fake.push_message("/thread@cqb_test_bot", topic)
             fake.push_message("/thread@other_bot", topic)
@@ -249,10 +250,10 @@ def test_commands_in_the_right_topics_and_relay_of_free_text(conn):
             await st.pump()
             assert st.inventory.polls == 1
             assert fake.messages[st.registry_message]["edits"] == edits_before + 1  # /threads re-rendered it
-            assert fake.deleted_user_messages == [cmd]  # and removed the command message
+            assert cmd in fake.deleted_user_messages  # and removed the command message (as it did the /questions one)
             texts = [m["text"] for m in fake.live_messages(topic)]
             assert not any(t.startswith("Тред:") for t in texts)  # /thread is disabled: nothing is answered by the Bridge
-            assert any(t == "Нет неотвеченных вопросов." for t in texts)
+            assert any(t == "Нет неотвеченных вопросов" for t in texts)
             # /status is handled by the Bridge, not relayed; /thread (ours or not) is like any unknown slash text
             assert st.relay.got == [("r1", "/thread@cqb_test_bot"), ("r1", "why option A?")]
             await st.ask("r2", "i1")
@@ -270,7 +271,7 @@ def test_threads_command_survives_missing_delete_rights(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
             st.fake.fail("deleteMessage", 400, "Bad Request: message can't be deleted")
-            st.clock.now += 60
+            st.clock.now += 3600
             st.fake.push_message("/threads", st.control_topic)
             await st.pump()
             assert st.inventory.polls == 1 and len(st.control_messages()) == 1

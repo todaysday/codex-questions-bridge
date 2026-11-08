@@ -306,7 +306,7 @@ def test_request_card_never_cuts_text_and_continues_in_more_messages(conn):
             q = st.question_dao.get(qid)
             ids = [q.card_message_id, *q.card_extra_ids]
             assert len(ids) >= 2 and all(len(st.fake.messages[m]["text"]) <= 4096 for m in ids)
-            assert st.fake.messages[ids[0]]["text"].startswith("❓ Q1 · Fox · ")
+            assert st.fake.messages[ids[0]]["text"].startswith("❓ Q1 · Fox\n\n")
             assert st.fake.messages[ids[1]]["text"].startswith("↪ Q1 · 2/")
             texts = [st.fake.messages[m]["text"] for m in ids]
             assert "…" not in "".join(texts)

@@ -9,16 +9,16 @@ import pytest
 
 from cqb.codex.events import ThreadStatusChanged
 from cqb.config import ConfigError, parse_config
-from cqb.domain.enums import QuestionLifecycle as L, RunState as R
+from cqb.domain.enums import ConsultantState, QuestionLifecycle as L, RunState as R
 from cqb.domain.models import QuestionItem, QuestionOption
 from cqb.telegram.api import BadRequest, NetworkError, RichRejected, _to_update
 from cqb.telegram.card_post import card_parts
-from cqb.telegram.models import ActionSpec, Bold, Button, Doc, Para, Row
-from cqb.telegram.registry_view import PAGE_SIZE, RICH_PAGE_SIZE
+from cqb.telegram.models import ActionSpec, Bold, Button, Divider, Doc, Para, Row
 from cqb.telegram.render import fits_rich, to_html, to_view
 from cqb.telegram.router import STALE
 from fake_telegram import CHAT_ID, TOKEN, FakeTelegram, _Fail, parse_rich
-from tg_stack import NOW, agent_item, make_stack, thread
+from cqb.codex.events import ThreadArchiveChanged
+from tg_stack import NOW, agent_item, make_stack, thread, user_item
 from test_tg_api import with_api
 
 OTHER_ITEM = (QuestionItem("name", "", "Pick a name", True, ()),)
@@ -98,6 +98,19 @@ def test_classic_view_of_the_same_doc_and_the_rich_limits():
     assert [[b.text for b in r] for r in view.keyboard] == [["A", "B"], ["go"]]
     assert fits_rich(Doc((Para(("x" * 32768,)),))) and not fits_rich(Doc((Para(("x" * 32769,)),)))
     assert fits_rich(Doc(tuple(Para(("p",)) for _ in range(500)))) and not fits_rich(Doc(tuple(Para(("p",)) for _ in range(501))))
+
+
+def test_divider_is_hr_in_rich_and_nothing_in_classic():
+    doc = Doc((Para(("head",), volatile=True), Para(("a",)), Divider(), Para(("b", bound("B", "k:b"))), Divider(), Row((bound("go", "k:g"),))))
+    out = to_html(doc)
+    assert out == ('<p>head</p><p>a</p><hr/><p>b <tg-button type="callback_data" data="k:b">B</tg-button></p><hr/>'
+                   '<tg-button-row align="left"><tg-button type="callback_data" data="k:g">go</tg-button></tg-button-row>')
+    assert parse_rich({"html": out}).plain  # the documented `<hr/>` spelling is valid
+    view = to_view(doc)
+    assert (view.header, view.body) == ("head", "a\n\nb") and [[b.text for b in r] for r in view.keyboard] == [["B"], ["go"]]
+    assert fits_rich(Doc(tuple(Divider() for _ in range(500)))) and not fits_rich(Doc(tuple(Divider() for _ in range(501))))
+    with pytest.raises(_Fail):
+        parse_rich({"html": "<hr/><p>x</p></p>"})
 
 
 # --- the API ---------------------------------------------------------------------------
@@ -216,10 +229,10 @@ def test_rich_question_card_layout_and_flow_to_a_delivered_answer(conn):
             fake = st.fake
             assert not fake.methods("sendMessage") or all("Q1" not in p["text"] for p in fake.methods("sendMessage"))
             html = fake.messages[msg]["rich"]
-            assert re.match(r"<p>❓ <b>Q1</b> · Fox &lt;b&gt;&amp;&lt;/b&gt; · \d\d:\d\d</p>", html)
+            assert html.startswith("<p>❓ <b>Q1</b> · Fox &lt;b&gt;&amp;&lt;/b&gt;</p><p>Storage:")  # no clock time, its own paragraph
             assert "<p>Storage: Where &lt;store&gt; profile &amp; settings?</p>" in html
-            assert re.search(r'<p>A\. Existing table — no migration <tg-button type="callback_data" style="primary" data="a:\w+">A</tg-button></p>', html)
-            assert re.search(r'<p>B\. Separate &lt;table&gt; <tg-button type="callback_data" style="primary" data="a:\w+">B</tg-button></p>', html)
+            assert re.search(r'<p>A\. Existing table — no migration <tg-button type="callback_data" style="primary" data="a:\w+">Ответить A</tg-button></p>', html)
+            assert re.search(r'<p>B\. Separate &lt;table&gt; <tg-button type="callback_data" style="primary" data="a:\w+">Ответить B</tg-button></p>', html)
             assert html.endswith("</tg-button></tg-button-row>") and fake.rows(msg) == [["✍️ Ответить текстом"]]
             assert fake.messages[msg]["markup"] is None  # no inline keyboard: every button is in the text
 
@@ -243,6 +256,66 @@ def test_rich_question_card_layout_and_flow_to_a_delivered_answer(conn):
     run(main())
 
 
+def test_final_state_lines_are_set_apart_by_a_divider_and_pending_cards_have_none(conn):
+    async def main():
+        async with stack(conn, thread("r1", name="Fox")) as st:
+            qid, msg = await card(st, items=ITEM)
+            fake = st.fake
+            assert "<hr/>" not in fake.messages[msg]["rich"]  # pending: no state line, no divider
+            await press(st, msg, "B")
+            assert "<hr/>" not in fake.messages[msg]["rich"]  # staged: the confirmation is part of the question
+            await press(st, msg, "Отправить")
+            sent = fake.messages[msg]["rich"]
+            assert re.search(r"</p><hr/><p>📤 Ответ отправлен в Codex.*?Выбрано: Separate &lt;table&gt;</p>$", sent)
+            await st.resolve("r1")
+            await st.settle()
+            done = fake.messages[msg]["rich"]
+            assert done.count("<hr/>") == 1 and re.search(r"</p><hr/><p>✅ Доставлено: Codex закрыл запрос", done)
+            assert done.index("Where &lt;store&gt;") < done.index("<hr/>") and "ждём" not in done
+    run(main())
+
+
+def test_stale_and_agent_final_lines_have_dividers_and_classic_has_none(conn):
+    async def main():
+        async with stack(conn, thread("r1", name="Fox")) as st:
+            await st.open_consultant("r1")
+            st.agent_client.items.setdefault("r1", []).append(agent_item("call_1", AGENT_Q))
+            await st.agent.scan_thread("r1")
+            await st.settle()
+            [aq] = st.agent.open_questions("r1")
+            msg = st.agent_dao.get(aq.agent_question_id).card_message_id
+            assert "<hr/>" not in st.fake.messages[msg]["rich"]
+            await press(st, msg, "A")
+            await press(st, msg, "Отправить")
+            assert re.search(r"</p><hr/><p>📤 Ответ отправлен", st.fake.messages[msg]["rich"])
+            st.agent_client.items["r1"].append(user_item("um1", "whatever the app stored"))
+            await st.agent.scan_thread("r1")
+            await st.settle()
+            assert re.search(r"</p><hr/><p>✅ Доставлено: ответ появился в треде", st.fake.messages[msg]["rich"])
+            st.agent_client.items["r1"].append(agent_item("call_2", [{"title": "Later?", "options": ["Y"]}]))
+            await st.agent.scan_thread("r1")
+            await st.settle()
+            [later] = [q for q in st.agent.open_questions("r1")]
+            lmsg = st.agent_dao.get(later.agent_question_id).card_message_id
+            await st.agent.handle(ThreadArchiveChanged("r1", True))  # the thread goes away: the card is stale
+            await st.settle()
+            assert re.search(r"</p><hr/><p>⌛ Вопрос устарел", st.fake.messages[lmsg]["rich"]) and "устарел</p>" in st.fake.messages[lmsg]["rich"]
+    run(main())
+
+
+def test_classic_cards_have_no_divider_text(conn):
+    async def main():
+        async with make_stack(conn, thread("r2", name="Bee"), rich=False) as classic:  # no divider text in classic
+            qid, cmsg = await card(classic, root="r2", item_id="c1", items=ITEM)
+            await press(classic, cmsg, "B")
+            await press(classic, cmsg, "Отправить")
+            await classic.resolve("r2")
+            await classic.settle()
+            text = classic.fake.messages[cmsg]["text"]
+            assert "---" not in text and "<hr" not in text and "\n\n\n" not in text and "✅ Доставлено" in text
+    run(main())
+
+
 def test_cancel_returns_to_the_options_and_secret_cards_have_no_buttons(conn):
     async def main():
         async with stack(conn, thread("r1")) as st:
@@ -250,7 +323,7 @@ def test_cancel_returns_to_the_options_and_secret_cards_have_no_buttons(conn):
             await press(st, msg, "A")
             await press(st, msg, "Отмена")
             assert st.question_dao.get(qid).lifecycle is L.PENDING_CONFIRMED and st.client.responses == []
-            assert [b["text"] for b in st.fake.buttons(msg)][:2] == ["A", "B"]
+            assert [b["text"] for b in st.fake.buttons(msg)][:2] == ["Ответить A", "Ответить B"]
             sid, smsg = await card(st, item_id="i2", secret=True)
             assert st.fake.buttons(smsg) == [] and "🔒" in st.fake.messages[smsg]["text"]
             assert "<tg-button" not in st.fake.messages[smsg]["rich"]
@@ -317,7 +390,7 @@ def test_agent_card_rich_flow_and_a_stale_key_on_a_rich_card_heals_it(conn):
             [q] = st.agent.open_questions("r1")
             msg = st.agent_dao.get(q.agent_question_id).card_message_id
             html = st.fake.messages[msg]["rich"]
-            assert re.search(r'<p>A\. Existing table <tg-button type="callback_data" style="primary" data="a:\w+">A</tg-button></p>', html)
+            assert re.search(r'<p>A\. Existing table <tg-button type="callback_data" style="primary" data="a:\w+">Ответить A</tg-button></p>', html)
             assert "<p>Where to store it?</p>" in html and st.fake.rows(msg) == [["✍️ Ответить текстом"]]
             stale = st.fake.button(msg, "B")["callback_data"]
             st.keys._actions.consume(stale, 0)  # used up
@@ -343,7 +416,7 @@ def test_a_long_card_is_one_rich_message_but_the_classic_fallback_still_splits_i
             topic = st.consultant_dao.get("s1", "r1").tg_topic_id
             assert len([m for m in st.fake.messages.values() if m["thread_id"] == topic and "Which?" in m["text"]]) == 1
             assert st.fake.messages[msg]["text"].count("very detailed words,") == 800 and "↪" not in st.fake.messages[msg]["text"]
-            assert [b["text"] for b in st.fake.buttons(msg)] == ["A", "B"]
+            assert [b["text"] for b in st.fake.buttons(msg)] == ["Ответить A", "Ответить B"]
     run(main())
 
 
@@ -376,41 +449,78 @@ def test_a_card_over_the_rich_limit_goes_out_classic_without_asking_telegram(con
 # --- the registry ----------------------------------------------------------------------
 
 
-def test_rich_registry_paragraphs_buttons_in_the_line_and_one_navigation_row(conn):
+def test_rich_registry_layout_filter_and_toggles(conn):
     async def main():
         async with stack(conn, thread("r1", name="Fox", updated=NOW - 10), thread("r2", name="Old <x>", updated=NOW - 900),
-                         thread("r3", name="Done", updated=NOW - 500)) as st:
+                         thread("r3", name="Done", updated=NOW - 500),
+                         thread("r4", name="Ancient", updated=NOW - 3 * 86400)) as st:
             await st.open_consultant("r1")
             await st.ask("r2", "i1")
             await st.live.handle(ThreadStatusChanged("r3", False, False, R.WORKING))
             await st.settle()
-            reg = st.fake.messages[st.registry_message]
-            assert "sendMessage" not in st.fake.methods() or all("Треды" not in p["text"] for p in st.fake.methods("sendMessage"))
-            paras = re.findall(r"<p>(.*?)</p>", reg["rich"])
-            assert paras[0].startswith("<b>📋 Активные треды Codex</b> · обновлено ")
-            assert re.fullmatch(r"❓ Old &lt;x&gt; · 📁 w · \d\d:\d\d · консультант: — <tg-button [^>]+>➕ Создать</tg-button>", paras[1])
-            assert re.fullmatch(r"⚙️ Done · 📁 w · \d\d:\d\d · консультант: — <tg-button [^>]+>➕ Создать</tg-button>", paras[2])
-            assert re.fullmatch(r'Fox · 📁 w · \d\d:\d\d · консультант: ✅ <tg-button type="url" url="https://t.me/c/1234567890/\d+">💬 Открыть</tg-button>', paras[3])
-            assert st.fake.rows(st.registry_message) == [["📦 Архивные"]] and reg["markup"] is None
-            await press(st, st.registry_message, "📦 Архивные")
-            assert "<b>📦 Архивные треды Codex</b>" in st.fake.messages[st.registry_message]["rich"]
-            assert st.fake.rows(st.registry_message) == [["📋 Активные"]]
+            msg = st.registry_message
+            reg = st.fake.messages[msg]
+            html = reg["rich"]
+            assert "обновлено" not in html and not re.search(r"\d\d:\d\d", html) and "UTC" not in html  # no clock time
+            assert html.startswith("<p>📋 <b>Треды Codex</b></p><p>❓ 1 · 🟢 1 · всего 4</p><hr/>")
+            rows = re.findall(r"<hr/><p>(.*?)</p><p>(.*?)</p>", html)
+            assert [r[1] for r in rows] == ["📁 w · 15м", "📁 w · 5м", "📁 w · сейчас"]  # ❓ first, then 🟢, then newest
+            assert re.fullmatch(r"❓ <b>Old &lt;x&gt;</b> <tg-button [^>]+>➕ Создать</tg-button>", rows[0][0])
+            assert re.fullmatch(r"🟢 <b>Done</b> <tg-button [^>]+>➕ Создать</tg-button>", rows[1][0])
+            assert re.fullmatch(r'<b>Fox</b> <tg-button type="url" url="https://t.me/c/1234567890/\d+">💬 Открыть</tg-button>', rows[2][0])
+            assert html.count("<hr/>") == 3 and "Ancient" not in html and "консультант" not in html and "✅" not in html
+            assert st.fake.rows(msg) == [["🕘 Ранее", "📦 Архивные"]] and reg["markup"] is None  # one page: no page row
+            await press(st, msg, "🕘 Ранее")  # the threads that are not relevant now
+            older = st.fake.messages[msg]["rich"]
+            assert "<b>Треды Codex</b> · ранее" in older and "Ancient" in older and "Fox" not in older
+            assert "<p>📁 w · 3д</p>" in older and st.fake.rows(msg) == [["🕘 Недавние", "📦 Архивные"]]
+            assert st.state.get("registry.view") == "0:0:1"
+            await press(st, msg, "🕘 Недавние")
+            assert "Fox" in st.fake.messages[msg]["rich"] and "Ancient" not in st.fake.messages[msg]["rich"]
+            await press(st, msg, "📦 Архивные")
+            assert "<b>Архивные треды Codex</b>" in st.fake.messages[msg]["rich"]
+            assert st.fake.rows(msg) == [["🕘 Ранее", "📋 Активные"]]
     run(main())
 
 
-def test_rich_registry_pages_25_threads_and_pages_through(conn):
+def test_rich_registry_pages_with_a_disabled_counter_and_no_arrow_at_the_edges(conn):
     async def main():
         threads = [thread(f"t{i:02d}", name=f"Thread {i:02d}", updated=NOW - 100 - i) for i in range(30)]
-        async with stack(conn, *threads) as st:
+        async with stack(conn, *threads, rows=8) as st:
             msg = st.registry_message
-            assert RICH_PAGE_SIZE == 25 and PAGE_SIZE == 5
-            assert st.fake.messages[msg]["rich"].count("<p>") == 26 and st.fake.rows(msg) == [["▶️", "📦 Архивные"]]
-            assert st.fake.messages[msg]["rich"].count("➕ Создать") == 25
+            fake = st.fake
+            html = fake.messages[msg]["rich"]
+            assert html.count("<hr/>") == 8 and html.count("➕ Создать") == 8 and html.count("<p>") == 2 + 16
+            assert fake.rows(msg)[0] == ["1/4", "▶️"]  # no ◀️ on the first page
+            assert '<tg-button type="disabled">1/4</tg-button>' in html
+            assert fake.button(msg, "1/4").get("callback_data") is None  # the counter does nothing
             await press(st, msg, "▶️")
-            assert st.fake.messages[msg]["rich"].count("<p>") == 6 and st.fake.rows(msg) == [["◀️", "📦 Архивные"]]
-            assert "Thread 29" in st.fake.messages[msg]["text"] and "Thread 00" not in st.fake.messages[msg]["text"]
+            assert fake.rows(msg)[0] == ["◀️", "2/4", "▶️"] and "Thread 08" in fake.messages[msg]["text"]
+            await press(st, msg, "▶️")
+            await press(st, msg, "▶️")
+            assert fake.rows(msg)[0] == ["◀️", "4/4"] and fake.messages[msg]["rich"].count("➕ Создать") == 6  # no ▶️ on the last
+            assert st.state.get("registry.view") == "3:0:0" and len(st.control_messages()) == 1
             await press(st, msg, "◀️")
-            assert "Thread 00" in st.fake.messages[msg]["text"] and len(st.control_messages()) == 1
+            await press(st, msg, "◀️")
+            await press(st, msg, "◀️")
+            assert "Thread 00" in fake.messages[msg]["text"] and fake.rows(msg)[0] == ["1/4", "▶️"]
+    run(main())
+
+
+def test_rich_registry_shows_working_marker_green_and_exceptional_consultant_states_only(conn):
+    async def main():
+        async with stack(conn, thread("r1", name="Fox"), thread("r2", name="Bee"), thread("r3", name="Cat")) as st:
+            await st.open_consultant("r1")
+            await st.open_consultant("r2")
+            await st.open_consultant("r3")
+            st.consultant_dao.set_state(st.consultant_dao.get("s1", "r2").consultant_id, ConsultantState.ERROR, 9)
+            st.consultant_dao.set_state(st.consultant_dao.get("s1", "r3").consultant_id, ConsultantState.ARCHIVED, 9)
+            await st.live.handle(ThreadStatusChanged("r1", False, False, R.WORKING))
+            st.publisher.request_refresh(force=True)
+            await st.settle()
+            html = st.fake.messages[st.registry_message]["rich"]
+            assert "<p>🟢 <b>Fox</b>" in html and "<p>⚠️ <b>Bee</b>" in html and "<p>🔒 <b>Cat</b>" in html
+            assert "⚙️" not in html and "консультант" not in html and "✅" not in html
     run(main())
 
 
@@ -419,7 +529,7 @@ def test_rich_registry_edits_only_when_changed_and_coalesces(conn):
         async with stack(conn, thread("r1", name="Fox"), thread("r2", name="Bee")) as st:
             msg = st.registry_message
             assert st.fake.messages[msg].get("edits", 0) == 0
-            st.clock.now += 120  # only the time header differs
+            st.clock.now += 120  # the ages are coarse (five minutes): the text is the same
             assert await st.publisher.refresh() is False
             assert await st.publisher.refresh() is False and st.fake.methods().count("editMessageText") == 0
             for _ in range(5):
@@ -460,7 +570,7 @@ def test_method_unsupported_logs_one_warning_and_everything_is_classic_from_then
             with caplog.at_level(logging.WARNING, logger="cqb"):
                 await st.start(thread("r1", name="Fox"))
                 reg = fake.messages[st.registry_message]
-                assert "rich" not in reg and reg["text"].startswith("📋 Активные треды Codex") and reg["markup"]
+                assert "rich" not in reg and reg["text"].startswith("📋 Треды Codex") and reg["markup"]
                 assert not st.present.rich
                 topic = await st.open_consultant("r1")
                 await st.ask("r1", "i1", items=ITEM)
@@ -496,7 +606,7 @@ def test_rich_unsupported_on_edit_only_falls_back_for_a_card_and_resizes_the_reg
             await st.settle()
             reg = st.fake.messages[st.registry_message]
             assert not st.present.rich and "rich" not in reg and len(reg["text"]) <= 4096
-            assert reg["text"].count("➕") == 0 and len(st.fake.buttons(st.registry_message)) == 5 + 2  # 5 rows per page, then ▶️ and the archive
+            assert "стр. 1/5" in reg["text"] and len(st.fake.buttons(st.registry_message)) == 5 + 3  # the page is in the text; ▶️, two toggles
     run(main())
 
 
@@ -612,7 +722,7 @@ def test_registry_stays_classic_when_the_fresh_rich_send_is_refused_too_and_is_n
             await st.settle()
             m = st.fake.messages[old]
             assert st.registry_message == old and not m.get("deleted") and "rich" not in m and st.present.rich
-            assert len(m["text"]) <= 4096 and len(st.fake.buttons(old)) == 5 + 2  # drawn classic: 5 rows, not 25
+            assert len(m["text"]) <= 4096 and len(st.fake.buttons(old)) == 5 + 3  # drawn classic: 5 rows, ▶️ and two toggles
             assert not st.state.get("registry.hash").endswith("+rich") and len(st.control_messages()) == 1
             asked = len(st.fake.methods("sendRichMessage")), sum("rich_message" in p for p in st.fake.methods("editMessageText"))
             for _ in range(3):  # every refresh from now on stays classic without asking for rich
@@ -622,7 +732,7 @@ def test_registry_stays_classic_when_the_fresh_rich_send_is_refused_too_and_is_n
             assert (len(st.fake.methods("sendRichMessage")), sum("rich_message" in p for p in st.fake.methods("editMessageText"))) == asked
             assert st.registry_message == old and len(st.control_messages()) == 1
             await press(st, old, "▶️")  # the classic keyboard still works
-            assert st.publisher.view() == (1, False)
+            assert st.publisher.view() == (1, False, False)
     run(main())
 
 

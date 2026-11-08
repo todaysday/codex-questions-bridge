@@ -1,6 +1,7 @@
 """The one write path into a thread: AppServerClient.send_user_message (and nothing else of turn/*)."""
 
 import asyncio
+import uuid
 
 import pytest
 
@@ -16,6 +17,10 @@ def arun(coro):
 @pytest.fixture(autouse=True)
 def _no_race_pause(monkeypatch):
     monkeypatch.setattr(appserver, "RACE_PAUSE", 0)
+
+
+def assert_uuid4(value):
+    assert isinstance(value, str) and value == str(uuid.UUID(value)) and uuid.UUID(value).version == 4
 
 
 def idle_thread(fake, tid="t1", turns=()):
@@ -49,9 +54,12 @@ def test_idle_thread_resumes_starts_and_unsubscribes_with_exactly_these_params()
             assert fake.calls == [
                 ("thread/turns/list", {"threadId": "t1", "limit": 1, "itemsView": "notLoaded"}),
                 ("thread/resume", {"threadId": "t1", "excludeTurns": True}),
-                ("turn/start", {"threadId": "t1", "input": [{"type": "text", "text": TEXT}]}),
+                ("turn/start", {"threadId": "t1", "input": [{"type": "text", "text": TEXT}],
+                                "clientUserMessageId": fake.calls[2][1]["clientUserMessageId"],
+                                "turnTrigger": "send_user_message_async_question"}),
                 ("thread/unsubscribe", {"threadId": "t1"}),
             ]
+            assert_uuid4(fake.calls[2][1]["clientUserMessageId"])
             assert fake.conns[0].subscribed == set()
             [msg] = [e["item"] for e in fake.items["t1"]]
             assert msg["type"] == "userMessage" and msg["content"][0]["text"] == TEXT  # exactly our text
@@ -64,8 +72,11 @@ def test_running_turn_is_steered_without_resume_and_with_the_expected_turn_id():
             idle_thread(fake, turns=[{"id": "t2", "status": "inProgress"}, {"id": "t1", "status": "completed"}])
             assert await client.send_user_message("t1", TEXT) == "steer"
             assert fake.calls[1:] == [
-                ("turn/steer", {"threadId": "t1", "input": [{"type": "text", "text": TEXT}], "expectedTurnId": "t2"}),
+                ("turn/steer", {"threadId": "t1", "input": [{"type": "text", "text": TEXT}], "expectedTurnId": "t2",
+                                "clientUserMessageId": fake.calls[1][1]["clientUserMessageId"]}),
             ]
+            assert_uuid4(fake.calls[1][1]["clientUserMessageId"])
+            assert "turnTrigger" not in fake.calls[1][1]
             assert fake.items["t1"][0]["item"]["content"][0]["text"] == TEXT
     arun(main())
 
@@ -82,10 +93,33 @@ def test_no_override_can_be_sent_whatever_the_path(turns):
             await client.send_user_message("t1", TEXT)
             for method, params in fake.calls:
                 assert not FORBIDDEN & set(params), (method, params)
+                if method == "turn/steer":
+                    assert set(params) == {"threadId", "input", "expectedTurnId", "clientUserMessageId"}
+                if method == "turn/start":
+                    assert set(params) == {"threadId", "input", "clientUserMessageId", "turnTrigger"}
                 if method.startswith("turn/"):
-                    assert set(params) <= {"threadId", "input", "expectedTurnId"}
                     assert [set(i) for i in params["input"]] == [{"type", "text"}]
             assert {m for m, _ in fake.calls if m.startswith("turn/")} <= {"turn/steer", "turn/start"}
+    arun(main())
+
+
+@pytest.mark.parametrize("turns, method", [([], "turn/start"), ([{"id": "t2", "status": "inProgress"}], "turn/steer")])
+def test_client_message_id_is_a_fresh_uuid4_per_call_and_turn_trigger_is_start_only(turns, method):
+    async def main():
+        async with connected_client() as (client, fake):
+            idle_thread(fake, turns=turns)
+            await client.send_user_message("t1", TEXT)
+            for turn in fake.turns["t1"]:
+                turn["status"] = "completed" if method == "turn/start" else "inProgress"
+            await client.send_user_message("t1", TEXT)
+            sent = [p for m, p in fake.calls if m == method]
+            assert len(sent) == 2
+            ids = [p["clientUserMessageId"] for p in sent]
+            for i in ids:
+                assert_uuid4(i)
+            assert ids[0] != ids[1]
+            assert all(("turnTrigger" in p) == (method == "turn/start") for p in sent)
+            assert all(p.get("turnTrigger", "send_user_message_async_question") == "send_user_message_async_question" for p in sent)
     arun(main())
 
 

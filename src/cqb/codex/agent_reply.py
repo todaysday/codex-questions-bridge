@@ -3,9 +3,9 @@
 Observed on the real daemon (userMessage items that follow an agentMessage with `questions`):
 
     <send_user_message_question_reply>\\n
-    [{"question": <title>, "answer": <chosen option or free text>,
-      "questionItemId": "[\\"request_user_input_async\\",\\"<agentMessage item id>\\",<question index>]"}, ...]\\n
-    </send_user_message_question_reply>
+    [{"questionItemId": "[\\"request_user_input_async\\",\\"<agentMessage item id>\\",<question index>]",
+      "question": <title>, "answer": <chosen option or free text>}, ...]\\n
+    </send_user_message_question_reply>\\n
 
 The array is compact UTF-8 JSON (no spaces, no \\\\u escapes). `questionItemId` is itself a compact JSON
 string: a fixed tag, the id of the agentMessage item and the zero-based index of the question. The app
@@ -22,8 +22,8 @@ _BLOCK = re.compile(rf"<{TAG}>\s*(.*?)\s*</{TAG}>", re.DOTALL)
 
 def build_reply(item_id: str, index: int, title: str, answer: str) -> str:
     """The message that answers ONE question, as the app writes it (one entry)."""
-    entry = {"question": title, "answer": answer, "questionItemId": _compact([ITEM_TAG, item_id, index])}
-    return f"<{TAG}>\n{_compact([entry])}\n</{TAG}>"
+    entry = {"questionItemId": _compact([ITEM_TAG, item_id, index]), "question": title, "answer": answer}
+    return f"<{TAG}>\n{_compact([entry])}\n</{TAG}>\n"
 
 
 def answered_questions(user_message_text: str) -> set[tuple[str, int]] | None:

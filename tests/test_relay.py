@@ -39,7 +39,7 @@ class Sink:
     def __init__(self):
         self.said, self.typed = [], []
 
-    async def say(self, topic, text):
+    async def say(self, topic, text, markdown=False):
         self.said.append((topic, text))
 
     async def typing(self, topic):
@@ -193,7 +193,7 @@ def test_a_failing_typing_action_or_reply_post_does_not_break_the_relay():
             async def typing(self, topic):
                 raise RuntimeError("429")
 
-            async def say(self, topic, text):
+            async def say(self, topic, text, markdown=False):
                 raise RuntimeError("429")
 
         relay = ConsultantRelay(Dialog(), Broken(), typing_seconds=0.01)
