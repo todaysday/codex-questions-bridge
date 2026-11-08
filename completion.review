@@ -1,5 +1,7 @@
 # Completion review
 
+- Status card limits now count visible text after HTML parsing; boundary coverage includes escaped characters and emoji.
+
 - Status separators use bold formatting throughout, model and reasoning level use a space, and emoji have no trailing space; updated status rendering checks.
 
 - Registry change detection excludes the weekly limit and write time; the Kyiv clock follows daylight saving time and updates when the registry is written.

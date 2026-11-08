@@ -22,6 +22,7 @@ from cqb.domain.status import (
     AGENT_LINES, NEXT_MAX, PROGRESS_MAX, Activity, AgentLine, GoalSummary, ItemBrief, RateLimits, StatusReport,
     StatusSummary, UsageSnapshot,
 )
+from cqb.telegram.api import strip_html
 from cqb.telegram.fmt import TEXT_LIMIT, clip
 
 DASH = "—"
@@ -92,7 +93,7 @@ def render_status(r: StatusReport, open_link: str = "") -> str:
     of the card opens the thread."""
     for plan in PLANS:
         text = _card(r, plan, open_link)
-        if len(text) <= TEXT_LIMIT:
+        if len(strip_html(text)) <= TEXT_LIMIT:
             break
     return text
 
@@ -107,11 +108,11 @@ def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
     link = _link(r, open_link) if plan.link else None
     text = f"{text}\n{link}" if link else text
     if r.goal and plan.goal:
-        available = TEXT_LIMIT - len(text) - 1
+        available = TEXT_LIMIT - len(strip_html(text)) - 1
         low, high = 0, len(r.goal.objective or DASH)
         while low < high:
             mid = (low + high + 1) // 2
-            if len(_goal(r.goal, mid)) <= available:
+            if len(strip_html(_goal(r.goal, mid))) <= available:
                 low = mid
             else:
                 high = mid - 1
@@ -177,7 +178,7 @@ def _compacted(n: int | None) -> str:
 
 def _context(u: UsageSnapshot | None, compactions: int | None, subagents: int | None = None,
              incomplete: bool = False) -> str:
-    """` <b>ctx</b> 160k/475k (34%) · 💾80% · 🗜️5`: starts with one space; the cache and 🗜️ parts are left out when unknown."""
+    """` <b>ctx</b> 160k/475k(34%) · 💾80% · 🗜️5`: starts with one space; the cache and 🗜️ parts are left out when unknown."""
     if u is None:
         return f" <b>ctx</b> {DASH}{_compacted(compactions)}"
     total = ""
@@ -185,7 +186,7 @@ def _context(u: UsageSnapshot | None, compactions: int | None, subagents: int | 
         children = f"{'≥' if incomplete else ''}{tokens(subagents)}" if subagents is not None else DASH
         total = f"∑{tokens(u.total_tokens)} ({children}) · "
     window = tokens(u.context_window) if u.context_window else DASH
-    fill = f" ({u.fill_percent}%)" if u.fill_percent is not None else ""
+    fill = f"({u.fill_percent}%)" if u.fill_percent is not None else ""
     cache = f"{SEP}💾{_cache(u.cache_permille)}" if u.cache_permille is not None else ""
     icon = "🌀" if total else ""
     return f" {icon}<b>{total}ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}{_compacted(compactions)}"

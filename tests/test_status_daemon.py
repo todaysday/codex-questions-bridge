@@ -255,7 +255,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
                 fake.turns["r1"] = [{"id": "t1", "status": "inProgress", "startedAt": int(asyncio.get_running_loop().time())}]
                 report = await svc.collect("local", "r1")
                 text = render_status(report)
-                assert " 🌀<b>∑1 (404k) · ctx</b> 51k/200k (26%)<b> · </b>💾99.0%" in text  # root: rollout tail
+                assert " 🌀<b>∑1 (404k) · ctx</b> 51k/200k(26%)<b> · </b>💾99.0%" in text  # root: rollout tail
                 assert " 🟢Ada<b> · </b>luna low<b> · </b>ctx 40%" in text  # subagent: broadcast usage
                 assert "<blockquote expandable>🎯Ship</blockquote>" in text and "📈" not in text
                 assert set(fake.methods()) <= {"thread/read", "thread/list", "thread/goal/get",

@@ -59,7 +59,7 @@ def test_subagent_lines_show_context_cache_and_compactions_from_the_rollouts_wit
     env.src.threads["r1"], env.src.children["r1"] = root, kids
     assert len(env.live) == 0  # a fresh Bridge: no broadcast seen yet
     card = env.card()
-    assert " <b>ctx</b> 160k/475k (34%)<b> · </b>💾99.4%<b> · </b>🗜️5\n" in card
+    assert " <b>ctx</b> 160k/475k(34%)<b> · </b>💾99.4%<b> · </b>🗜️5\n" in card
     lines = env.agent_lines()
     assert " ⚪A1<b> · </b>gpt-6 low<b> · </b>ctx 35%<b> · </b>💾87%<b> · </b>1м назад<b> · </b>🗜️2" in lines  # the compaction count is appended
     a2 = next(x for x in lines if "A2<b>" in x)

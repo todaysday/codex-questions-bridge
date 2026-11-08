@@ -47,7 +47,7 @@ def with_agents(agents, total=None, **kw):
 
 def valid(text):
     check_html(text)  # raises when Telegram would refuse it
-    assert len(text) <= TEXT_LIMIT
+    assert len(strip_html(text)) <= TEXT_LIMIT
     return text
 
 
@@ -62,7 +62,7 @@ def test_full_card_layout():
     assert text == (
         "🟢Fox Profile\n"
         "🧠sol 6 low<b> · </b>🕒25м<b> · </b>🔄2м 💭выполняет: pytest -q\n"
-        " <b>ctx</b> 160k/475k (34%)<b> · </b>💾80%\n"
+        " <b>ctx</b> 160k/475k(34%)<b> · </b>💾80%\n"
         "<blockquote expandable>🎯Ship the profile page</blockquote>\n"
         "\n"
         "🤖<b>Субагенты 9</b><b> · </b>🟢1<b> · </b>🟡1<b> · </b>⚪2\n"
@@ -194,7 +194,7 @@ def test_the_header_with_a_folder_matches_the_documented_layout():
         "🟢Fox Profile",
         "📁gh-runner-dispatcher",
         "🧠sol 6 low<b> · </b>🕒25м<b> · </b>🔄2м 💭выполняет: pytest -q",
-        " <b>ctx</b> 160k/475k (34%)<b> · </b>💾80%"]
+        " <b>ctx</b> 160k/475k(34%)<b> · </b>💾80%"]
 
 
 def test_status_line_segments_turn_duration_last_activity_and_now():
@@ -217,10 +217,10 @@ def test_status_line_segments_turn_duration_last_activity_and_now():
 
 def test_context_line_starts_with_one_space_has_bold_ctx_and_leaves_out_an_unknown_cache():
     ctx = lambda usage: render_status(report(usage=usage)).splitlines()[2]
-    assert ctx(UsageSnapshot(160_000, 475_000, 100, 80, 1000, 800)) == " <b>ctx</b> 160k/475k (34%)<b> · </b>💾80%"
-    assert ctx(UsageSnapshot(160_000, 475_000, 0, 0, 0, 0)) == " <b>ctx</b> 160k/475k (34%)"
+    assert ctx(UsageSnapshot(160_000, 475_000, 100, 80, 1000, 800)) == " <b>ctx</b> 160k/475k(34%)<b> · </b>💾80%"
+    assert ctx(UsageSnapshot(160_000, 475_000, 0, 0, 0, 0)) == " <b>ctx</b> 160k/475k(34%)"
     assert ctx(UsageSnapshot(900, None, 10, 1, 100, 10)) == " <b>ctx</b> 900/—<b> · </b>💾10%"
-    assert ctx(UsageSnapshot(160_000, 475_000, 100, 100)) == " <b>ctx</b> 160k/475k (34%)"  # last call only: no figure
+    assert ctx(UsageSnapshot(160_000, 475_000, 100, 100)) == " <b>ctx</b> 160k/475k(34%)"  # last call only: no figure
     assert ctx(None) == " <b>ctx</b> —"
 
 
@@ -254,7 +254,7 @@ def test_compactions_are_shown_after_the_cache_on_the_root_and_at_the_end_of_a_s
     usage = UsageSnapshot(160_000, 475_000, 100, 80, 1000, 994)
     text = render_status(with_agents([agent(compactions=2), agent("B", compactions=0), agent("C", compactions=None)],
                                      usage=usage, compactions=5))
-    assert text.splitlines()[2] == " <b>ctx</b> 160k/475k (34%)<b> · </b>💾99.4%<b> · </b>🗜️5"
+    assert text.splitlines()[2] == " <b>ctx</b> 160k/475k(34%)<b> · </b>💾99.4%<b> · </b>🗜️5"
     lines = [x for x in text.splitlines() if x.startswith(" 🟢")]
     assert lines[0].endswith("</b>думает<b> · </b>🗜️2") and lines[1].endswith("</b>думает") and lines[2].endswith("</b>думает")
     assert "🗜️" not in render_status(report(usage=usage, compactions=0))
@@ -364,7 +364,7 @@ def test_a_huge_card_shrinks_to_fit_and_never_cuts_a_tag_or_an_entity():
         text = valid(render_status(r))
         assert text.count("<b>") == text.count("</b>") and not re.search(r"&[#\w]*$|&[^;\s]{0,6}…", text)
         shown = sum(x.startswith(" 🟢") for x in text.splitlines())
-        assert (shown < 6) is (len(view._card(r, view.PLANS[0])) > TEXT_LIMIT)
+        assert (shown < 6) is (len(strip_html(view._card(r, view.PLANS[0]))) > TEXT_LIMIT)
         assert "🔛<b>:</b>" in text and "🔜<b>:</b>" in text
 
 
@@ -375,9 +375,9 @@ def test_the_last_plan_fits_the_worst_escaped_card_whatever_the_fields_hold():
             True, NOW, None, ItemBrief(K.COMMAND, False, fill * 400)), summary=StatusSummary(fill * 5000, fill * 5000))
         r = dataclasses.replace(r, cwd="/w/" + fill * 400)
         text = view._card(r, view.PLANS[-1])
-        assert len(text) <= TEXT_LIMIT, (fill, len(text))
+        assert len(strip_html(text)) <= TEXT_LIMIT, (fill, len(text))
         check_html(text)
-        assert len(render_status(r)) <= TEXT_LIMIT
+        assert len(strip_html(render_status(r))) <= TEXT_LIMIT
 
 
 def test_a_long_summary_is_kept_whole_while_the_card_fits():
@@ -406,7 +406,7 @@ def test_render_picks_the_first_plan_that_fits(monkeypatch):
     r = with_agents([agent(f"Agent {i}", cache_permille=874) for i in range(6)], total=40, cwd="/w/fox",
                     summary=StatusSummary("в" * PROGRESS_MAX, "д" * NEXT_MAX), goal=GoalSummary("ц" * 60, "paused", 1, 2))
     plans = view.PLANS
-    sizes = [len(view._card(r, p)) for p in plans]
+    sizes = [len(strip_html(view._card(r, p))) for p in plans]
     assert sizes == sorted(sizes, reverse=True) and sizes[-1] < sizes[0]  # no step grows the card
     kids = lambda text: [x for x in text.splitlines() if x.startswith(" 🟢")]
     for i in range(1, len(plans)):
@@ -414,8 +414,8 @@ def test_render_picks_the_first_plan_that_fits(monkeypatch):
             continue  # a plan that changes nothing for this card
         monkeypatch.setattr(view, "TEXT_LIMIT", sizes[i - 1] - 1)  # just too small for the previous plan
         text = render_status(r)
-        expected = next(view._card(r, p) for p in plans if len(view._card(r, p)) <= view.TEXT_LIMIT)
-        assert text == expected and len(text) <= sizes[i - 1] - 1
+        expected = next(view._card(r, p) for p in plans if len(strip_html(view._card(r, p))) <= view.TEXT_LIMIT)
+        assert text == expected and len(strip_html(text)) <= sizes[i - 1] - 1
         check_html(text)
     monkeypatch.setattr(view, "TEXT_LIMIT", 10)  # nothing fits: the last plan is still returned
     assert render_status(r) == view._card(r, plans[-1])
@@ -475,7 +475,7 @@ def test_the_link_is_the_last_thing_the_shrink_gives_up_and_its_length_is_budget
         assert view._card(r, plan, link).endswith("</a>")
     assert "🔗" not in view._card(r, plans[-1], link)
     text = valid(render_status(r, link))
-    assert len(text) <= TEXT_LIMIT and text.splitlines()[-1].endswith("</a>") and "📈" not in text
+    assert len(strip_html(text)) <= TEXT_LIMIT and text.splitlines()[-1].endswith("</a>") and "📈" not in text
     assert len(render_status(r, link)) > len(render_status(r)) - 1  # the link took part in the size
 
 
@@ -483,12 +483,12 @@ def test_the_link_makes_the_card_shrink_further_and_a_card_that_fits_with_it_kee
     r = dataclasses.replace(with_agents([agent(f"Agent {i}", cache_permille=874) for i in range(6)],
                                         summary=StatusSummary("в" * 600, "д" * 300)), thread_id="r1")
     plain, linked = view._card(r, view.PLANS[0]), view._card(r, view.PLANS[0], LINK)
-    assert len(linked) > len(plain)
-    monkeypatch.setattr(view, "TEXT_LIMIT", len(plain))  # fits without the link only: the link forces one more step
+    assert len(strip_html(linked)) > len(strip_html(plain))
+    monkeypatch.setattr(view, "TEXT_LIMIT", len(strip_html(plain)))  # fits without the link only: the link forces one more step
     with_link = render_status(r, LINK)
-    assert len(with_link) <= len(plain) and with_link.endswith("</a>") and with_link != linked
+    assert len(strip_html(with_link)) <= len(strip_html(plain)) and with_link.endswith("</a>") and with_link != linked
     assert render_status(r) == plain  # without the link nothing shrinks
-    monkeypatch.setattr(view, "TEXT_LIMIT", len(linked))
+    monkeypatch.setattr(view, "TEXT_LIMIT", len(strip_html(linked)))
     assert render_status(r, LINK) == linked  # with room for the link nothing is dropped
 
 
@@ -498,19 +498,31 @@ def test_the_worst_escaped_card_with_the_longest_link_still_fits():
                                 summary=StatusSummary(fill * 5000, fill * 5000))
         link = "https://h/" + fill.replace("<", "x") * 100 + "{thread_id}"  # 200 characters in all
         text = render_status(r, link)
-        assert len(text) <= TEXT_LIMIT, fill
+        assert len(strip_html(text)) <= TEXT_LIMIT, fill
         check_html(text)
 
 
 def test_long_goal_uses_remaining_space_without_removing_other_content():
     objective = "т" * 6000
     text = render_status(report(goal=GoalSummary(objective, "active", 10, None), summary=StatusSummary("текущая работа", "дальше")))
-    assert len(text) <= TEXT_LIMIT and "текущая работа" in text and "дальше" in text
+    assert len(strip_html(text)) <= TEXT_LIMIT and "текущая работа" in text and "дальше" in text
     assert "<blockquote expandable>🎯" + "т" * 500 in text and "…</blockquote>" in text
 
 
 def test_context_totals_format_matches_the_requested_layout():
     usage = UsageSnapshot(302300, 475000, 0, 0, 1000, 993, 999600000)
     assert view._context(usage, 9, 4400000000) == (
-        " 🌀<b>∑999.6M (4.4B) · ctx</b> 302.3k/475k (64%)<b> · </b>💾99.3%<b> · </b>🗜️9"
+        " 🌀<b>∑999.6M (4.4B) · ctx</b> 302.3k/475k(64%)<b> · </b>💾99.3%<b> · </b>🗜️9"
     )
+
+
+def test_goal_fills_rendered_limit_without_counting_html_or_escaped_entities():
+    objective = "<&🎯" * 3000
+    r = report(goal=GoalSummary(objective, "active", 0, None), summary=StatusSummary("идёт работа", "проверки"))
+    text = render_status(r)
+    visible = strip_html(text)
+    assert len(text) > TEXT_LIMIT
+    assert len(visible) == TEXT_LIMIT
+    assert "идёт работа" in visible and "проверки" in visible
+    assert "<&🎯" * 100 in visible and "…" in visible
+    check_html(text)

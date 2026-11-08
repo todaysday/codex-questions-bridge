@@ -11,6 +11,7 @@ from cqb.domain.status import Activity, AgentLine, GoalSummary, RateLimits, Stat
 from cqb.services import status as status_mod
 from cqb.services.live_state import LiveState
 from cqb.services.status import StatusService, StatusUnavailable
+from cqb.telegram.api import strip_html
 from cqb.telegram.fmt import TEXT_LIMIT
 from cqb.telegram.status_view import ICON, render_status, tokens
 from tg_stack import NOW, Clock, StatusSourceStub, snapshot
@@ -88,7 +89,7 @@ def test_context_uses_the_last_call_and_the_cache_rate_the_whole_session():
     src.threads["r1"] = snapshot("r1", path="/p")
     report = collect(svc)
     assert report.usage.fill_percent == 6 and report.usage.cache_permille == 800
-    assert "\n <b>ctx</b> 29.5k/475k (6%)<b> · </b>💾80%\n" in render_status(report)
+    assert "\n <b>ctx</b> 29.5k/475k(6%)<b> · </b>💾80%\n" in render_status(report)
 
 
 def test_the_roots_cwd_reaches_the_report_from_the_thread_snapshot_already_read():
@@ -258,7 +259,7 @@ def test_card_never_exceeds_the_telegram_limit():
         NOW, long, R.STALLED, 99, long, long, 10**6, UsageSnapshot(10**9, 10**9, 10**9, 10**9), NOW,
         GoalSummary(long, long, 10**9, 10**9), 10**4, True, 3, 3, 4, agents, RateLimits(100, NOW, 10080), None, StatusSummary(long, long))
     text = render_status(report)
-    assert len(text) <= TEXT_LIMIT and "\n 🟢" in text
+    assert len(strip_html(text)) <= TEXT_LIMIT and "\n 🟢" in text
     assert set(ICON) == set(R)
 
 

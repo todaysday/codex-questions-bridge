@@ -349,14 +349,14 @@ The subagent list uses an expandable quotation; its counts remain visible outsid
 redacted and cut at 80 characters, and message text and command output are never read. The goal appears in an expandable quotation, clipped only to fit the space left after the other status details. Two parts from the Status
 Agent follow (about 900 characters): `В процессе` (3-5 lines about the thread as a whole, no per-agent breakdown), then after an empty line `Дальше` (2-4 lines about what remains, only as far as
 the recent reports say so). The message is Telegram HTML, sent when all of it is ready (typing indicator meanwhile) and
-never edited. With `[status] open_link` set, the last line is a link `🔗Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
+never edited. With `[status] open_link` set, the last line is a link `🔗Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters after HTML parsing shrinks (fewer subagent lines, shorter fragments, no goal), and a
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
 🟢FoxProfile
 📁foxprofile-api
 🧠sol 6.1 low · 🕒25м · 🔄now 💭выполняет: pytest -q
- ctx 160k/475k (34%) · 💾80% · 🗜️3
+ ctx 160k/475k(34%) · 💾80% · 🗜️3
 <blockquote expandable>🎯Ship the profile page</blockquote>
 
 🤖Субагенты 9 · 🟢2 · 🟡1 · ⚪6
