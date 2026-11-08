@@ -146,10 +146,10 @@ def test_status_snapshot_gets_its_summary_from_a_slot_session_and_never_touches_
             topic = await create_consultant(tg, "FoxProfile")
             tg.push_message("/status", topic)
             await asyncio.sleep(0.15)
-            assert not any("📈" in m["text"] for m in tg.live_messages(topic))  # nothing yet, no placeholder
+            assert not any("Субагенты</b>" in m["text"] for m in tg.live_messages(topic))  # nothing yet, no placeholder
             await wait_until(lambda: any(p.get("message_thread_id") == topic for p in tg.methods("sendChatAction")))
-            await wait_until(lambda: any("📈" in m["text"] for m in tg.live_messages(topic)), 5)
-            card = next(m["text"] for m in tg.live_messages(topic) if "📈" in m["text"])
+            await wait_until(lambda: any("Субагенты</b>" in m["text"] for m in tg.live_messages(topic)), 5)
+            card = next(m["text"] for m in tg.live_messages(topic) if "Субагенты</b>" in m["text"])
             assert "🔛<b>:</b> Корень правит тесты.\n\n🔜<b>:</b> прогнать e2e" in card and "резюме недоступно" not in card
             assert list(pico.sockets) == ["cqb-status-1"] and pico.texts("cqb-status-1")[0].startswith("Status request")
             assert seen == {"cqb-status-1": (200, {"source_id": "local", "root_id": "t1"})}  # bound during the call

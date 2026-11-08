@@ -104,14 +104,14 @@ def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
     agents = _agents(r, plan)
     if len(agents) > 1:
         agents = [agents[0], "<blockquote expandable>\n" + "\n".join(agents[1:]) + "\n</blockquote>"]
-    blocks = ["\n".join(top), "\n".join(agents), "\n".join(_summary(r.summary, plan)), limits_line(r.limits, r.now)]
+    blocks = ["\n".join(top), "\n".join(agents), "\n".join(_summary(r.summary, plan))]
     text = "\n\n".join(b for b in blocks if b)
     link = _link(r, open_link) if plan.link else None
     return f"{text}\n{link}" if link else text
 
 
 def _link(r: StatusReport, template: str) -> str | None:
-    """`🔗 <a href="https://…">Открыть в Codex</a>` directly under the footer; the text is fixed and the href is
+    """`🔗 <a href="https://…">Открыть в Codex</a>` on the last line; the text is fixed and the href is
     the template with the root's own id (percent-encoded) and nothing else, HTML-escaped."""
     if not template or not r.thread_id:
         return None

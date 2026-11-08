@@ -342,12 +342,12 @@ The context line also shows cumulative tokens for the root and, in parentheses, 
 
 Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context, the session-wide cache hit and the compaction count (`🗜️N`, hidden when zero) for the root and for each shown subagent (all read from the session files, so they survive a restart), goal, subagent counts (up to 300
 read; at most 6 one-line entries named like the Codex app, working first, then waiting, then recent, then `… и ещё N`),
-rate limit. The subagent list uses an expandable quotation; its counts remain visible outside. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,
+The subagent list uses an expandable quotation; its counts remain visible outside. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,
 `правит файлы (N)`, `думает`, `ждёт ответа`, ...), built without an LLM from the kind of the newest item. Command heads are
 redacted and cut at 80 characters, and message text and command output are never read. Two parts from the Status
 Agent follow (about 900 characters): `В процессе` (3-5 lines about the thread as a whole, no per-agent breakdown), then after an empty line `Дальше` (2-4 lines about what remains, only as far as
 the recent reports say so). The message is Telegram HTML, sent once when all of it is ready (typing indicator meanwhile) and
-never edited; the footer shows what is left of the weekly limit with a reset countdown, and there is no absolute time on the card. With `[status] open_link` set, the last line is a link `🔗 Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
+never edited. With `[status] open_link` set, the last line is a link `🔗 Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
@@ -369,7 +369,6 @@ text Telegram cannot parse is resent as plain text. Example:
 🔜: прогнать e2e
 <2-4 lines in all>
 
-📈 осталось 59% нед. · сброс через 1д 10ч 05м
 🔗 Открыть в Codex
 ```
 

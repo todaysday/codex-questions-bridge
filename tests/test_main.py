@@ -65,11 +65,11 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
 
         # /status in the consultant topic: one static snapshot from the (fake) daemon, never relayed
         tg.push_message("/status", fox)
-        await wait_until(lambda: any("📈" in m["text"] for m in tg.live_messages(fox)))
-        card = next(m["text"] for m in tg.live_messages(fox) if "📈" in m["text"])
-        assert "FoxProfile" in card and "📈 осталось 70% нед." in card and "Субагенты</b> · нет" in card
+        await wait_until(lambda: any("Субагенты</b>" in m["text"] for m in tg.live_messages(fox)))
+        card = next(m["text"] for m in tg.live_messages(fox) if "Субагенты</b>" in m["text"])
+        assert "FoxProfile" in card and "📈" not in card and "Субагенты</b> · нет" in card
         assert "🧠 gpt-6" in card and "📝 резюме недоступно" in card  # no [pico]: the summary is unavailable, the rest is there
-        assert len([m for m in tg.live_messages(fox) if "📈" in m["text"]]) == 1  # one static message
+        assert len([m for m in tg.live_messages(fox) if "Субагенты</b>" in m["text"]]) == 1  # one static message
         assert set(app.methods()) <= {"thread/list", "thread/read", "thread/resume", "thread/unsubscribe",
                                       "thread/loaded/list", "thread/goal/get", "thread/turns/list",
                                       "thread/items/list", "account/rateLimits/read"}

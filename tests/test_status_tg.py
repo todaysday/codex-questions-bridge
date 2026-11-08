@@ -19,7 +19,7 @@ def run(coro):
 
 def cards(st, topic):
     return [(i, m) for i, m in st.fake.messages.items() if m["thread_id"] == topic and not m.get("deleted")
-            and "📈" in m["text"]]  # every card ends with the limits line
+            and ("Субагенты" in m["text"] or "📈 лимит —" in m["text"])]
 
 
 def typing(st, topic):
@@ -157,7 +157,7 @@ def test_summary_that_does_not_arrive_in_time_gives_the_card_without_it(conn, mo
             await asyncio.wait_for(st.status_done(), 5)
             [(_, card)] = cards(st, topic)
             assert "📝 резюме недоступно" in card["text"] and "В процессе" not in card["text"]
-            assert " <b>ctx</b> —" in card["text"] and "📈 осталось 70%" in card["text"]  # numbers are all there
+            assert " <b>ctx</b> —" in card["text"] and "📈" not in card["text"]  # numbers are all there
     run(main())
 
 
@@ -301,7 +301,7 @@ def test_open_link_line_is_the_last_line_of_the_posted_card_and_telegram_accepts
             lines = card["text"].splitlines()
             assert card["parse_mode"] == "HTML"  # the fake rejects bad HTML like Telegram: it was accepted as it is
             assert lines[-1] == '🔗 <a href="https://chatgpt.com/codex/tasks/r1?a=1&amp;b=2">Открыть в Codex</a>'
-            assert lines[-2].startswith("📈 осталось") and card["text"].count("🔗") == 1
+            assert "📈" not in card["text"] and card["text"].count("🔗") == 1
             # not in the registry message and not in the opening message of the topic
             assert not any("🔗" in m["text"] or "chatgpt.com" in m["text"] for i, m in st.fake.messages.items() if i != mid)
     run(main())
@@ -316,5 +316,5 @@ def test_no_link_line_by_default(conn):
             await st.pump()
             await st.status_done()
             [(mid, card)] = cards(st, topic)
-            assert "🔗" not in card["text"] and "<a " not in card["text"] and card["text"].splitlines()[-1].startswith("📈")
+            assert "🔗" not in card["text"] and "<a " not in card["text"] and "📈" not in card["text"]
     run(main())

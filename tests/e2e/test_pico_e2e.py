@@ -250,7 +250,7 @@ def test_consultant_chat_with_real_picoclaw(tmp_path):
             assert "🔛<b>:</b> TOOLRESULT[" in card and "&quot;root_id&quot;:&quot;r1&quot;" in card and "OtherProject" not in card, card
             await asyncio.sleep(1.5)
             assert len(tg.live_messages(fox)) == n_fox + 1  # one message: no placeholder, nothing edited in later
-            assert all("edits" not in m for m in tg.live_messages(fox) if "📈" in m["text"])
+            assert all("edits" not in m for m in tg.live_messages(fox) if "Субагенты" in m["text"])
             asked = [e["body"] for e in mock_log()[seen_before:]]
             assert asked and {b["model"] for b in asked} == {"mock-status-model"}, [b["model"] for b in asked]
             assert sorted(t["function"]["name"] for t in asked[0]["tools"]) == sorted(

@@ -237,14 +237,10 @@ def test_rate_limits_are_cached_for_thirty_seconds():
     assert "📈" not in render_status(collect(svc))
 
 
-def test_limits_rendering_weekly_primary_only():
+def test_status_omits_available_limits():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
-    text = render_status(collect(svc))
-    assert text.endswith("📈 осталось 70% нед. · сброс через 1ч 00м") and "UTC" not in text and "снимок" not in text
-    src.limits = RateLimits(55, None, 300)
-    svc._limits = None
-    assert render_status(collect(svc)).endswith("📈 осталось 45% 5ч")
+    assert "📈" not in render_status(collect(svc))
 
 
 def test_every_snapshot_reads_fresh_data():
