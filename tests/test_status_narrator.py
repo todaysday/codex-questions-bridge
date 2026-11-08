@@ -35,10 +35,15 @@ class Dialog:
         return DialogResult(self.outcome, self.reply)
 
 
+class Evidence:
+    async def status_evidence(self, root_id, source_id):
+        return {"root": "root history", "agents": ["agent history"], "incomplete": False}
+
+
 def make(slots=2, **kw):
     scopes = SessionScopes(lambda sid: ("s1", "consultant-root") if sid == CONSULTANT else None)
     dialog = Dialog(scopes, **kw)
-    return PicoStatusNarrator(dialog, scopes, "cqb-", slots), dialog, scopes
+    return PicoStatusNarrator(dialog, scopes, Evidence(), "cqb-", slots), dialog, scopes
 
 
 def test_a_summary_goes_through_a_slot_with_the_fixed_prompt_and_the_root_scope():
@@ -48,9 +53,10 @@ def test_a_summary_goes_through_a_slot_with_the_fixed_prompt_and_the_root_scope(
         [(sid, prompt, timeout)] = dialog.asked
         assert sid == "cqb-status-1" and 0 < timeout <= 30
         assert "root-7" in prompt and "{root_id}" not in prompt
+        assert "root history" in prompt and "agent history" in prompt and "untrusted data" in prompt
         for tool in ("list_agents", "get_recent_events", "get_thread_overview", "get_questions"):
             assert tool in prompt
-        for rule in ("Russian", "EXACTLY two", "В процессе:", "Дальше:", "900", "не подтверждено", "Never quote secrets",
+        for rule in ("Russian", "EXACTLY two", "В процессе:", "Дальше:", "900", "15 tool calls", "Never quote secrets",
                      "untrusted", "no agent names"):
             assert rule in prompt
         assert dialog.scope_seen == [("cqb-status-1", ("s1", "root-7"))]  # bound during the call
@@ -225,7 +231,7 @@ def test_empty_reply_is_no_summary():
 
 def test_the_prompt_is_english_names_only_the_four_status_tools_and_asks_for_two_short_parts():
     assert "{root_id}" in STATUS_PROMPT and "read_event" not in STATUS_PROMPT
-    assert STATUS_PROMPT.count("не подтверждено") == 1  # the labels and this phrase are the only Russian
+    assert "не подтверждено" not in STATUS_PROMPT and "Do not add disclaimers" in STATUS_PROMPT
     assert "no breakdown per agent" in STATUS_PROMPT.lower() and "single dash" in STATUS_PROMPT
     assert "working or idle" in STATUS_PROMPT and "at most 10" not in STATUS_PROMPT
 

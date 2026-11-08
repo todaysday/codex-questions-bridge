@@ -476,3 +476,69 @@ def test_oversized_results_become_limit_exceeded(conn, monkeypatch):
     monkeypatch.setattr(tools, "RESULT_MAX_BYTES", 200)
     result = tools.tool_result({"x": "y " * 250})
     assert result["isError"] and json.loads(result["content"][0]["text"])["error"] == "limit_exceeded"
+
+
+def test_status_evidence_prefetches_root_active_and_recent_inactive_only(conn, monkeypatch):
+    async def main():
+        w = World(conn)
+        monkeypatch.setattr('cqb.services.context.time.time', lambda: NOW)
+        w.source.children['r1'] = (
+            snapshot('c1', RunState.WORKING, updated=NOW - 10000, parent='r1'),
+            snapshot('g1', RunState.IDLE, updated=NOW - 300, parent='r1'),
+            snapshot('old', RunState.IDLE, updated=NOW - 7200, parent='r1'),
+        )
+        w.source.archived_children['r1'] = (snapshot('arch', RunState.IDLE, updated=NOW - 30, parent='r1'),)
+        w.history.items['arch'] = [entry('t', 'w', kind='reasoning', summary=['private work']), entry('t', 'x', text='archived report', phase='final_answer')]
+        w.history.items['g1'] = [entry('t', 'g', text='finished summary', phase='final_answer')]
+        data = await w.ctx.status_evidence('r1', 's1')
+        assert data['root']['events'][-1]['text'] == 'event 119'
+        assert {a['thread_id'] for a in data['agents']} == {'c1', 'g1', 'arch'}
+        assert any(a['summary']['text'] == 'archived report' and 'history' not in a for a in data['agents'] if a['thread_id'] == 'arch')
+        assert 'private work' not in json.dumps(data)
+        assert not data['incomplete']
+        assert all(call[1] not in {'old', 'r2'} for call in w.history.calls)
+    arun(main())
+
+
+def test_status_evidence_reports_unavailable_history_and_scope(conn):
+    async def main():
+        w = World(conn)
+        w.history.fail = True
+        result = await w.ctx.status_evidence('r1', 's1')
+        assert result['incomplete'] and result['root'] is None
+        with pytest.raises(Exception, match='root is not an open consultant'):
+            await w.ctx.status_evidence('r3', 's1')
+    arun(main())
+
+
+def test_status_evidence_bounds_large_agent_sets_and_marks_them_incomplete(conn, monkeypatch):
+    async def main():
+        w = World(conn)
+        monkeypatch.setattr('cqb.services.context.time.time', lambda: NOW)
+        w.source.children['r1'] = tuple(snapshot(f'c{i}', RunState.WORKING, updated=NOW - i, parent='r1') for i in range(85))
+        result = await w.ctx.status_evidence('r1', 's1')
+        assert len(result['agents']) == 80 and result['incomplete']
+        assert len([c for c in w.history.calls if c[1] != 'r1']) == 80
+    arun(main())
+
+
+def test_status_evidence_timeout_keeps_root_and_cancels_child_reads(conn, monkeypatch):
+    async def main():
+        w = World(conn)
+        monkeypatch.setattr('cqb.services.context.STATUS_EVIDENCE_TIMEOUT', 0.02)
+        cancelled = asyncio.Event()
+        original = w.history.recent
+
+        async def slow_child(thread_id, limit):
+            if thread_id == 'r1':
+                return await original(thread_id, limit)
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        w.history.recent = slow_child
+        result = await w.ctx.status_evidence('r1', 's1')
+        assert result['root'] is not None and result['incomplete']
+        assert cancelled.is_set()
+    arun(main())

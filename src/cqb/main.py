@@ -207,7 +207,7 @@ async def run(
                 consultant_tokens.mcp, build_tools(context, files, web), scopes.lookup, health.beat, port=config.mcp.port,
             )
             narrator = PicoStatusNarrator(
-                gateway, scopes, config.pico.session_prefix, config.status.slots, status_prompt
+                gateway, scopes, context, config.pico.session_prefix, config.status.slots, status_prompt
             )
         else:
             log.info("consultant chat is not configured: no [pico] section")

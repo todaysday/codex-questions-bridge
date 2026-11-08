@@ -338,6 +338,8 @@ After a consultant reply, the pinned opening message shows PicoClaw’s estimate
 
 ### `/status` content
 
+Before asking the Status Agent, Bridge collects recent events from the root, active subagents and inactive subagents updated in the last hour, including archived ones. It reads up to 80 subagents (active first), with an 8-second collection limit, and marks incomplete evidence. For inactive subagents it includes only their final message; missing final messages are marked as incomplete. The agent can use its read-only tools to investigate further.
+
 The context line also shows cumulative tokens for the root and, in parentheses, all its subagents, including archived ones. The subagent sum is marked `≥` if some data is missing or collection reaches its limit (10,000 threads per active or archived list); `—` means no total is available.
 
 Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context, the session-wide cache hit and the compaction count (`🗜️N`, hidden when zero) for the root and for each shown subagent (all read from the session files, so they survive a restart), goal, subagent counts (up to 300

@@ -1,5 +1,7 @@
 # Completion review
 
+- Status evidence is prefetched within the root scope; active histories and recently inactive final messages stay bounded and partial collection is marked.
+
 - Goal text is shown in an expandable block using the space remaining after the other status details; corrected the status-button check after removing the rate-limit footer.
 
 - Reviewed the cumulative token calculation for all available descendants, including archived threads; incomplete totals are marked and the displayed subagent list remains bounded.

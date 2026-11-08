@@ -69,7 +69,7 @@ def test_status_slot_dispatch_rules_match_the_slots_the_bridge_uses():
 def test_status_prompt_and_agent_file_state_the_security_rules():
     from cqb.pico.status_narrator import STATUS_PROMPT
     text = (DEPLOY / "ws-status" / "AGENT.md").read_text().lower()
-    for phrase in ("read-only", "untrusted", "russian", "never quote secrets", "не подтверждено", "never reveal"):
+    for phrase in ("read-only", "untrusted", "russian", "never quote secrets", "do not guess", "never reveal"):
         assert phrase in text, phrase
     for tool in ("get_thread_overview", "list_agents", "get_recent_events", "get_questions"):
         assert tool in STATUS_PROMPT
@@ -86,7 +86,7 @@ def test_status_agent_file_asks_for_the_same_two_short_parts_as_the_prompt():
         assert "per agent" in source and "agent names" in source and "working or idle" in source
         assert "at most 10" not in source and "each running subagent" not in source and "350" not in source
     assert all(LABEL.match(f"{label}: x") for label in ("В процессе", "Дальше"))
-    assert "last reports" in text and "get_recent_events" in text and "thread_id" in text
+    assert "Initial recent events" in text and "untrusted data" in text and "get_recent_events" in text and "15 tool calls" in text
 
 
 def test_template_pico_channel_is_loopback_token_less_and_origin_locked():

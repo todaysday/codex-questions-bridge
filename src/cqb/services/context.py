@@ -6,9 +6,11 @@ the root must be an open consultant of the configured source and every thread as
 the root or one of its descendants. Redaction and byte caps are applied here, not by the caller.
 """
 
+import asyncio
 import dataclasses
 import logging
 import re
+import time
 from typing import Any, Protocol
 
 from cqb.codex.history import HistoryReader, HistoryUnavailable, event_from_entry, split_ref
@@ -19,7 +21,7 @@ from cqb.dao.threads import ThreadDao
 from cqb.domain.context import (
     AgentInfo, AgentList, EventPage, HistoryEvent, QuestionInfo, QuestionItemInfo, QuestionList, ThreadOverview,
 )
-from cqb.domain.enums import OPEN_LIFECYCLES, ConsultantState, QuestionLifecycle
+from cqb.domain.enums import OPEN_LIFECYCLES, ConsultantState, QuestionLifecycle, RunState
 from cqb.domain.labels import parse_number, question_label
 from cqb.domain.models import AgentQuestion, Question
 from cqb.domain.status import Descendants, ThreadSnapshot
@@ -41,6 +43,7 @@ MAX_QUESTION_ITEMS = 10
 OVERVIEW = (500, 200, 10)  # title chars, option chars, options
 DETAIL = (4000, 2000, 26)
 SCOPE_FETCH = 100
+STATUS_EVIDENCE_TIMEOUT = 8
 _ID = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
 
 
@@ -57,6 +60,7 @@ class ToolError(Exception):
 class ThreadReader(Protocol):
     async def thread(self, thread_id: str) -> ThreadSnapshot | None: ...
     async def descendants(self, root_id: str, limit: int) -> Descendants | None: ...
+    async def archived_descendants(self, root_id: str, limit: int) -> Descendants | None: ...
 
 
 class ContextService:
@@ -123,6 +127,9 @@ class ContextService:
         if since is not None and (isinstance(since, bool) or not isinstance(since, int) or since < 0):
             raise ToolError("invalid_arguments", "since must be a unix time in seconds")
         thread = await self._thread_in_scope(root_id, thread_id or root_id)
+        return await self._recent_events(root_id, thread, events, budget, since)
+
+    async def _recent_events(self, root_id: str, thread: str, events: int, budget: int, since: int | None = None) -> EventPage:
         try:
             entries, more = await self._history.recent(thread, events)
         except HistoryUnavailable:
@@ -143,6 +150,67 @@ class ContextService:
             used += size
         kept.reverse()
         return EventPage(self._source, root_id, thread, tuple(kept), truncated=more)
+
+    async def status_evidence(self, root_id: str, source_id: str) -> dict[str, Any]:
+        """Bounded initial evidence, independently of the model's tool calls."""
+        self._root(root_id, source_id)
+        result: dict[str, Any] = {"root": None, "agents": [], "incomplete": False}
+        async def root() -> None:
+            result["root"] = dataclasses.asdict(await self._recent_events(root_id, root_id, 30, DEFAULT_BYTES))
+
+        async def descendants() -> None:
+            active, archived = await asyncio.gather(
+                self._reader.descendants(root_id, 10000), self._reader.archived_descendants(root_id, 10000)
+            )
+            if active is None or archived is None:
+                result["incomplete"] = True
+            found = [x for x in (active, archived) if x is not None]
+            result["incomplete"] |= any(x.more for x in found)
+            unique = {t.thread_id: t for group in found for t in group.threads}
+            running = {RunState.WORKING, RunState.WAITING_INPUT, RunState.WAITING_APPROVAL}
+            recent = int(time.time()) - 3600
+            selected = sorted((t for t in unique.values() if t.state in running or t.updated_at >= recent),
+                              key=lambda t: (t.state not in running, -t.updated_at))
+            result["incomplete"] |= len(selected) > 80
+            sem = asyncio.Semaphore(12)
+
+            async def one(t: ThreadSnapshot) -> None:
+                async with sem:
+                    try:
+                        is_active = t.state in running
+                        data = {"thread_id": t.thread_id, "name": redact(_clean(t.nickname) or "")[0],
+                                "state": t.state.value, "updated_at": t.updated_at}
+                        if is_active:
+                            page = await self._recent_events(root_id, t.thread_id, 10, 4096)
+                            data["history"] = dataclasses.asdict(page)
+                        else:
+                            entries, _ = await self._history.recent(t.thread_id, 30)
+                            final = next((e for row in reversed(entries)
+                                          if (e := event_from_entry(t.thread_id, row, max_chars=4000))
+                                          and e.kind == "agentMessage" and e.status == "final_answer"), None)
+                            final = self._present(final) if final else None
+                            data["summary"] = dataclasses.asdict(final) if final else None
+                            if final is None:
+                                result["incomplete"] = True
+                        result["agents"].append(data)
+                    except (HistoryUnavailable, ToolError):
+                        result["incomplete"] = True
+
+            await asyncio.gather(*(one(t) for t in selected[:80]))
+
+        tasks = [asyncio.create_task(root()), asyncio.create_task(descendants())]
+        try:
+            await asyncio.wait(tasks, timeout=STATUS_EVIDENCE_TIMEOUT)
+        finally:
+            pending = [task for task in tasks if not task.done()]
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
+        for task in tasks:
+            if not task.cancelled() and task.exception() is not None:
+                result["incomplete"] = True
+        result["incomplete"] |= bool(pending)
+        return result
 
     async def read_event(
         self, root_id: str, event_ref: str, source_id: str | None = None, max_bytes: int | None = None
