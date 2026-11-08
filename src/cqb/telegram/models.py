@@ -1,6 +1,8 @@
 """Small DTOs for the Bot API objects and keyboards this bridge uses."""
 
+import dataclasses
 import hashlib
+from collections.abc import Callable
 from dataclasses import dataclass
 
 
@@ -19,6 +21,8 @@ class Button:
     action: ActionSpec | None = None
     url: str | None = None
     callback_data: str | None = None
+    style: str | None = None  # rich messages only: primary | success | danger | link
+    classic_text: str | None = None  # the label on the classic inline keyboard, when it differs from `text`
 
 
 Keyboard = tuple[tuple[Button, ...], ...]
@@ -103,10 +107,71 @@ class View:
 
 
 @dataclass(frozen=True, slots=True)
+class Bold:
+    text: str
+
+
+Part = str | Bold | Button
+
+
+@dataclass(frozen=True, slots=True)
+class Para:
+    """One paragraph: text, bold text and the buttons that sit in the line right after their text.
+
+    Classic rendering joins paragraphs with `glue` (a blank line, or one newline for a tight list) and moves the
+    buttons to the inline keyboard; `classic` replaces the plain text there when the classic line reads differently."""
+
+    parts: tuple[Part, ...]
+    glue: str = "\n\n"
+    classic: str | None = None
+    volatile: bool = False  # the header: carries the time, so it is left out of the fingerprint
+
+
+@dataclass(frozen=True, slots=True)
+class Row:
+    """A row of buttons on their own (rich: `<tg-button-row>`, classic: one keyboard row)."""
+
+    buttons: tuple[Button, ...]
+
+
+@dataclass(frozen=True, slots=True)
+class Doc:
+    """What a view wants to say, neutral between rich messages and the classic text + inline keyboard.
+
+    `per_row`: how many in-line buttons share one classic keyboard row."""
+
+    blocks: tuple[Para | Row, ...]
+    per_row: int = 5
+
+    def mapped(self, fn: Callable[[Button], Button]) -> "Doc":
+        """The same document with every button replaced by `fn(button)` (binding callback ids)."""
+        blocks: list[Para | Row] = []
+        for b in self.blocks:
+            if isinstance(b, Row):
+                blocks.append(Row(tuple(fn(x) for x in b.buttons)))
+            else:
+                blocks.append(dataclasses.replace(b, parts=tuple(fn(p) if isinstance(p, Button) else p for p in b.parts)))
+        return dataclasses.replace(self, blocks=tuple(blocks))
+
+    def fingerprint(self) -> str:
+        """Stable over the volatile header and over bound callback ids: changes only with what the owner would see."""
+        raw = repr([_stable(b) for b in self.blocks if not (isinstance(b, Para) and b.volatile)])
+        return hashlib.sha1(raw.encode()).hexdigest()
+
+
+def _stable(block: "Para | Row") -> object:
+    def one(b: Button) -> tuple[object, ...]:
+        return (b.text, b.action, b.url, b.style)
+    if isinstance(block, Row):
+        return tuple(one(b) for b in block.buttons)
+    return (block.glue, block.classic, tuple(one(p) if isinstance(p, Button) else p for p in block.parts))
+
+
+@dataclass(frozen=True, slots=True)
 class Reply:
     """Outcome of a button press: shown to the user as a toast (or alert) on the button. For a typed answer it is a
-    message in the topic instead, and then `keyboard` (already bound) goes under it."""
+    message in the topic instead, and then `doc` (already bound, with its buttons) is what gets posted."""
 
     text: str | None = None
     alert: bool = False
-    keyboard: Keyboard = ()
+    doc: Doc | None = None

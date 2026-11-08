@@ -14,13 +14,14 @@ from cqb.services.question_context import discussion_prefix
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
-from cqb.telegram.api import BotApi, TelegramError
+from cqb.telegram.api import TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.consultant_view import THREAD_COMMAND_ENABLED, render_questions, render_thread
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
-from cqb.telegram.models import CallbackQuery, Keyboard, Message, Reply, Update
+from cqb.telegram.models import CallbackQuery, Doc, Message, Para, Reply, Update
+from cqb.telegram.present import Presenter
 from cqb.telegram.registry_view import thread_name
 from cqb.telegram.status_post import BUSY as STATUS_BUSY, StatusPoster
 
@@ -45,7 +46,7 @@ class Router:
     def __init__(
         self,
         config: RouterConfig,
-        api: BotApi,
+        present: Presenter,
         keys: ActionKeys,
         topics: ControlTopics,
         publisher: RegistryPublisher,
@@ -63,7 +64,8 @@ class Router:
         clock: Callable[[], float] = time.time,
     ) -> None:
         self._cfg = config
-        self._api = api
+        self._present = present
+        self._api = present.api
         self._keys = keys
         self._topics = topics
         self._publisher = publisher
@@ -171,8 +173,10 @@ class Router:
         if reply is None:
             reply = await self._agent_cards.stage_text(reply_to, text)
         if reply is not None:  # the armed card took it as its answer
-            if reply.text:
-                await self._say(m, reply.text, reply.keyboard)  # the confirmation carries the card's send/cancel buttons
+            if reply.doc is not None:  # the confirmation carries the card's send/cancel buttons
+                await self._present.send(self._cfg.chat_id, reply.doc, thread_id=m.thread_id)
+            elif reply.text:
+                await self._say(m, reply.text)
         elif isinstance(card, Question) and card.is_secret:
             await self._say(m, SECRET_REFUSAL)  # whatever the owner typed may be the secret: nothing is forwarded
         elif text.strip():
@@ -197,8 +201,8 @@ class Router:
                 rows[q.root_thread_id] = thread_name(row)
         return rows
 
-    async def _say(self, m: Message, text: str, keyboard: Keyboard = ()) -> None:
-        await self._api.send_message(self._cfg.chat_id, text, thread_id=m.thread_id, keyboard=keyboard)
+    async def _say(self, m: Message, text: str) -> None:
+        await self._api.send_message(self._cfg.chat_id, text, thread_id=m.thread_id)
 
     # --- callbacks -------------------------------------------------------------------
 
@@ -245,7 +249,7 @@ class Router:
             await self._api.delete_message(self._cfg.chat_id, message_id)
         except TelegramError:
             try:
-                await self._api.edit_message_text(self._cfg.chat_id, message_id, note)
+                await self._present.edit(self._cfg.chat_id, message_id, Doc((Para((note,)),)))
             except TelegramError as exc:
                 log.debug("cannot retire the confirmation message: %s", exc)
 

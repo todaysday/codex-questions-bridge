@@ -47,6 +47,7 @@ from cqb.services.scope import SessionScopes
 from cqb.services.status import StatusNarrator, StatusService
 from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.api import API_BASE, BotApi
+from cqb.telegram.present import Presenter
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.consultant_view import render_opening
 from cqb.telegram.control import ControlTopics, RegistryPublisher
@@ -140,13 +141,14 @@ async def run(
             threads, consultant_dao, question_dao, source_id, config.codex.recency_days, live=live,
             agent_questions=agent_dao,
         )
-        topics = ControlTopics(api, state, tg.chat_id, tg.control_topic_name)
+        present = Presenter(api, tg.rich_messages)
+        topics = ControlTopics(present, state, tg.chat_id, tg.control_topic_name)
         tg_topics = TelegramTopics(api, tg.chat_id)
         publisher = RegistryPublisher(
-            api, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds
+            present, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds
         )
-        cards = QuestionCards(api, keys, questions, registry, tg.chat_id, publisher.request_refresh)
-        agent_cards = AgentQuestionCards(api, keys, agent_questions, registry, tg.chat_id, publisher.request_refresh)
+        cards = QuestionCards(present, keys, questions, registry, tg.chat_id, publisher.request_refresh)
+        agent_cards = AgentQuestionCards(present, keys, agent_questions, registry, tg.chat_id, publisher.request_refresh)
 
         def cards_for_root(root: str) -> None:
             cards.mark_root(root)
@@ -200,7 +202,7 @@ async def run(
         focus = QuestionFocus(consultant_dao, questions, agent_questions, source_id)
         router = Router(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
-            api, keys, topics, publisher, cards, agent_cards, consultants, registry, questions,
+            present, keys, topics, publisher, cards, agent_cards, consultants, registry, questions,
             agent_questions,
             ConsultantRelay(gateway, tg_topics, context=focus), focus, status, source_id, inventory.poke,
         )

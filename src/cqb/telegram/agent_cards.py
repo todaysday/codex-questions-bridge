@@ -13,14 +13,14 @@ from cqb.services.agent_questions import ANSWER_MAX_CHARS, AgentQuestionService
 from cqb.services.questions import QuestionError
 from cqb.services.registry import RegistryQuery
 from cqb.domain.enums import ConsultantState
-from cqb.telegram.agent_card_view import render_agent_card
-from cqb.telegram.api import BotApi
+from cqb.telegram.agent_card_view import agent_card_doc
 from cqb.telegram.armed import ArmedAnswers
-from cqb.telegram.card_post import CardPoster, card_parts
-from cqb.telegram.card_view import CONFIRM_PROMPT, confirm_keyboard, confirm_message
+from cqb.telegram.card_post import CardPoster
+from cqb.telegram.card_view import CONFIRM_PROMPT, confirm_doc
 from cqb.telegram.cards import MAX_DIRTY, RETRY_SECONDS
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import Reply
+from cqb.telegram.present import Presenter
 from cqb.telegram.registry_view import thread_name
 
 log = logging.getLogger(__name__)
@@ -29,7 +29,7 @@ log = logging.getLogger(__name__)
 class AgentQuestionCards:
     def __init__(
         self,
-        api: BotApi,
+        present: Presenter,
         keys: ActionKeys,
         questions: AgentQuestionService,
         registry: RegistryQuery,
@@ -37,7 +37,7 @@ class AgentQuestionCards:
         on_change: Callable[[], None],
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._poster = CardPoster(api, chat_id)
+        self._poster = CardPoster(present, chat_id)
         self._keys = keys
         self._questions = questions
         self._registry = registry
@@ -99,7 +99,7 @@ class AgentQuestionCards:
             if q is None:
                 return
             row = self._registry.describe(q.root_thread_id)
-            view = render_agent_card(
+            doc = agent_card_doc(
                 q, thread_name(row) if row else q.root_thread_id[:8], self._armed.is_armed(agent_question_id))
             ids = [q.card_message_id, *q.card_extra_ids] if q.card_message_id is not None else []
             topic = None  # where a new card may be posted: only for an open question of an open consultant
@@ -108,7 +108,7 @@ class AgentQuestionCards:
             if not ids and topic is None:
                 return  # no open consultant (the registry row shows ❓) or nothing actionable left to post
             await self._poster.sync(
-                ids, card_parts(view.text, question_label(q.display_no)), self._keys.bind(view.keyboard), topic,
+                ids, self._keys.bind_doc(doc), question_label(q.display_no), topic,
                 lambda new_ids: self._questions.bind_card_messages(agent_question_id, new_ids),
             )
 
@@ -133,8 +133,8 @@ class AgentQuestionCards:
         staged = await self._staged(q.agent_question_id, lambda: self._questions.answer_text(q.agent_question_id, text))
         if staged.alert:
             return staged
-        keyboard = confirm_keyboard("asend", "acancel", q.root_thread_id, q.agent_question_id)
-        return Reply(confirm_message(text), keyboard=self._keys.bind(keyboard))  # the same buttons as under the card
+        doc = confirm_doc(text, "asend", "acancel", q.root_thread_id, q.agent_question_id)  # same buttons as the card
+        return Reply(doc=self._keys.bind_doc(doc))
 
     async def confirm(self, agent_question_id: str) -> Reply:
         try:

@@ -7,7 +7,7 @@ from collections.abc import Callable
 from cqb.dao.actions import ActionDao
 from cqb.domain.models import TelegramAction
 from cqb.telegram.fmt import CALLBACK_LIMIT, callback_key
-from cqb.telegram.models import ActionSpec, Keyboard
+from cqb.telegram.models import ActionSpec, Button, Doc, Keyboard
 
 ACTION_TTL = 86400
 # Mutations are used up by a press; navigation and info may be pressed repeatedly until expiry.
@@ -23,17 +23,17 @@ class ActionKeys:
     def bind(self, keyboard: Keyboard) -> Keyboard:
         """Store each button's action and put its callback id into the button."""
         now = int(self._clock())
-        rows = []
-        for row in keyboard:
-            bound = []
-            for b in row:
-                if b.action is None:
-                    bound.append(b)
-                    continue
-                key = self._store(b.action, now)
-                bound.append(dataclasses.replace(b, callback_data=key))
-            rows.append(tuple(bound))
-        return tuple(rows)
+        return tuple(tuple(self._bound(b, now) for b in row) for row in keyboard)
+
+    def bind_doc(self, doc: Doc) -> Doc:
+        """The same for the buttons of a document (in-text buttons and button rows)."""
+        now = int(self._clock())
+        return doc.mapped(lambda b: self._bound(b, now))
+
+    def _bound(self, button: Button, now: int) -> Button:
+        if button.action is None:
+            return button
+        return dataclasses.replace(button, callback_data=self._store(button.action, now))
 
     def resolve(self, key: str) -> TelegramAction | None:
         """Known, unexpired and (for mutations) unused; consumes one-time actions."""

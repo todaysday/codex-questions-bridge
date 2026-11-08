@@ -4,16 +4,19 @@ Nothing but that one pinned message is ever posted into the control topic.
 """
 
 import asyncio
+import contextlib
 import logging
 import time
 from collections.abc import Awaitable, Callable
 
 from cqb.dao.bot_state import BotStateDao
 from cqb.services.registry import RegistryQuery
-from cqb.telegram.api import BadRequest, BotApi, TelegramError
+from cqb.telegram.api import BadRequest, RichRejected, TelegramError
 from cqb.telegram.keys import ActionKeys
-from cqb.telegram.models import Keyboard, SentMessage
-from cqb.telegram.registry_view import PAGE_SIZE, render_registry
+from cqb.telegram.models import Doc, SentMessage
+from cqb.telegram.present import Presenter
+from cqb.telegram.registry_view import PAGE_SIZE, RICH_PAGE_SIZE, registry_doc
+from cqb.telegram.render import to_view
 
 log = logging.getLogger(__name__)
 
@@ -24,8 +27,9 @@ SAFETY_SECONDS = 60  # periodic re-render in case an event was missed; unchanged
 class ControlTopics:
     """Creates the control topic once, remembers its id, recreates it when deleted by hand."""
 
-    def __init__(self, api: BotApi, state: BotStateDao, chat_id: int, name: str) -> None:
-        self._api = api
+    def __init__(self, present: Presenter, state: BotStateDao, chat_id: int, name: str) -> None:
+        self._present = present
+        self._api = present.api
         self._state = state
         self._chat_id = chat_id
         self._name = name
@@ -40,24 +44,28 @@ class ControlTopics:
     def is_control(self, topic_id: int) -> bool:
         return self.topic_id() == topic_id
 
-    async def send_registry(self, text: str, keyboard: Keyboard) -> SentMessage:
+    async def send_registry(self, doc: Doc, rich: bool | None = None) -> SentMessage:
         """The only post into the control topic; if the topic was deleted, recreate it and retry once."""
         topic = self.topic_id()
         if topic is None:
             topic = await self._create()
         try:
-            return await self._api.send_message(self._chat_id, text, thread_id=topic, keyboard=keyboard)
+            return await self._present.send(self._chat_id, doc, thread_id=topic, rich=rich)
         except BadRequest as exc:
             if not exc.gone:
                 raise
         log.warning("control topic is gone; recreating")
         topic = await self._create()
-        return await self._api.send_message(self._chat_id, text, thread_id=topic, keyboard=keyboard)
+        return await self._present.send(self._chat_id, doc, thread_id=topic, rich=rich)
 
     async def _create(self) -> int:
         topic = await self._api.create_forum_topic(self._chat_id, self._name)
         self._state.set("topic.control", topic.thread_id)
         return topic.thread_id
+
+
+class _Redraw(Exception):
+    """The page was built for the wrong mode (rich or classic): draw it again in the mode now in force."""
 
 
 class RegistryPublisher:
@@ -69,7 +77,7 @@ class RegistryPublisher:
 
     def __init__(
         self,
-        api: BotApi,
+        present: Presenter,
         topics: ControlTopics,
         state: BotStateDao,
         keys: ActionKeys,
@@ -80,7 +88,8 @@ class RegistryPublisher:
         safety: float = SAFETY_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._api = api
+        self._present = present
+        self._api = present.api
         self._topics = topics
         self._state = state
         self._keys = keys
@@ -92,6 +101,7 @@ class RegistryPublisher:
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._force = False
+        self._classic_now = False  # a fresh rich message was refused: draw this pass classic
 
     @property
     def message_id(self) -> int | None:
@@ -131,33 +141,67 @@ class RegistryPublisher:
     async def refresh(self, force: bool = False) -> bool:
         """Returns True when Telegram was written to."""
         async with self._lock:
-            now = int(self._clock())
-            page_no, archived = self.view()
-            page = self._query.page(page_no, PAGE_SIZE, archived)
-            if not page.rows and page_no > 0:
-                self.set_view(0, archived)
-                page = self._query.page(0, PAGE_SIZE, archived)
-            view = render_registry(page, self._chat_id, now)
-            digest = view.fingerprint()
-            message_id = self.message_id
-            fresh = now - (self._state.get_int("registry.written_at") or 0) < MAX_MESSAGE_AGE
-            if not force and message_id is not None and fresh and digest == self._state.get("registry.hash"):
-                return False
-            keyboard = self._keys.bind(view.keyboard)
-            if message_id is not None:
-                message_id = await self._edit(message_id, view.text, keyboard)
-            if message_id is None:
-                sent = await self._topics.send_registry(view.text, keyboard)
-                self._state.set("registry.message_id", sent.message_id)
-                await self._pin(sent.message_id)
-            self._state.set("registry.hash", digest)
-            self._state.set("registry.written_at", now)
-            self._keys.purge_expired()
-            return True
+            try:
+                for _ in range(2):  # the second pass runs classic and cannot ask for another
+                    rich = self._present.rich and not self._classic_now and not self._present.is_classic(self.message_id)
+                    try:
+                        return await self._write(force, rich)
+                    except _Redraw:
+                        force = True
+                raise AssertionError("unreachable")
+            finally:
+                self._classic_now = False
 
-    async def _edit(self, message_id: int, text: str, keyboard: Keyboard) -> int | None:
+    async def _write(self, force: bool, rich: bool) -> bool:
+        now = int(self._clock())
+        page_no, archived = self.view()
+        size = RICH_PAGE_SIZE if rich else PAGE_SIZE
+        page = self._query.page(page_no, size, archived)
+        if not page.rows and page_no > 0:
+            self.set_view(0, archived)
+            page = self._query.page(0, size, archived)
+        doc = registry_doc(page, self._chat_id, now)
+        digest = doc.fingerprint() + ("+rich" if rich else "")
+        message_id = self.message_id
+        fresh = now - (self._state.get_int("registry.written_at") or 0) < MAX_MESSAGE_AGE
+        if not force and message_id is not None and fresh and digest == self._state.get("registry.hash"):
+            return False
+        bound = self._keys.bind_doc(doc)
+        if message_id is not None:
+            message_id = await self._edit(message_id, bound, rich)
+        if message_id is None:
+            try:
+                sent = await self._topics.send_registry(bound, rich=rich)
+            except RichRejected:
+                self._classic_now = self._present.rich  # markup refused: this pass classic; unsupported: rich is off
+                raise _Redraw from None
+            self._state.set("registry.message_id", sent.message_id)
+            await self._pin(sent.message_id)
+        self._state.set("registry.hash", digest)
+        self._state.set("registry.written_at", now)
+        self._keys.purge_expired()
+        return True
+
+    async def _edit(self, message_id: int, doc: Doc, rich: bool) -> int | None:
+        """Edit in place; None when the message is gone. A classic message Telegram will not turn into a rich one is
+        replaced by a fresh rich message (pinned, state updated, the old one deleted); when even that is refused the
+        old message stays classic for good (this process) and the page is drawn again classic."""
         try:
-            await self._api.edit_message_text(self._chat_id, message_id, text, keyboard)
+            if not rich:
+                view = to_view(doc)
+                await self._api.edit_message_text(self._chat_id, message_id, view.text, view.keyboard)
+                return message_id
+            try:
+                await self._api.edit_rich_message(self._chat_id, message_id, self._present.html(doc))
+                return message_id
+            except RichRejected as exc:
+                self._present.rejected(exc)
+            if self._present.rich:
+                fresh = await self._replace(message_id, doc)
+                if fresh is not None:
+                    return fresh
+                self._present.keep_classic(message_id)
+            raise _Redraw
         except BadRequest as exc:
             if exc.not_modified:
                 return message_id
@@ -165,7 +209,17 @@ class RegistryPublisher:
                 log.warning("registry message is gone; recreating")
                 return None
             raise
-        return message_id
+
+    async def _replace(self, old_id: int, doc: Doc) -> int | None:
+        try:
+            sent = await self._topics.send_registry(doc, rich=True)
+        except RichRejected:
+            return None
+        self._state.set("registry.message_id", sent.message_id)
+        await self._pin(sent.message_id)
+        with contextlib.suppress(TelegramError):
+            await self._api.delete_message(self._chat_id, old_id)
+        return sent.message_id
 
     async def _pin(self, message_id: int) -> None:
         try:

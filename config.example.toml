@@ -16,6 +16,10 @@ chat_id = -1001234567890
 allowed_user_ids = [123456789]            # only these users may press buttons or write
 control_topic_name = "📋 Треды Codex"
 registry_refresh_seconds = 5              # 5..3600; at most one edit of the pinned registry message per this many seconds, only if it changed
+# Bot API 10.3 rich messages: the buttons sit inside the message text (question cards, the thread list).
+# true (default) = rich; if Telegram says the method is not available the Bridge logs one warning and uses the
+# classic text + inline keyboard until restart. false = classic always.
+rich_messages = true
 
 # Consultant chat (PicoClaw). Present = consultants are enabled and the process refuses to start without
 # CQB_PICO_TOKEN and CQB_MCP_TOKEN in its environment (two different secrets, never in this file).

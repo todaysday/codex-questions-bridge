@@ -96,7 +96,7 @@ If you answered in the app first, the card says so and nothing is sent. Only roo
 When several cards pile up in a topic, tell the consultant which one you mean:
 
 - **Q-numbers.** Every question of a thread has a stable number, `Q3` (one per question, also for the questions of one agent message), in the card header and in `/questions`. A number is never reused. Write `Q3` (or `вопрос 3`) in a message and the consultant knows what you mean.
-- **Full text, no cut.** A card shows the whole question and the whole text of every option (`A.`, `B.` ...); buttons carry only the letters. A very long card continues in further messages (`↪ Q3 · 2/3`), with the buttons under the last one.
+- **Full text, no cut.** A card shows the whole question and the whole text of every option (`A.`, `B.` ...); buttons carry only the letters. On the rich path a card is one message with each option's button right after its text; only the classic fallback continues a very long card in further messages (`↪ Q3 · 2/3`), with the buttons under the last one.
 - **Reply to the card.** A reply to a question card goes to the consultant, with the card (title and options) as context, even if the question is already answered. A secret question is never discussed: Bridge refuses and sends nothing.
 - **A reply is an answer only after `✍️ Ответить текстом`.** The button arms the card for 10 minutes (the card says `следующий ответ на это сообщение уйдёт в Codex`, `↩️ Отмена` disarms it). Then the next reply to that card is your answer (at most 1000 characters). The bot echoes it as `Подтвердите отправку:` with `✅ Отправить в Codex` and `↩️ Отмена`; the confirmation is deleted after a send or a cancel, and after a failed send it stays with working buttons. Any other reply is a discussion.
 - **Focus.** Bridge remembers the question you pointed at last (reply, Q-number, button), or else the newest pending one, and puts one `[Context: ...]` line in front of every message to the consultant, so follow-ups need no repeated explanation. The consultant reads details with `get_questions` (both kinds, optional `number`) and never answers for you.
@@ -128,7 +128,7 @@ Logs carry ids and counts, never question or message text.
 - Linux with systemd (for the production layout; the bot itself is plain Python), Python 3.12+.
 - A running Codex app-server daemon and the path of its control socket. Codex 0.164 was used for verification.
   The socket is usually root-only, so the Bridge runs as root or as a user that can open it.
-- A Telegram bot and a private supergroup with Topics enabled ([setup below](#-telegram-setup)).
+- A Telegram bot and a private supergroup with Topics enabled ([setup below](#-telegram-setup)). Question cards and the registry use Bot API 10.3 rich messages (buttons inside the text); classic text + keyboard is the automatic fallback.
 - Optional, for consultants and the `/status` summary: PicoClaw and an OpenAI-compatible model endpoint.
 - Optional, for the compaction count on the `/status` card: `ripgrep` is optional but recommended; grep is the fallback.
 
@@ -378,6 +378,7 @@ text Telegram cannot parse is resent as plain text. Example:
 | `[telegram] allowed_user_ids` | none (required) | 1..50 positive ids |
 | `[telegram] control_topic_name` | `📋 Треды Codex` | 1..128 characters |
 | `[telegram] registry_refresh_seconds` | 5 | 5..3600 |
+| `[telegram] rich_messages` | true | Bot API 10.3 rich messages with in-text buttons for question cards and the registry (25 registry rows per page instead of 5); `false` = classic text + inline keyboard only. An unsupported method switches to classic for the rest of the process, a refused message falls back for that message only |
 | `[pico] url` | `ws://127.0.0.1:18790/pico/ws` | Loopback `ws://` only. Presence of `[pico]` enables consultants |
 | `[pico] session_prefix` | `cqb-` | `[a-z0-9-]{2,16}`, do not change after consultants exist |
 | `[pico] idle_seconds` | 120 | 10..3600, idle WebSocket closes after this |
@@ -451,6 +452,7 @@ token auth, session isolation, restart persistence, the fail-closed hook, slash 
 - Simultaneous answers from two clients, Desktop or mobile as co-subscribers, and a Bridge reconnect in the middle of a question.
 - Questions appear in `plan` collaboration mode. In default mode the tool is behind `default_mode_request_user_input`, which was off in Codex 0.164.
 - The Status Agent (routed slots) has been run end to end only with a mock model, not with a real one.
+- Rich messages: a live probe on the production bot passed (`sendRichMessage` with in-text buttons and a button row, edits rich to rich, rich to classic and classic to rich); a button press (the callback) coming from a rich message is still to be seen live.
 - Live Telegram flow: it is covered by tests against a fake Telegram server. The design doc still lists the real-group flow, the `Открыть` deep-link format, and concurrent sessions at scale as to verify.
 - Whether `/reload` restarts PicoClaw's hook and MCP children, and allowlist hot-reload. Summarization settings (`context_window`, `summarize_*`) come from PicoClaw's source, not from a runtime test.
 

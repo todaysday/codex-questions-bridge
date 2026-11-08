@@ -12,12 +12,12 @@ from cqb.domain.labels import question_label
 from cqb.domain.models import Question
 from cqb.services.questions import QuestionError
 from cqb.services.registry import RegistryQuery
-from cqb.telegram.api import BotApi
 from cqb.telegram.armed import ArmedAnswers
-from cqb.telegram.card_post import CardPoster, card_parts
-from cqb.telegram.card_view import ANSWER_LIMIT, CONFIRM_PROMPT, confirm_keyboard, confirm_message, render_card
+from cqb.telegram.card_post import CardPoster
+from cqb.telegram.card_view import ANSWER_LIMIT, CONFIRM_PROMPT, card_doc, confirm_doc
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import Reply
+from cqb.telegram.present import Presenter
 from cqb.telegram.registry_view import thread_name
 
 log = logging.getLogger(__name__)
@@ -40,7 +40,7 @@ class QuestionPort(Protocol):
 class QuestionCards:
     def __init__(
         self,
-        api: BotApi,
+        present: Presenter,
         keys: ActionKeys,
         questions: QuestionPort,
         registry: RegistryQuery,
@@ -48,7 +48,7 @@ class QuestionCards:
         on_change: Callable[[], None],
         clock: Callable[[], float] = time.time,
     ) -> None:
-        self._poster = CardPoster(api, chat_id)
+        self._poster = CardPoster(present, chat_id)
         self._keys = keys
         self._questions = questions
         self._registry = registry
@@ -112,7 +112,7 @@ class QuestionCards:
                 return
             row = self._registry.describe(q.root_thread_id)
             name = thread_name(row) if row else q.root_thread_id[:8]
-            view = render_card(q, name, self._armed.is_armed(question_id))
+            doc = card_doc(q, name, self._armed.is_armed(question_id))
             ids = [q.card_message_id, *q.card_extra_ids] if q.card_message_id is not None else []
             topic = None  # where a new card may be posted: only for an open question of an open consultant
             if q.lifecycle in OPEN_LIFECYCLES and row is not None and row.consultant_state is ConsultantState.OPEN:
@@ -120,7 +120,7 @@ class QuestionCards:
             if not ids and topic is None:
                 return  # no open consultant (the registry row shows ❓) or nothing actionable left to post
             await self._poster.sync(
-                ids, card_parts(view.text, question_label(q.display_no)), self._keys.bind(view.keyboard), topic,
+                ids, self._keys.bind_doc(doc), question_label(q.display_no), topic,
                 lambda new_ids: self._questions.bind_card_messages(question_id, new_ids),
             )
 
@@ -151,8 +151,8 @@ class QuestionCards:
         staged = await self._stage_answer(q, text)
         if staged.alert:
             return staged
-        keyboard = confirm_keyboard("send", "cancel", q.root_thread_id, q.question_id)
-        return Reply(confirm_message(text), keyboard=self._keys.bind(keyboard))  # the same buttons as under the card
+        doc = confirm_doc(text, "send", "cancel", q.root_thread_id, q.question_id)  # the same buttons as under the card
+        return Reply(doc=self._keys.bind_doc(doc))
 
     async def confirm(self, question_id: str) -> Reply:
         try:

@@ -1,6 +1,6 @@
 # Codex Questions Bridge — Technical Design
 
-**Version:** 0.14  
+**Version:** 0.15  
 **Date:** 2026-11-07  
 **Status:** Design / implementation-ready with explicitly identified integration spikes  
 **Runtime:** Codex Desktop / Codex App Server + PicoClaw + Telegram Forum Topics + one lightweight Bridge service
@@ -63,6 +63,8 @@ flowchart TD
 
 ### 2.1 Forum topic `📋 Треды Codex`
 
+**Rich messages (v0.15).** The registry and the question cards use Telegram Bot API 10.3 rich messages: Bot API 10.1 introduced `sendRichMessage` and `rich_message` in `editMessageText` (limits 32768 characters and 500 blocks), and 10.3 (Aug 24, 2026) added in-text buttons (`<tg-button type="callback_data|url|copy_text|disabled" style="primary|success|danger|link">`, rows with `<tg-button-row>`, up to 8 buttons per row, `callback_data` 1-64 bytes). Verified live on the real Bot API with the production bot: `sendRichMessage` with in-text callback and url buttons and a button row is accepted, editing rich to rich, rich to classic and classic to rich all work, and the returned message has `rich_message` and no `text`. Not yet seen live: a button press (the callback) coming from a rich message. `[telegram] rich_messages` (default true) switches the feature; `telegram/render.py` turns a neutral Doc/Para/Row model into rich HTML or into classic text plus an inline keyboard, and `telegram/present.py` (the Presenter) owns the flag, the fallback and the local limit checks. Fallbacks: an unsupported method (404, or a 400 that says method / not supported) gives one warning and classic for the rest of the process; a refused or over-limit rich message (over-limit is refused locally) gives classic for that message only; existing classic cards stay classic; `Presenter.keep_classic` remembers refused messages (at most 512 ids per process).
+
 The topic contains **exactly one message**: a pinned registry message (plus pages if necessary) that the Bridge edits in place. Nothing else is ever posted there by the bot (no status cards, no alerts, no question cards). Example:
 
 ```text
@@ -91,6 +93,7 @@ The topic contains **exactly one message**: a pinned registry message (plus page
 - Buttons `Создать` and `Открыть` are shown based on durable database state. `Открыть` is a Telegram deep link to the existing topic, constructed from configured group identity and the actual API-created topic ID; verify this URL format in acceptance tests.
 - The message refreshes itself, event-driven: a dirty flag is set when a question appears or resolves, a root starts or stops working (a status broadcast marks it only when working/not working flips), a poll changes the thread list or its order, a consultant is created, closed or reopened, or an archive state changes. Marks are coalesced: at most one edit per `registry_refresh_seconds` (default 5), and no edit when the rendered content (without the time header) is unchanged; a periodic safety re-render also keeps callback ids fresh. If the message is gone, recreate and re-pin.
 - Pagination buttons (`◀️ ▶️`, active/archived toggle) edit the same message at once; the current page is remembered in `bot_state`.
+- **Registry on the rich path (v0.15).** One paragraph per thread with its button in the line (`💬 Открыть` url button or `➕ Создать` callback button), 25 rows per page (5 on the classic path), and a navigation row `◀️ ▶️` plus the active/archived toggle. If the existing registry message is still classic and its rich edit is refused, the bot sends a fresh rich registry message, pins it, updates its state and deletes the old one.
 - Manual `/threads` (control topic) polls the inventory and forces a re-render of the single message; the bot deletes the command message when it has the right to. It must not call any model.
 
 ### 2.2 Manual consultant creation
@@ -149,7 +152,9 @@ B. Separate table
 
 **Q numbers (v0.9).** Every question of a thread, of both kinds, gets `Q<n>` from an increasing per-root counter stored with the row (`display_no`, table `question_counters`, migration 5; existing rows are numbered by creation time). A number is unique within the root and never reused, also after the question resolves and after a restart. An agent message with several questions gives one number, one card and one answer per question. The number is in the card header (`❓ Q3 · <thread name> · HH:MM`, plus a short tag `✅ отвечено`, `отвечено в другом месте` or `устарел` only when the question is no longer pending) and in `/questions`.
 
-**Cards never cut text (v0.9).** The card body holds the full title and the full text of every option, labelled `A.`, `B.`, `C.` ...; the buttons carry only the short label (`A`, `B`, ...) and `✍️ Ответить текстом`, so Telegram's button limits cut nothing. A body that does not fit in one Telegram message continues in further messages (`↪ Q3 · 2/3`), split on line or word boundaries and never with `…`; the keyboard, and so the one-time action keys, sits on the last message only, a reply to any message of the card is a reply to the card, and every state change edits all of its messages. The same holds for `request_user_input` cards; a question whose text exceeds Bridge's storage bounds (title 20000, option 8000 characters, 26 options) is shown cut but is not answerable from Telegram.
+**Rich cards (v0.15).** On the rich path a question card (both kinds) is one message: the header, the full question title, one paragraph per option, `A. full text`, with its button right after the option, and a `✍️ Ответить текстом` row. After a choice the same message is edited to show the choice plus a `✅ Отправить в Codex` / `↩️ Отмена` row; the typed-answer confirmation carries the same two buttons. There are no continuation messages on the rich path (they remain only in the classic fallback, below). The status card and the consultant opening message are unchanged.
+
+**Cards never cut text (v0.9).** The card body holds the full title and the full text of every option, labelled `A.`, `B.`, `C.` ...; the buttons carry only the short label (`A`, `B`, ...) and `✍️ Ответить текстом`, so Telegram's button limits cut nothing. On the classic fallback a body that does not fit in one Telegram message continues in further messages (`↪ Q3 · 2/3`), split on line or word boundaries and never with `…`; the keyboard, and so the one-time action keys, sits on the last message only, a reply to any message of the card is a reply to the card, and every state change edits all of its messages. The same holds for `request_user_input` cards; a question whose text exceeds Bridge's storage bounds (title 20000, option 8000 characters, 26 options) is shown cut but is not answerable from Telegram.
 
 - When the root has **no open consultant**, no card is posted anywhere and no extra message is sent; the registry row just shows `❓`. When a consultant is created later (or reopened), cards for the root's currently pending questions (captured / pending_confirmed) are posted in its topic. Archived or closed consultants get no new cards; an already posted card can still be edited.
 - **A reply to a card is a discussion, not an answer (v0.9).** Text from an allowed user that replies to a card is forwarded to the consultant (same relay, queue, serialization and slash escaping) behind one bounded context line built by Bridge, for example `[Context: the user replies about question Q3 (<title, 200 chars>; options: <up to 6, 60 chars each>)] <text>`; for a question that already resolved the line adds `(already answered)`. A secret `request_user_input` card is never discussed: nothing is forwarded, the owner gets a short refusal, and no question text is ever put into a line.
@@ -626,7 +631,7 @@ Never display `Answered in Codex` until `serverRequest/resolved` is observed.
 
 ### 6.4 Agent-message questions: card and answer (v0.8)
 
-These questions (§3.4) are answered with a normal user message, not a JSON-RPC response. The card reuses the question-card machinery: it is posted in the consultant topic of the root (also when the consultant is created or reopened); without a consultant only the `❓` marker shows, and the registry counts these questions together with `request_user_input` ones. **One card per question (v0.9):** a message with several questions gives one row, one `Q` number and one card per question (key: message item id and index). A card shows the full title, every option in full (`A.`, `B.` ...) and short letter buttons; the text answer is `✍️ Ответить текстом` (§2.3). Each question is staged, confirmed (`✅ Отправить в Codex` / `↩️ Отмена`) and sent on its own, as its **own** user message with one entry, exactly as the Codex app does. Answered is detected per question: a user message whose `questionItemId` is `["request_user_input_async", <agentMessage item id>, <index>]` answers exactly that question and the scan reads on; a user message that names no question answers every question before it.
+These questions (§3.4) are answered with a normal user message, not a JSON-RPC response. The card reuses the question-card machinery: it is posted in the consultant topic of the root (also when the consultant is created or reopened); without a consultant only the `❓` marker shows, and the registry counts these questions together with `request_user_input` ones. **One card per question (v0.9):** a message with several questions gives one row, one `Q` number and one card per question (key: message item id and index). A card shows the full title, every option in full (`A.`, `B.` ...) and short letter buttons; the text answer is `✍️ Ответить текстом` (§2.3). Each question is staged, confirmed (`✅ Отправить в Codex` / `↩️ Отмена`, in the card message itself on the rich path, §2.3) and sent on its own, as its **own** user message with one entry, exactly as the Codex app does. Answered is detected per question: a user message whose `questionItemId` is `["request_user_input_async", <agentMessage item id>, <index>]` answers exactly that question and the scan reads on; a user message that names no question answers every question before it.
 
 Message format, copied from what the Codex app itself stores after an answer (compact UTF-8 JSON, one entry for the answered question):
 
@@ -813,6 +818,8 @@ codex-questions-bridge/
 │   ├── repository.py            # SQLite DAOs
 │   ├── registry.py              # thread / consultant state transitions
 │   ├── telegram_control.py      # Bridge bot: topics, callbacks, question cards
+│   │                            #   (v0.15: telegram/render.py neutral Doc/Para/Row -> rich HTML or classic text + keyboard;
+│   │                            #    telegram/present.py Presenter: flag, fallback, local limit checks)
 │   ├── pico_gateway.py          # consultant relay, pico WS sessions, supervision
 │   ├── questions.py             # capture, dedup, lifecycle
 │   ├── status.py                # scope, cursors, reports
@@ -840,6 +847,7 @@ Example **Bridge-only** config (this is project-defined TOML, **not** PicoClaw's
 chat_id = -1001234567890
 control_topic_name = "📋 Треды Codex"
 registry_refresh_seconds = 5   # 5..3600: at most one edit of the pinned registry message per interval
+rich_messages = true           # v0.15: Bot API 10.3 rich messages with in-text buttons; false = classic text + keyboard only
 allowed_user_ids = [123456789]
 
 [codex]
@@ -960,6 +968,7 @@ Graceful shutdown: stop Telegram polling/accepting new create operations, checkp
 
 ## 10. Threat model and access control
 
+- The Bot API client targets Bot API 10.1 (rich messages) and 10.3 (in-text buttons); nothing else changes in the trust model, and the classic text + inline keyboard path remains an automatic fallback (§2.1).
 - Telegram supergroup must be **private** and restricted to explicitly allowed user IDs; group ID is also checked. Ignore forwarded/anonymous-admin messages unless identities are reliably resolved.
 - The Bridge bot gets only necessary Telegram permissions (manage topics, post/edit/pin); avoid unnecessary admin rights. PicoClaw has no bot token.
 - Single bot: Bridge receives all group updates it is allowed to see, so **Bridge filters unregistered topics (service topics, unbound topics, unauthorized users) before any model call** and relays only registered consultant-topic messages to PicoClaw. To see free text in consultant topics the bot needs admin rights or Telegram privacy mode off (Telegram bot FAQ; exact setup to verify in the S0-B Telegram flow); Bridge, not Telegram, does the filtering. Do not silently pay tokens for unrelated service-topic messages.
@@ -1127,3 +1136,4 @@ Initial runtime defaults: single SQLite database, one Bridge process, 30-second 
 - **v0.12 (2026-11-07):** Consultant web access: web_fetch (PicoClaw, URL checks in the scope hook, server-side egress guard) and web_search (Bridge MCP tool over the model gateway's search endpoint, off by default).
 - **v0.13 (2026-11-07):** Status card: context, cache hit (session-wide) and compaction count for the root and each shown subagent, read from the session files; compaction counted with ripgrep (grep fallback).
 - **v0.14 (2026-11-08):** Optional "open in Codex" link as the last line of the status card, configured by a URL template ([status] open_link).
+- **v0.15 (2026-11-08):** Question cards and the registry use Telegram Bot API 10.3 rich messages with buttons inside the text; classic text + keyboard remains as an automatic fallback.

@@ -4,16 +4,31 @@ option labelled A., B., C. ..., and short letter buttons; stage, confirm, send. 
 from cqb.domain.enums import AgentQuestionState as S
 from cqb.domain.models import AgentQuestion
 from cqb.telegram.card_view import (
-    ARMED_HINT, CANCEL_BUTTON, DISCUSS_HINT, TAG_ANSWERED, TAG_ELSEWHERE, TAG_STALE, TEXT_BUTTON, card_header,
-    confirm_keyboard, letter, option_rows,
+    ARMED_HINT, DISCUSS_HINT, TAG_ANSWERED, TAG_ELSEWHERE, TAG_STALE, card_header, confirm_row, join_lines, letter,
+    option_paras, status_paras, text_row,
 )
-from cqb.telegram.models import ActionSpec, Button, View
+from cqb.telegram.models import ActionSpec, Button, Doc, Para, Row, View
+from cqb.telegram.render import to_view
 
 
 def render_agent_card(q: AgentQuestion, thread_name: str, armed: bool = False) -> View:
+    """The classic rendering of the card."""
+    return to_view(agent_card_doc(q, thread_name, armed))
+
+
+def agent_card_doc(q: AgentQuestion, thread_name: str, armed: bool = False) -> Doc:
     header = card_header(q.display_no, thread_name, q.created_at, _tag(q))
-    parts = [_text(q), _status(q, armed)]
-    return View(header, "\n\n".join(p for p in parts if p), tuple(_rows(q, armed)))
+    root, qid = q.root_thread_id, q.agent_question_id
+    can_choose = q.is_open and q.answerable and q.sent_at is None and q.staged is None
+    buttons = [Button(letter(i), ActionSpec("aopt", root, f"{qid}:{i}"), style="primary")
+               for i in range(len(q.options))] if can_choose else None
+    blocks: list[Para | Row] = [header, Para((q.title,)), *option_paras(list(q.options), buttons),
+                                *status_paras(_status(q, armed))]
+    if can_choose:
+        blocks.append(text_row(armed, "aother", root, qid))
+    elif q.is_open and q.answerable and q.sent_at is None:  # staged: send or cancel
+        blocks.append(confirm_row("asend", "acancel", root, qid))
+    return Doc(tuple(blocks))
 
 
 def _tag(q: AgentQuestion) -> str | None:
@@ -22,19 +37,15 @@ def _tag(q: AgentQuestion) -> str | None:
     return TAG_STALE if q.state is S.STALE else None
 
 
-def _text(q: AgentQuestion) -> str:
-    return "\n".join([q.title, *(f"{letter(i)}. {o}" for i, o in enumerate(q.options))])
-
-
 def _status(q: AgentQuestion, armed: bool) -> str:
     if q.state is S.ANSWERED:
-        return ("✅ Доставлено: ответ появился в треде.\n" + _chosen(q)) if q.sent_at is not None else ""
+        return join_lines("✅ Доставлено: ответ появился в треде.", _chosen(q)) if q.sent_at is not None else ""
     if q.state is S.STALE:
         return "⌛ Вопрос устарел: тред архивирован или недоступен."
     if not q.answerable:
         return "Вопрос слишком длинный для Telegram: ответьте в Codex."
     if q.sent_at is not None:
-        return "📤 Ответ отправлен в Codex, ждём подтверждения (сообщение пользователя в треде).\n" + _chosen(q)
+        return join_lines("📤 Ответ отправлен в Codex, ждём подтверждения (сообщение пользователя в треде).", _chosen(q))
     if q.staged is not None:
         return f"{_chosen(q)}\nОтправить этот ответ в Codex?"
     return ARMED_HINT if armed else DISCUSS_HINT
@@ -42,16 +53,3 @@ def _status(q: AgentQuestion, armed: bool) -> str:
 
 def _chosen(q: AgentQuestion) -> str:
     return f"Выбрано: {q.staged}" if q.staged is not None else ""
-
-
-def _rows(q: AgentQuestion, armed: bool) -> list[tuple[Button, ...]]:
-    if not q.is_open or not q.answerable or q.sent_at is not None:
-        return []
-    root, qid = q.root_thread_id, q.agent_question_id
-    if q.staged is not None:
-        return list(confirm_keyboard("asend", "acancel", root, qid))
-    return option_rows(
-        [Button(letter(i), ActionSpec("aopt", root, f"{qid}:{i}")) for i in range(len(q.options))],
-        text_button=Button(CANCEL_BUTTON, ActionSpec("unarm", root, qid)) if armed
-        else Button(TEXT_BUTTON, ActionSpec("aother", root, qid)),
-    )

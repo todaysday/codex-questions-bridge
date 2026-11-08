@@ -70,6 +70,18 @@ class BadRequest(TelegramError):
         ))
 
 
+class RichRejected(BadRequest):
+    """Telegram refused a rich message: `unsupported` = the method does not exist (or is not allowed) for this bot or
+    chat, so rich mode is off for good; otherwise only this message's markup was refused."""
+
+    def __init__(self, method: str, code: int, description: str) -> None:
+        super().__init__(method, code, description)
+        d = description.lower()
+        self.unsupported = code == 404 or (
+            "tag" not in d and any(s in d for s in ("method", "not available", "not supported", "unsupported"))
+        )
+
+
 class BotApi:
     def __init__(
         self,
@@ -155,6 +167,34 @@ class BotApi:
         }
         await self._call("editMessageText", params)
 
+    async def send_rich_message(
+        self, chat_id: int, html: str, *, thread_id: int | None = None,
+        keyboard: tuple[tuple[Button, ...], ...] | None = None,
+    ) -> SentMessage:
+        """Bot API 10.1+: `html` is the rich HTML (in-text `<tg-button>`s since 10.3). A message Telegram refuses raises
+        RichRejected; never retried after a lost response, like every send."""
+        params: dict[str, Any] = {"chat_id": chat_id, "rich_message": {"html": html}}
+        if thread_id is not None:
+            params["message_thread_id"] = thread_id
+        if keyboard:
+            params["reply_markup"] = _markup(keyboard)
+        try:
+            r = await self._call("sendRichMessage", params, idempotent=False)
+        except BadRequest as exc:
+            raise _rich_error(exc) from None
+        return SentMessage(r["message_id"])
+
+    async def edit_rich_message(
+        self, chat_id: int, message_id: int, html: str, keyboard: tuple[tuple[Button, ...], ...] | None = None,
+    ) -> None:
+        params: dict[str, Any] = {"chat_id": chat_id, "message_id": message_id, "rich_message": {"html": html}}
+        if keyboard:
+            params["reply_markup"] = _markup(keyboard)
+        try:
+            await self._call("editMessageText", params)
+        except BadRequest as exc:
+            raise _rich_error(exc) from None
+
     async def pin_chat_message(self, chat_id: int, message_id: int) -> None:
         await self._call(
             "pinChatMessage",
@@ -238,6 +278,13 @@ class BotApi:
         if status in (401, 403):
             raise Unauthorized(method, status, description)
         raise BadRequest(method, status, description)
+
+
+def _rich_error(exc: BadRequest) -> BadRequest:
+    """"Not modified" and a gone message mean the same as on the classic path; any other refusal is RichRejected."""
+    if exc.not_modified or exc.gone:
+        return exc
+    return RichRejected(exc.method, exc.code, exc.description)
 
 
 def strip_html(text: str) -> str:

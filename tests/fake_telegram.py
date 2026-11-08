@@ -1,8 +1,10 @@
 """Fake Telegram Bot API server: aiohttp on 127.0.0.1, implementing only the methods cqb calls."""
 
 import asyncio
+import html
 import itertools
 import re
+from html.parser import HTMLParser
 from typing import Any
 
 from aiohttp import web
@@ -24,6 +26,7 @@ class FakeTelegram:
         self.deleted_user_messages: list[int] = []  # ids of pushed (user) messages the bot deleted
         self.errors: dict[str, list[tuple[int, dict[str, Any]]]] = {}  # method -> queued failures
         self.drop_next: dict[str, int] = {}  # method -> connections to drop before answering
+        self.rich_supported = True  # False: sendRichMessage answers 404 and editMessageText refuses `rich_message`
         self._updates: list[dict[str, Any]] = []
         self._update_ids = itertools.count(1)
         self._msg_ids = itertools.count(1000)
@@ -98,15 +101,29 @@ class FakeTelegram:
 
     def push_callback(self, data: str, message_id: int, user_id: int = OWNER, chat_id: int | None = None) -> str:
         qid = f"cbq{next(self._update_ids)}"
+        message: dict[str, Any] = {
+            "message_id": message_id, "chat": {"id": chat_id if chat_id is not None else self.chat_id},
+        }
+        if "rich" in self.messages.get(message_id, {}):
+            message["rich_message"] = {"blocks": []}  # a rich message carries `rich_message` and has no `text`
         self._push({"callback_query": {
-            "id": qid, "from": {"id": user_id, "is_bot": False}, "data": data,
-            "message": {"message_id": message_id, "chat": {"id": chat_id if chat_id is not None else self.chat_id}},
+            "id": qid, "from": {"id": user_id, "is_bot": False}, "data": data, "message": message,
         }})
         return qid
 
     def buttons(self, message_id: int) -> list[dict[str, Any]]:
-        markup = self.messages[message_id].get("markup") or {}
-        return [b for row in markup.get("inline_keyboard", []) for b in row]
+        """Inline-keyboard buttons, then the in-text buttons of a rich message: {text, callback_data | url, ...}."""
+        m = self.messages[message_id]
+        markup = m.get("markup") or {}
+        return [b for row in markup.get("inline_keyboard", []) for b in row] + list(m.get("rich_buttons", []))
+
+    def rows(self, message_id: int) -> list[list[str]]:
+        """The labels of the `<tg-button-row>`s of a rich message, row by row."""
+        return [[b["text"] for b in row] for row in self.messages[message_id].get("rich_rows", [])]
+
+    def press(self, message_id: int, text_part: str, user_id: int = OWNER) -> str:
+        """The owner presses the (in-text or keyboard) button whose label contains `text_part`."""
+        return self.push_callback(self.button(message_id, text_part)["callback_data"], message_id, user_id)
 
     def button(self, message_id: int, text_part: str) -> dict[str, Any]:
         found = [b for b in self.buttons(message_id) if text_part in b["text"]]
@@ -179,13 +196,42 @@ class FakeTelegram:
         }
         return {"message_id": mid}
 
+    async def m_sendRichMessage(self, p: dict[str, Any]) -> dict[str, Any]:
+        if not self.rich_supported:
+            raise _Fail(404, "Not Found")
+        thread = p.get("message_thread_id")
+        if thread is not None and thread not in self.topics:
+            raise _Fail(400, "Bad Request: message thread not found")
+        rich = parse_rich(p.get("rich_message"))
+        mid = next(self._msg_ids)
+        self.messages[mid] = {
+            "text": rich.plain, "rich": rich.html, "rich_buttons": rich.buttons, "rich_rows": rich.rows,
+            "thread_id": thread, "markup": p.get("reply_markup"), "chat_id": p["chat_id"], "parse_mode": None,
+        }
+        return {"message_id": mid}
+
     async def m_editMessageText(self, p: dict[str, Any]) -> bool:
+        if "rich_message" in p and not self.rich_supported:
+            raise _Fail(400, "Bad Request: rich_message is not supported")
         m = self.messages.get(p["message_id"])
         if m is None or m.get("deleted"):
             raise _Fail(400, "Bad Request: message to edit not found")
-        if m["text"] == p["text"] and m["markup"] == p.get("reply_markup"):
-            raise _Fail(400, "Bad Request: message is not modified")
-        m["text"], m["markup"] = p["text"], p.get("reply_markup")
+        if "rich_message" in p:
+            if "text" in p:
+                raise _Fail(400, "Bad Request: text and rich_message are mutually exclusive")
+            rich = parse_rich(p["rich_message"])
+            if m.get("rich") == rich.html and m["markup"] == p.get("reply_markup"):
+                raise _Fail(400, "Bad Request: message is not modified")
+            m.update(text=rich.plain, rich=rich.html, rich_buttons=rich.buttons, rich_rows=rich.rows)
+            m["markup"] = p.get("reply_markup")
+        else:
+            if not p.get("text"):
+                raise _Fail(400, "Bad Request: text must be non-empty")
+            if m["text"] == p["text"] and m["markup"] == p.get("reply_markup") and "rich" not in m:
+                raise _Fail(400, "Bad Request: message is not modified")
+            for key in ("rich", "rich_buttons", "rich_rows"):
+                m.pop(key, None)
+            m["text"], m["markup"] = p["text"], p.get("reply_markup")
         m["edits"] = m.get("edits", 0) + 1
         return True
 
@@ -252,6 +298,177 @@ def check_html(text: str) -> None:
         raise _Fail(400, "Bad Request: can't parse entities: Unsupported start tag")
     if _HTML_ENTITY.sub("", bare).count("&"):
         raise _Fail(400, "Bad Request: can't parse entities: Unsupported entity")
+
+
+RICH_TEXT_LIMIT = 32768
+RICH_BLOCK_LIMIT = 500
+RICH_ROW_LIMIT = 8
+_RICH_NAMED = {"lt", "gt", "amp", "quot", "apos", "nbsp", "hellip", "mdash", "ndash", "lsquo", "rsquo", "ldquo", "rdquo"}
+_RICH_TAGS = {
+    "a", "b", "strong", "i", "em", "u", "ins", "s", "strike", "del", "code", "mark", "sub", "sup", "tg-spoiler",
+    "tg-reference", "tg-emoji", "img", "tg-time", "tg-math", "h1", "h2", "h3", "h4", "h5", "h6", "p", "pre", "footer",
+    "hr", "ul", "ol", "li", "input", "blockquote", "cite", "aside", "video", "audio", "tg-document", "figure",
+    "figcaption", "tg-map", "tg-collage", "tg-slideshow", "table", "tr", "th", "td", "caption", "details", "summary",
+    "tg-math-block", "tg-button", "tg-button-row", "br",
+}
+_RICH_VOID = {"hr", "br", "img", "input", "tg-map"}
+_RICH_BLOCKS = {"p", "h1", "h2", "h3", "h4", "h5", "h6", "pre", "footer", "hr", "li", "blockquote", "aside", "tr",
+                "details", "figure", "tg-button-row"}
+_BUTTON_TYPES = {"callback_data", "url", "web_app", "login_url", "switch_inline_query", "switch_inline_query_current_chat",
+                 "switch_inline_query_chosen_chat", "copy_text", "disabled"}
+_BUTTON_STYLES = {"danger", "success", "primary", "link"}
+
+
+class Rich:
+    """A parsed `rich_message`: the HTML as sent, a plain rendering (buttons as `[label]`) and the buttons."""
+
+    def __init__(self) -> None:
+        self.html = ""
+        self.plain = ""
+        self.buttons: list[dict[str, Any]] = []
+        self.rows: list[list[dict[str, Any]]] = []
+
+
+class _RichParser(HTMLParser):
+    """Validates what Bot API 10.3 documents for `rich_message.html`; anything else is `can't parse rich message`."""
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=False)
+        self.stack: list[str] = []
+        self.rich = Rich()
+        self.chars = 0
+        self.blocks = 0
+        self._label: list[str] = []
+        self._button: dict[str, Any] | None = None
+        self._row: list[dict[str, Any]] | None = None
+        self._plain: list[str] = []
+
+    def _bad(self, why: str) -> None:
+        raise _Fail(400, f"Bad Request: can't parse rich message: {why}")
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag not in _RICH_TAGS:
+            self._bad(f'unsupported start tag "{tag}"')
+        a = {k: (v if v is not None else "") for k, v in attrs}
+        if self._button is not None and tag not in ("tg-emoji", "tg-time"):
+            self._bad(f'"{tag}" inside a button: a button label is plain text')
+        if tag in _RICH_BLOCKS:
+            self.blocks += 1
+            self._plain.append("\n")
+        if tag == "br":
+            self._plain.append("\n")
+        if tag == "tg-button-row":
+            if self.stack:
+                self._bad("tg-button-row must be a top-level block")
+            if a.get("align", "left") not in ("left", "center", "right"):
+                self._bad("bad align of tg-button-row")
+            self._row = []
+        elif tag == "tg-button":
+            if not self.stack or self.stack[-1] not in ("p", "tg-button-row", "li"):
+                self._bad("tg-button must be inside a paragraph, a list item or a tg-button-row")
+            self._button = self._check_button(a)
+        elif self._row is not None:
+            self._bad(f'"{tag}" inside tg-button-row: only buttons')
+        if tag not in _RICH_VOID:
+            self.stack.append(tag)
+
+    def _check_button(self, a: dict[str, str]) -> dict[str, Any]:
+        kind = a.get("type")
+        if kind not in _BUTTON_TYPES:
+            self._bad("tg-button needs a valid type")
+        style = a.get("style")
+        if style is not None and (style not in _BUTTON_STYLES or (style == "link" and kind != "callback_data")):
+            self._bad("bad button style")
+        button: dict[str, Any] = {"style": style, "type": kind}
+        if kind == "callback_data":
+            data = a.get("data", "")
+            if not 1 <= len(data.encode()) <= 64:
+                self._bad("callback data must be 1-64 bytes")
+            button["callback_data"] = data
+        elif kind == "url":
+            url = a.get("url", "")
+            if not url.startswith(("http://", "https://", "tg://")):
+                self._bad("button url must be http, https or tg")
+            button["url"] = url
+        elif kind == "copy_text" and not a.get("text"):
+            self._bad("copy_text needs text")
+        return button
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag in _RICH_VOID:
+            return
+        if not self.stack or self.stack.pop() != tag:
+            self._bad(f'unmatched end tag "{tag}"')
+        if tag == "tg-button":
+            assert self._button is not None
+            label = "".join(self._label)
+            self._label = []
+            if not label.strip():
+                self._bad("a button needs a label")
+            button = {**self._button, "text": label}
+            self._button = None
+            self.rich.buttons.append(button)
+            self._plain.append(f"[{label}]")
+            if self._row is not None:
+                self._row.append(button)
+        elif tag == "tg-button-row":
+            assert self._row is not None
+            if not 1 <= len(self._row) <= RICH_ROW_LIMIT:
+                self._bad(f"a tg-button-row holds 1-{RICH_ROW_LIMIT} buttons")
+            self.rich.rows.append(self._row)
+            self._row = None
+
+    def handle_startendtag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        self.handle_starttag(tag, attrs)
+        if tag not in _RICH_VOID:
+            self.handle_endtag(tag)
+
+    def handle_data(self, data: str) -> None:
+        if "<" in data or "&" in data:
+            self._bad("bare < or &")
+        self._text(data)
+
+    def handle_entityref(self, name: str) -> None:
+        if name not in _RICH_NAMED:
+            self._bad(f"unsupported entity &{name};")
+        self._text(html.unescape(f"&{name};"))
+
+    def handle_charref(self, name: str) -> None:
+        if not re.fullmatch(r"\d+|[xX][0-9a-fA-F]+", name):
+            self._bad("bad numeric entity")
+        self._text(html.unescape(f"&#{name};"))
+
+    def _text(self, text: str) -> None:
+        if self._row is not None and self._button is None and text.strip():
+            self._bad("text inside tg-button-row")
+        self.chars += len(text)
+        (self._label if self._button is not None else self._plain).append(text)
+
+
+def parse_rich(rich_message: Any) -> Rich:
+    """Validate an InputRichMessage the way the Bot API documents it (html only: markdown/blocks are not used here)."""
+    if not isinstance(rich_message, dict):
+        raise _Fail(400, "Bad Request: rich_message must be an object")
+    given = [k for k in ("html", "markdown", "blocks") if k in rich_message]
+    if len(given) != 1:
+        raise _Fail(400, "Bad Request: exactly one of html, markdown or blocks must be used in rich_message")
+    if given[0] != "html":
+        raise _Fail(400, f"Bad Request: the fake supports only rich_message.html, not {given[0]}")
+    source = rich_message["html"]
+    if not isinstance(source, str) or not source.strip():
+        raise _Fail(400, "Bad Request: rich message is empty")
+    parser = _RichParser()
+    parser.feed(source)
+    parser.close()
+    if parser.stack:
+        raise _Fail(400, f"Bad Request: can't parse rich message: can't find end tag for \"{parser.stack[-1]}\"")
+    if parser.chars > RICH_TEXT_LIMIT:
+        raise _Fail(400, "Bad Request: rich message is too long")
+    if parser.blocks > RICH_BLOCK_LIMIT:
+        raise _Fail(400, "Bad Request: too many blocks in the rich message")
+    parser.rich.html = source
+    parser.rich.plain = re.sub(r"\n\s*\n+", "\n", "".join(parser._plain)).strip()
+    return parser.rich
 
 
 class _Fail(Exception):

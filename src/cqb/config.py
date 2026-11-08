@@ -30,6 +30,7 @@ class TelegramConfig:
     control_topic_name: str
     allowed_user_ids: tuple[int, ...]
     registry_refresh_seconds: int
+    rich_messages: bool = True  # Bot API 10.3 rich messages with in-text buttons; off = classic text + inline keyboard
 
 
 DEFAULT_PICO_URL = "ws://127.0.0.1:18790/pico/ws"
@@ -128,7 +129,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
     db = _section(raw, "db", {"path"})
     tg = _section(raw, "telegram", {
         "chat_id", "control_topic_name", "allowed_user_ids",
-        "registry_refresh_seconds",
+        "registry_refresh_seconds", "rich_messages",
     })
     return Config(
         pico=_pico(raw["pico"]) if "pico" in raw else None,
@@ -148,6 +149,7 @@ def parse_config(raw: dict[str, Any]) -> Config:
             control_topic_name=_topic_name(tg, "control_topic_name", "📋 Треды Codex"),
             allowed_user_ids=_user_ids(tg.get("allowed_user_ids")),
             registry_refresh_seconds=_int(tg, "telegram", "registry_refresh_seconds", 5, 5, 3600),
+            rich_messages=_flag(tg, "telegram", "rich_messages", True),
         ),
     )
 
@@ -282,6 +284,13 @@ def _int(sec: dict[str, Any], name: str, key: str, default: int, lo: int, hi: in
     v = sec.get(key, default)
     if isinstance(v, bool) or not isinstance(v, int) or not lo <= v <= hi:
         raise ConfigError(f"[{name}] {key} must be an integer in {lo}..{hi}")
+    return v
+
+
+def _flag(sec: dict[str, Any], name: str, key: str, default: bool) -> bool:
+    v = sec.get(key, default)
+    if not isinstance(v, bool):
+        raise ConfigError(f"[{name}] {key} must be true or false")
     return v
 
 

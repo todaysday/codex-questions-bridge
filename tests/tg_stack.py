@@ -28,6 +28,7 @@ from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
+from cqb.telegram.present import Presenter
 from cqb.telegram.router import Router, RouterConfig
 from cqb.telegram.status_post import StatusPoster
 from cqb.telegram.topics import TelegramTopics
@@ -164,12 +165,13 @@ def thread(tid, updated=NOW - 60, name=None, state=ArchiveState.ACTIVE, parent=N
 
 
 class Stack:
-    def __init__(self, conn, fake: FakeTelegram, token=TOKEN, narrator=None, summary_timeout=300, open_link=""):
+    def __init__(self, conn, fake: FakeTelegram, token=TOKEN, narrator=None, summary_timeout=300, open_link="", rich=False):
         self.conn, self.fake = conn, fake
         self.clock = Clock()
         self.state = BotStateDao(conn)
         self.threads = ThreadDao(conn)
         self.api = BotApi(token, base_url=fake.base_url, sleep=self._nosleep, rng=lambda: 0)
+        self.present = Presenter(self.api, rich)  # classic by default: the older tests read text and keyboards
         self.client = StubClient()
         self.relay = Relay()
         self.status_source = StatusSourceStub()
@@ -189,17 +191,17 @@ class Stack:
         self.keys = ActionKeys(ActionDao(conn), "s1", self.clock)
         self.registry = RegistryQuery(self.threads, self.consultant_dao, self.question_dao, "s1", 30, self.clock, live=self.live,
                                        agent_questions=self.agent_dao)
-        self.topics = ControlTopics(self.api, self.state, CHAT_ID, "📋 Треды Codex")
+        self.topics = ControlTopics(self.present, self.state, CHAT_ID, "📋 Треды Codex")
         self.tg_topics = TelegramTopics(self.api, CHAT_ID)
         self.publisher = RegistryPublisher(
-            self.api, self.topics, self.state, self.keys, self.registry, CHAT_ID,
+            self.present, self.topics, self.state, self.keys, self.registry, CHAT_ID,
             interval=0.05, clock=self.clock,
         )
         self.cards = QuestionCards(
-            self.api, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh, self.clock
+            self.present, self.keys, self.questions, self.registry, CHAT_ID, self.publisher.request_refresh, self.clock
         )
         self.agent_cards = AgentQuestionCards(
-            self.api, self.keys, self.agent, self.registry, CHAT_ID, self.publisher.request_refresh, self.clock
+            self.present, self.keys, self.agent, self.registry, CHAT_ID, self.publisher.request_refresh, self.clock
         )
         self.consultants = ConsultantService(
             self.consultant_dao, self.threads, self.tg_topics, "s1", CHAT_ID, self.clock, persist_delay=0,
@@ -208,7 +210,7 @@ class Stack:
         )
         self.focus = QuestionFocus(self.consultant_dao, self.questions, self.agent, "s1")
         self.router = Router(
-            RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.api, self.keys, self.topics,
+            RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.present, self.keys, self.topics,
             self.publisher, self.cards, self.agent_cards, self.consultants, self.registry,
             self.questions, self.agent, self.relay, self.focus, self.status_cards, "s1", self.inventory.poke, self.clock,
         )
