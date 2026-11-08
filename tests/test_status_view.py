@@ -63,7 +63,7 @@ def test_full_card_layout():
         "🟢 Fox Profile\n"
         "🧠 sol 6·low · 🕒 25м · 🔄 2м 💭 выполняет: pytest -q\n"
         " <b>ctx</b> 160k/475k (34%) · 💾 80%\n"
-        "🎯\n<blockquote expandable>Ship the profile page</blockquote>\n"
+        "<blockquote expandable>🎯 Ship the profile page</blockquote>\n"
         "\n"
         "🤖 <b>Субагенты 9</b> · 🟢 1 · 🟡 1 · ⚪ 2\n"
         "<blockquote expandable>\n"
@@ -292,7 +292,7 @@ def test_time_and_duration_words_are_abbreviated():
 
 def test_goal_is_complete_and_marks_a_goal_that_is_not_active():
     text = render_status(report(goal=GoalSummary("ц" * 90, "paused", 900, 50_000)))
-    assert f"🎯 · пауза\n<blockquote expandable>{'ц' * 90}</blockquote>" in text and "900/50k" not in text
+    assert f"<blockquote expandable>🎯 · пауза {'ц' * 90}</blockquote>" in text and "900/50k" not in text
 
 
 def test_status_omits_limits_even_when_available():
@@ -505,4 +505,4 @@ def test_long_goal_uses_remaining_space_without_removing_other_content():
     objective = "т" * 6000
     text = render_status(report(goal=GoalSummary(objective, "active", 10, None), summary=StatusSummary("текущая работа", "дальше")))
     assert len(text) <= TEXT_LIMIT and "текущая работа" in text and "дальше" in text
-    assert "<blockquote expandable>" + "т" * 500 in text and "…</blockquote>" in text
+    assert "<blockquote expandable>🎯 " + "т" * 500 in text and "…</blockquote>" in text

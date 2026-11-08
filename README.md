@@ -328,7 +328,7 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 
 Question cards have blank lines after the header and before the answer options.
 
-Layout: the header `📋 Треды Codex` with the counts `❓ n · 🟢 n · всего N` and, when available, the weekly rate limit and reset countdown; each thread is a line `markers name [button]` plus a `📁 folder · age` line, one divider after the header and each thread in a quote, without blank lines between quotes; ages are `сейчас`, `5м`, `2ч`, `вчера`, `3д` (no clock times). All unarchived threads in the inventory are listed; `📦 Архивные` opens the archive. A page holds `registry_rows_per_page` threads and the page row is `◀️ [n/total] ▶️` (arrows hidden at the edges; on the classic path `стр. n/total` is in the title).
+Layout: the header `📋 Треды Codex` with the counts `❓ n · 🟢 n · всего N` and the last update time in Kyiv, plus the weekly rate limit and reset countdown when available; changes to the limit alone do not update Telegram; each thread is a line `markers name [button]` plus a `📁 folder · age` line, one divider after the header and each thread in a quote, without blank lines between quotes; ages are `сейчас`, `5м`, `2ч`, `вчера`, `3д` (no absolute times in rows). All unarchived threads in the inventory are listed; `📦 Архивные` opens the archive. A page holds `registry_rows_per_page` threads and the page row is `◀️ [n/total] ▶️` (arrows hidden at the edges; on the classic path `стр. n/total` is in the title).
 
 Order: pending questions first, then working threads, then by last activity. The message is edited at most once per
 `registry_refresh_seconds` and not at all when nothing changed. Archiving a thread closes its consultant topic;
@@ -357,8 +357,7 @@ text Telegram cannot parse is resent as plain text. Example:
 📁 foxprofile-api
 🧠 sol 6.1·low · 🕒 25м · 🔄 now 💭 выполняет: pytest -q
  ctx 160k/475k (34%) · 💾 80% · 🗜️3
-🎯
-<blockquote expandable>Ship the profile page</blockquote>
+<blockquote expandable>🎯 Ship the profile page</blockquote>
 
 🤖 Субагенты 9 · 🟢 2 · 🟡 1 · ⚪ 6
  🟢 Oracle run lifecycle · luna·high · ctx 44% · 💾 95% · думает · 🗜️2

@@ -191,7 +191,7 @@ def _context(u: UsageSnapshot | None, compactions: int | None, subagents: int | 
 
 def _goal(g: GoalSummary, max_chars: int) -> str:
     state = f" · {_e(GOAL_WORD.get(g.status, g.status), 20)}" if g.status and g.status != GOAL_ACTIVE else ""
-    return f"🎯{state}\n<blockquote expandable>{_e(g.objective or DASH, max_chars)}</blockquote>"
+    return f"<blockquote expandable>🎯{state} {_e(g.objective or DASH, max_chars)}</blockquote>"
 
 
 def _agents(r: StatusReport, plan: Plan) -> list[str]:

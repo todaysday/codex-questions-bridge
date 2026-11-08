@@ -166,13 +166,13 @@ class RegistryPublisher:
         if not page.rows and page_no > 0:
             self.set_view(0, archived)
             page = self._query.page(0, self._rows, archived)
-        limits = await self._rate_limits(now)
-        doc = registry_doc(page, self._chat_id, now, limits)
-        digest = doc.fingerprint() + ("+rich" if rich else "")
+        digest = registry_doc(page, self._chat_id, now).fingerprint() + ("+rich" if rich else "")
         message_id = self.message_id
         fresh = now - (self._state.get_int("registry.written_at") or 0) < MAX_MESSAGE_AGE
         if not force and message_id is not None and fresh and digest == self._state.get("registry.hash"):
             return False
+        limits = await self._rate_limits(now)
+        doc = registry_doc(page, self._chat_id, now, limits, updated_at=now)
         bound = self._keys.bind_doc(doc)
         if message_id is not None:
             message_id = await self._edit(message_id, bound, rich)

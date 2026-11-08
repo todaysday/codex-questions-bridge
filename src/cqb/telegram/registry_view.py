@@ -4,6 +4,9 @@ Row markers: ❓ a question is pending, 🟢 the thread is working right now (bo
 🔒 (consultant closed). The consultant state is otherwise not printed: the row's button already says it.
 """
 
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
 from cqb.domain.enums import ConsultantState
 from cqb.domain.status import RateLimits
 from cqb.services.registry import RegistryPage, RegistryRow
@@ -36,10 +39,11 @@ def render_registry(page: RegistryPage, chat_id: int, now: int) -> View:
     return to_view(registry_doc(page, chat_id, now))
 
 
-def registry_doc(page: RegistryPage, chat_id: int, now: int, limits: RateLimits | None = None) -> Doc:
+def registry_doc(page: RegistryPage, chat_id: int, now: int, limits: RateLimits | None = None,
+                 updated_at: int | None = None) -> Doc:
     """Rich: a title, a counts line, then (after one divider) a quote per thread with `markers <b>name</b> [button]` and
     `📁 folder · age` on separate lines, then the page row (◀️ n/total ▶️) and the archive toggle. Classic: the numbered two-line entries, one
-    button per keyboard row, and the page in the title. No clock time anywhere: the message carries its own."""
+    button per keyboard row, and the page in the title."""
     paged = f" · стр. {page.page + 1}/{page.pages}" if page.pages > 1 else ""
     kind = "Архивные треды Codex" if page.archived else "Треды Codex"
     icon = "📦" if page.archived else "📋"
@@ -47,6 +51,8 @@ def registry_doc(page: RegistryPage, chat_id: int, now: int, limits: RateLimits 
         f"{QUESTION_MARK} {page.pending}" if page.pending else "",
         f"{WORKING_MARK} {page.working}" if page.working else "", f"всего {page.total}",
     )))
+    if updated_at is not None:
+        counts += f" · {datetime.fromtimestamp(updated_at, ZoneInfo('Europe/Kyiv')):%H:%M} Киев"
     blocks: list[Para | Row | Divider] = [
         Para((f"{icon} ", Bold(kind)), classic=f"{icon} {kind}{paged}"),
         Para((counts,), glue="\n"),

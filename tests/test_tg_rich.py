@@ -468,8 +468,8 @@ def test_rich_registry_layout_and_archive_toggle(conn):
             msg = st.registry_message
             reg = st.fake.messages[msg]
             html = reg["rich"]
-            assert "обновлено" not in html and not re.search(r"\d\d:\d\d", html) and "UTC" not in html  # no clock time
-            assert html.startswith("<p>📋 <b>Треды Codex</b></p><p>❓ 1 · 🟢 1 · всего 4</p><hr/>")
+            assert re.search(r"\d\d:\d\d Киев", html) and "UTC" not in html
+            assert re.match(r"<p>📋 <b>Треды Codex</b></p><p>❓ 1 · 🟢 1 · всего 4 · \d\d:\d\d Киев</p><hr/>", html)
             rows = re.findall(r"<blockquote><p>(.*?)<br>(.*?)</p></blockquote>", html)
             assert [r[1] for r in rows] == ["📁 w · 15м", "📁 w · 5м", "📁 w · сейчас", "📁 w · 3д"]  # ❓, 🟢, then newest
             assert re.fullmatch(r"❓ <b>Old &lt;x&gt;</b> <tg-button [^>]+>➕ Создать</tg-button>", rows[0][0])
