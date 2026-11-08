@@ -66,11 +66,13 @@ def test_full_card_layout():
         "🎯 Ship the profile page · 1.2M\n"
         "\n"
         "🤖 <b>Субагенты 9</b> · 🟢 1 · 🟡 1 · ⚪ 2\n"
+        "<blockquote expandable>\n"
         " 🟢 Oracle run lifecycle · luna 6·high · ctx 40% · выполняет: pytest -q\n"
         " 🟡 Spec review · luna 6·high · ctx 12% · ждёт ответа\n"
         " ↳ ⚪ Parser · luna 6.1·low · 12м назад\n"
         " 💤 Old one · mystery-1 · ctx 7% · 2ч назад\n"
         " … и ещё 5\n"
+        "</blockquote>\n"
         "\n"
         "📝 <b>В процессе:</b> Правит тесты статуса.\n"
         "\n"
@@ -322,8 +324,8 @@ def test_every_dynamic_string_is_escaped_and_the_card_still_parses():
     text = valid(render_status(with_agents(
         [kid], title=NASTY, model=NASTY, effort=NASTY, activity=Activity(True, NOW, None, ItemBrief(K.TOOL, False, NASTY)),
         goal=GoalSummary(NASTY, NASTY, 1, 2), summary=StatusSummary(NASTY, NASTY))))
-    stripped = re.sub(r"</?(b)>", "", text)
-    assert "<" not in stripped and ">" not in stripped  # only our own <b> tags are left
+    stripped = re.sub(r"</?b>|<blockquote expandable>|</blockquote>", "", text)
+    assert "<" not in stripped and ">" not in stripped  # only our fixed formatting tags are present
     assert "&lt;b&gt;&amp;amp; &quot;q&quot; &#x27;a&#x27; &lt;/i&gt;&lt;script&gt;" in text
     assert text.count("<b>") == text.count("</b>") == 4
     assert strip_html(text.splitlines()[0]) == f"🟢 {NASTY}"
@@ -331,7 +333,7 @@ def test_every_dynamic_string_is_escaped_and_the_card_still_parses():
 
 def test_the_card_bold_tags_are_exactly_the_fixed_ones():
     text = render_status(with_agents([agent()], summary=StatusSummary("а", "б")))
-    assert re.findall(r"<[^>]+>", text) == ["<b>", "</b>"] * 4  # ctx, subagents header, В процессе, Дальше
+    assert re.findall(r"<[^>]+>", text) == ["<b>", "</b>"] * 2 + ["<blockquote expandable>", "</blockquote>"] + ["<b>", "</b>"] * 2
 
 
 def test_clipping_happens_before_escaping_so_an_entity_is_never_cut():

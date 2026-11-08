@@ -101,7 +101,10 @@ def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
     top = [_title_line(r), _status_line(r), _context(r.usage, r.compactions)]
     if r.goal and plan.goal:
         top.append(_goal(r.goal))
-    blocks = ["\n".join(top), "\n".join(_agents(r, plan)), "\n".join(_summary(r.summary, plan)), _limits(r.limits, r.now)]
+    agents = _agents(r, plan)
+    if len(agents) > 1:
+        agents = [agents[0], "<blockquote expandable>\n" + "\n".join(agents[1:]) + "\n</blockquote>"]
+    blocks = ["\n".join(top), "\n".join(agents), "\n".join(_summary(r.summary, plan)), _limits(r.limits, r.now)]
     text = "\n\n".join(b for b in blocks if b)
     link = _link(r, open_link) if plan.link else None
     return f"{text}\n{link}" if link else text
