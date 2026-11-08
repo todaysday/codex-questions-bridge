@@ -351,7 +351,8 @@ never edited; the footer shows what is left of the weekly limit with a reset cou
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
-🟢 FoxProfile · 📁 foxprofile-api
+🟢 FoxProfile
+📁 foxprofile-api
 🧠 sol 6.1·low · 🕒 25м · 🔄 now 💭 выполняет: pytest -q
  ctx 160k/475k (34%) · 💾 80% · 🗜️3
 🎯 Ship the profile page · 1.2M

@@ -173,27 +173,28 @@ def test_the_state_is_an_icon_before_the_thread_name_and_no_english_state_word_a
 ])
 def test_folder_is_only_the_last_path_component_and_never_a_path(cwd, folder):
     assert view.folder_name(cwd) == folder
-    first = render_status(report(cwd=cwd)).splitlines()[0]
-    assert first == ("🟢 Fox Profile" + (f" · 📁 {folder}" if folder else ""))
+    first = view._title_line(report(cwd=cwd))
+    assert first == ("🟢 Fox Profile" + (f"\n📁 {folder}" if folder else ""))
     assert "/" not in (folder or "") and "\\" not in (folder or "")
 
 
 def test_folder_is_escaped_and_clipped_to_32_characters_and_name_and_folder_are_independent():
-    first = lambda **kw: render_status(report(**kw)).splitlines()[0]
-    assert first(cwd="/w/<b>&x") == "🟢 Fox Profile · 📁 &lt;b&gt;&amp;x"
-    assert first(cwd="/w/" + "д" * 40) == "🟢 Fox Profile · 📁 " + "д" * 31 + "…"
-    assert first(cwd="/w/" + "д" * 32) == "🟢 Fox Profile · 📁 " + "д" * 32  # exactly the limit: no ellipsis
-    assert first(cwd="/w/" + "&" * 40) == "🟢 Fox Profile · 📁 " + "&amp;" * 31 + "…"  # clipped before escaping
-    assert first(cwd="/w/fox", title=None) == "🟢 — · 📁 fox"
+    first = lambda **kw: view._title_line(report(**kw))
+    assert first(cwd="/w/<b>&x") == "🟢 Fox Profile\n📁 &lt;b&gt;&amp;x"
+    assert first(cwd="/w/" + "д" * 40) == "🟢 Fox Profile\n📁 " + "д" * 31 + "…"
+    assert first(cwd="/w/" + "д" * 32) == "🟢 Fox Profile\n📁 " + "д" * 32  # exactly the limit: no ellipsis
+    assert first(cwd="/w/" + "&" * 40) == "🟢 Fox Profile\n📁 " + "&amp;" * 31 + "…"  # clipped before escaping
+    assert first(cwd="/w/fox", title=None) == "🟢 —\n📁 fox"
     long = first(cwd="/w/" + "я" * 99, title="т" * 99)
-    assert long == "🟢 " + "т" * 59 + "… · 📁 " + "я" * 31 + "…"
+    assert long == "🟢 " + "т" * 59 + "…\n📁 " + "я" * 31 + "…"
     valid(render_status(report(cwd="/w/<x>", title=NASTY)))
 
 
 def test_the_header_with_a_folder_matches_the_documented_layout():
     text = valid(render_status(report(cwd="/srv/projects/gh-runner-dispatcher")))
-    assert text.splitlines()[:3] == [
-        "🟢 Fox Profile · 📁 gh-runner-dispatcher",
+    assert text.splitlines()[:4] == [
+        "🟢 Fox Profile",
+        "📁 gh-runner-dispatcher",
         "🧠 sol 6·low · 🕒 25м · 🔄 2м 💭 выполняет: pytest -q",
         " <b>ctx</b> 160k/475k (34%) · 💾 80%"]
 
@@ -431,8 +432,8 @@ def test_render_picks_the_first_plan_that_fits(monkeypatch):
 def test_the_folder_survives_every_shrink_step():
     r = dataclasses.replace(huge(), cwd="/srv/projects/gh-runner-dispatcher")
     for plan in view.PLANS:
-        assert view._card(r, plan).splitlines()[0].endswith(" · 📁 gh-runner-dispatcher")  # never the first thing to go
-    assert valid(render_status(r)).splitlines()[0].endswith("📁 gh-runner-dispatcher")
+        assert view._card(r, plan).splitlines()[1] == "📁 gh-runner-dispatcher"  # never the first thing to go
+    assert valid(render_status(r)).splitlines()[1] == "📁 gh-runner-dispatcher"
 
 
 def test_the_shrunk_card_keeps_the_summary_and_the_footer():

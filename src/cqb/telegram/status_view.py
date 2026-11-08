@@ -124,9 +124,9 @@ def _e(text: str, limit: int) -> str:
 
 
 def _title_line(r: StatusReport) -> str:
-    """`🟢 Fox Profile · 📁 gh-runner-dispatcher`: the folder part only when the working directory is known."""
+    """`🟢 Fox Profile\n📁 gh-runner-dispatcher`: the folder part only when the working directory is known."""
     folder = folder_name(r.cwd)
-    tail = f" · 📁 {_e(folder, FOLDER_MAX)}" if folder else ""
+    tail = f"\n📁 {_e(folder, FOLDER_MAX)}" if folder else ""
     return f"{ICON[r.state]} {_e(r.title or DASH, 60)}{tail}"
 
 

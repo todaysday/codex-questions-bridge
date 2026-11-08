@@ -97,7 +97,7 @@ def test_the_roots_cwd_reaches_the_report_from_the_thread_snapshot_already_read(
     src.threads["r2"] = snapshot("r2")
     report = collect(svc)
     assert report.cwd == "/srv/projects/gh-runner-dispatcher/" and src.calls.count("thread") == 1  # no second read
-    assert render_status(report).splitlines()[0] == "⚪ Thread r1 · 📁 gh-runner-dispatcher"
+    assert render_status(report).splitlines()[:2] == ["⚪ Thread r1", "📁 gh-runner-dispatcher"]
     assert collect(svc, "r2").cwd is None and render_status(collect(svc, "r2")).splitlines()[0] == "⚪ Thread r2"
 
 

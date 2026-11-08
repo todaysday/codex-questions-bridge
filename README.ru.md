@@ -357,7 +357,8 @@ curl -s -H "Authorization: Bearer $MODEL_KEY" http://<tailnet-ip>:<port>/v1/mode
 простым текстом. Пример:
 
 ```
-🟢 FoxProfile · 📁 foxprofile-api
+🟢 FoxProfile
+📁 foxprofile-api
 🧠 sol 6.1·low · 🕒 25м · 🔄 now 💭 выполняет: pytest -q
  ctx 160k/475k (34%) · 💾 80% · 🗜️3
 🎯 Ship the profile page · 1.2M
