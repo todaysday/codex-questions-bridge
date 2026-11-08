@@ -126,6 +126,7 @@ class Para:
     glue: str = "\n\n"
     classic: str | None = None
     volatile: bool = False  # the header: the classic View.header, and not part of the fingerprint
+    quote: bool = False
 
 
 @dataclass(frozen=True, slots=True)
@@ -182,7 +183,7 @@ def _stable(block: "Para | Row | Divider | Blank") -> object:
         return "blank"
     if isinstance(block, Row):
         return tuple(one(b) for b in block.buttons)
-    return (block.glue, block.classic, tuple(one(p) if isinstance(p, Button) else p for p in block.parts))
+    return (block.glue, block.classic, block.quote, tuple(one(p) if isinstance(p, Button) else p for p in block.parts))
 
 
 @dataclass(frozen=True, slots=True)

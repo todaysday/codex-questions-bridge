@@ -7,7 +7,7 @@ Row markers: ❓ a question is pending, 🟢 the thread is working right now (bo
 from cqb.domain.enums import ConsultantState
 from cqb.services.registry import RegistryPage, RegistryRow
 from cqb.telegram.fmt import BUTTON_TEXT_LIMIT, age, clip, topic_link
-from cqb.telegram.models import ActionSpec, Blank, Bold, Button, Divider, Doc, Para, Row, View
+from cqb.telegram.models import ActionSpec, Bold, Button, Divider, Doc, Para, Row, View
 from cqb.telegram.render import to_view
 from cqb.telegram.status_view import folder_name
 
@@ -36,8 +36,8 @@ def render_registry(page: RegistryPage, chat_id: int, now: int) -> View:
 
 
 def registry_doc(page: RegistryPage, chat_id: int, now: int) -> Doc:
-    """Rich: a title, a counts line, then (after one divider) per thread two paragraphs, `markers <b>name</b> [button]` and
-    `📁 folder · age`, then the page row (◀️ n/total ▶️) and the archive toggle. Classic: the numbered two-line entries, one
+    """Rich: a title, a counts line, then (after one divider) a quote per thread with `markers <b>name</b> [button]` and
+    `📁 folder · age` on separate lines, then the page row (◀️ n/total ▶️) and the archive toggle. Classic: the numbered two-line entries, one
     button per keyboard row, and the page in the title. No clock time anywhere: the message carries its own."""
     paged = f" · стр. {page.page + 1}/{page.pages}" if page.pages > 1 else ""
     kind = "Архивные треды Codex" if page.archived else "Треды Codex"
@@ -46,10 +46,10 @@ def registry_doc(page: RegistryPage, chat_id: int, now: int) -> Doc:
         f"{QUESTION_MARK} {page.pending}" if page.pending else "",
         f"{WORKING_MARK} {page.working}" if page.working else "", f"всего {page.total}",
     )))
-    blocks: list[Para | Row | Divider | Blank] = [
+    blocks: list[Para | Row | Divider] = [
         Para((f"{icon} ", Bold(kind)), classic=f"{icon} {kind}{paged}"),
         Para((counts,), glue="\n"),
-        Divider(),  # once, under the header block; threads are set apart by an empty line
+        Divider(),
     ]
     for n, row in enumerate(page.rows, start=1):
         marks = "".join(filter(None, (
@@ -62,13 +62,10 @@ def registry_doc(page: RegistryPage, chat_id: int, now: int) -> Doc:
             f"📁 {clip(folder, FOLDER_LIMIT)}" if folder else "", age(row.thread.updated_at, now),
         )))
         button = _row_button(n, row, chat_id, page.archived)
-        if n > 1:
-            blocks.append(Blank())
         blocks.append(Para(
-            (f"{marks} " if marks else "", Bold(name), *([button] if button else [])),
-            classic=f"{n}. {marks + ' ' if marks else ''}{name}",
+            (f"{marks} " if marks else "", Bold(name), *([button] if button else []), f"\n{line2}"),
+            classic=f"{n}. {marks + ' ' if marks else ''}{name}\n   {line2}", quote=True,
         ))
-        blocks.append(Para((line2,), glue="\n", classic=f"   {line2}"))
     if not page.rows:
         blocks.append(Para((f"Нет тредов за последние {page.recency_days} дн.",)))
     if nav := _nav_buttons(page):

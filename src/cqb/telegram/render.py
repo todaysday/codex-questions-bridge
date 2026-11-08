@@ -19,6 +19,8 @@ def rich_size(doc: Doc) -> tuple[int, int]:
     chars = blocks = 0
     for b in doc.blocks:
         blocks += 1
+        if isinstance(b, Para) and b.quote:
+            blocks += 1
         if isinstance(b, (Divider, Blank)):
             continue
         for p in b.buttons if isinstance(b, Row) else b.parts:
@@ -48,7 +50,8 @@ def to_html(doc: Doc) -> str:
         else:
             inline = _inline(b)
             if inline:
-                out.append(f"<p>{inline}</p>")
+                paragraph = f"<p>{inline}</p>"
+                out.append(f"<blockquote>{paragraph}</blockquote>" if b.quote else paragraph)
     return "".join(out)
 
 

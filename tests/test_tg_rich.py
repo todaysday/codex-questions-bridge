@@ -98,6 +98,9 @@ def test_classic_view_of_the_same_doc_and_the_rich_limits():
     assert [[b.text for b in r] for r in view.keyboard] == [["A", "B"], ["go"]]
     assert fits_rich(Doc((Para(("x" * 32768,)),))) and not fits_rich(Doc((Para(("x" * 32769,)),)))
     assert fits_rich(Doc(tuple(Para(("p",)) for _ in range(500)))) and not fits_rich(Doc(tuple(Para(("p",)) for _ in range(501))))
+    assert fits_rich(Doc(tuple(Para(("p",), quote=True) for _ in range(250))))
+    assert not fits_rich(Doc(tuple(Para(("p",), quote=True) for _ in range(251))))
+    assert Doc((Para(("p",)),)).fingerprint() != Doc((Para(("p",), quote=True),)).fingerprint()
 
 
 def test_divider_is_hr_in_rich_and_nothing_in_classic():
@@ -467,13 +470,14 @@ def test_rich_registry_layout_and_archive_toggle(conn):
             html = reg["rich"]
             assert "обновлено" not in html and not re.search(r"\d\d:\d\d", html) and "UTC" not in html  # no clock time
             assert html.startswith("<p>📋 <b>Треды Codex</b></p><p>❓ 1 · 🟢 1 · всего 4</p><hr/>")
-            rows = re.findall(r"(?:<hr/>|<p>&nbsp;</p>)<p>(.*?)</p><p>(.*?)</p>", html)
+            rows = re.findall(r"<blockquote><p>(.*?)<br>(.*?)</p></blockquote>", html)
             assert [r[1] for r in rows] == ["📁 w · 15м", "📁 w · 5м", "📁 w · сейчас", "📁 w · 3д"]  # ❓, 🟢, then newest
             assert re.fullmatch(r"❓ <b>Old &lt;x&gt;</b> <tg-button [^>]+>➕ Создать</tg-button>", rows[0][0])
             assert re.fullmatch(r"🟢 <b>Done</b> <tg-button [^>]+>➕ Создать</tg-button>", rows[1][0])
             assert re.fullmatch(r'<b>Fox</b> <tg-button type="url" url="https://t.me/c/1234567890/\d+">💬 Открыть</tg-button>', rows[2][0])
-            # ONE divider, under the header block; the threads are set apart by an empty paragraph each
-            assert html.count("<hr/>") == 1 and html.count("<p>&nbsp;</p>") == 3
+            # One divider and consecutive quoted threads, with no empty paragraphs.
+            assert html.count("<hr/>") == 1 and html.count("<blockquote>") == 4 and "<p>&nbsp;</p>" not in html
+            assert html.count("</blockquote><blockquote>") == 3
             assert "консультант" not in html and "✅" not in html and "Ранее" not in html and "Недавние" not in html
             assert st.fake.rows(msg) == [["📦 Архивные"]] and reg["markup"] is None  # one page: no page row, no recent toggle
             await press(st, msg, "📦 Архивные")
@@ -489,8 +493,8 @@ def test_rich_registry_pages_with_a_disabled_counter_and_no_arrow_at_the_edges(c
             msg = st.registry_message
             fake = st.fake
             html = fake.messages[msg]["rich"]
-            assert html.count("<hr/>") == 1 and html.count("<p>&nbsp;</p>") == 7 and html.count("➕ Создать") == 8
-            assert html.count("<p>") == 2 + 16 + 7
+            assert html.count("<hr/>") == 1 and html.count("<blockquote>") == 8 and html.count("➕ Создать") == 8
+            assert html.count("<p>") == 2 + 8
             assert fake.rows(msg)[0] == ["1/4", "▶️"]  # no ◀️ on the first page
             assert '<tg-button type="disabled">1/4</tg-button>' in html
             assert fake.button(msg, "1/4").get("callback_data") is None  # the counter does nothing
