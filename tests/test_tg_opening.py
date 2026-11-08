@@ -40,6 +40,7 @@ def test_opening_message_goes_first_and_is_pinned_then_cards_follow(conn):
             topic = await st.open_consultant("r1")
             await st.settle()
             opening, card = sorted(i for i, m in st.fake.messages.items() if m["thread_id"] == topic)
+            assert st.consultant_dao.get("s1", "r1").opening_message_id == opening
             assert card == st.card_of(st.qid_of("i1"))
             assert topic_calls(st, topic) == [("sendMessage", opening), ("pinChatMessage", opening), ("sendMessage", card)]
             assert st.fake.pinned[1:] == [opening] and card not in st.fake.pinned  # [0] is the registry message
@@ -71,6 +72,7 @@ def test_a_failed_pin_does_not_hold_back_the_cards(conn):
             topic = await st.open_consultant("r1")
             await st.settle()
             opening, *cards = sorted(i for i, m in st.fake.messages.items() if m["thread_id"] == topic)
+            assert st.consultant_dao.get("s1", "r1").opening_message_id == opening
             assert len(cards) == 2 and texts(st, topic)[0].startswith("Консультант: Fox")
             assert [m for m, _ in topic_calls(st, topic)] == ["sendMessage", "pinChatMessage", "sendMessage", "sendMessage"]
             assert len(st.fake.pinned) == 1  # the registry only: nothing was pinned, and no card in particular
@@ -85,6 +87,7 @@ def test_a_failed_opening_message_does_not_hold_back_the_cards_and_nothing_is_pi
             topic = await st.open_consultant("r1")
             await st.settle()
             [card] = [i for i, m in st.fake.messages.items() if m["thread_id"] == topic]
+            assert st.consultant_dao.get("s1", "r1").opening_message_id is None
             assert card == st.card_of(st.qid_of("i1")) and len(st.fake.pinned) == 1
             assert not texts(st, topic)[0].startswith("Консультант")
     run(main())

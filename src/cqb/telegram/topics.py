@@ -33,7 +33,7 @@ class TelegramTopics:
                 return  # already in the wanted state
             raise
 
-    async def announce(self, topic_id: int, text: str) -> None:
+    async def announce(self, topic_id: int, text: str) -> int:
         """Opening message in a new consultant topic, pinned (by its own message id). A failed pin (no rights) is only
         logged: the message stays. A failed send raises; the caller decides."""
         sent = await self._api.send_message(self._chat_id, text, thread_id=topic_id)
@@ -41,6 +41,7 @@ class TelegramTopics:
             await self._api.pin_chat_message(self._chat_id, sent.message_id)
         except TelegramError as exc:
             log.warning("cannot pin the opening message in topic %d: %s", topic_id, exc)
+        return sent.message_id
 
     async def say(self, topic_id: int, text: str, *, markdown: bool = False) -> None:
         """A message in the topic. Plain text by default (no parse mode, so it can never fail on entities), split

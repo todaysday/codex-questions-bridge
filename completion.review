@@ -1,0 +1,4 @@
+# Completion review
+
+- Saved the topic ID and opening-message ID together, including after a database retry; failed sends leave the message ID empty.
+- Verified with 1443 passing tests; Telegram deployment and existing-message ID import remain pending.

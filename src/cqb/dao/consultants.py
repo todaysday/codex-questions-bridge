@@ -51,10 +51,10 @@ class ConsultantDao:
         assert found is not None
         return found
 
-    def open(self, consultant_id: int, topic_id: int, now: int) -> None:
+    def open(self, consultant_id: int, topic_id: int, now: int, opening_message_id: int | None) -> None:
         self._conn.execute(
-            "UPDATE consultants SET tg_topic_id=?, state=?, updated_at=? WHERE consultant_id=?",
-            (topic_id, ConsultantState.OPEN.value, now, consultant_id),
+            "UPDATE consultants SET tg_topic_id=?, state=?, updated_at=?, opening_message_id=? WHERE consultant_id=?",
+            (topic_id, ConsultantState.OPEN.value, now, opening_message_id, consultant_id),
         )
 
     def set_state(self, consultant_id: int, state: ConsultantState, now: int) -> None:
@@ -104,4 +104,5 @@ def _to_consultant(r: sqlite3.Row) -> Consultant:
         created_at=r["created_at"],
         updated_at=r["updated_at"],
         focus_no=r["focus_no"],
+        opening_message_id=r["opening_message_id"],
     )

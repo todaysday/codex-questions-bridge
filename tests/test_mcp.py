@@ -58,7 +58,7 @@ class World:
         ])
         for i, root in enumerate(("r1", "r2", "r3")):
             c = self.consultants.reserve("s1", root, -100, f"cqb-{root}", 1)
-            self.consultants.open(c.consultant_id, 10 + i, 1)
+            self.consultants.open(c.consultant_id, 10 + i, 1, None)
         self.consultants.set_state(self.consultants.get("s1", "r3").consultant_id, ConsultantState.ARCHIVED, 2)
         self.source = StatusSourceStub()
         self.source.threads["r1"] = snapshot("r1", RunState.WORKING, name="Fox", model="gpt-6", effort="high")

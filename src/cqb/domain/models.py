@@ -127,6 +127,7 @@ class Consultant:
     created_at: int
     updated_at: int
     focus_no: int | None = None  # the Q number the owner pointed at last (the conversation's topic)
+    opening_message_id: int | None = None
 
 
 @dataclass(frozen=True, slots=True)

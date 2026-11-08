@@ -195,10 +195,10 @@ def test_consultant_dao_uniqueness_and_states(conn):
     a = dao.reserve("s1", "r1", -100, "cqb-a", 1)
     assert a.state is S.CREATING and a.tg_topic_id is None
     assert dao.reserve("s1", "r1", -100, "cqb-other", 2) == a  # one row per root
-    dao.open(a.consultant_id, 5, 3)
+    dao.open(a.consultant_id, 5, 3, None)
     b = dao.reserve("s1", "r2", -100, "cqb-b", 1)
     with pytest.raises(sqlite3.IntegrityError):
-        dao.open(b.consultant_id, 5, 3)  # UNIQUE(tg_chat_id, tg_topic_id)
+        dao.open(b.consultant_id, 5, 3, None)  # UNIQUE(tg_chat_id, tg_topic_id)
     assert dao.get_by_topic(-100, 5).root_thread_id == "r1" and dao.get_by_topic(-100, 6) is None
     assert set(dao.get_many("s1", ["r1", "r2", "zz"])) == {"r1", "r2"} and dao.get_many("s1", []) == {}
     assert dao.count_open("s1") == 1
@@ -220,7 +220,7 @@ def test_question_card_helpers(conn):
     consultants = ConsultantDao(conn)
     one = consultants.reserve("s1", "r1", -100, "k1", 1)
     assert dao.list_postable("s1") == []  # still creating
-    consultants.open(one.consultant_id, 5, 2)
+    consultants.open(one.consultant_id, 5, 2, None)
     assert {q.question_id for q in dao.list_postable("s1")} == {"a", "b"}  # only r1 has an open topic
     dao.set_card_messages("a", [77, 78, 79])  # a long card: the first message and two continuations
     assert dao.find_by_card_message(77).question_id == "a" and dao.get("a").card_message_id == 77

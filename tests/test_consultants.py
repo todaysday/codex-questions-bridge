@@ -43,6 +43,7 @@ class FakeTopics:
         if self.fail_announce:
             raise RuntimeError("boom")
         self.announced.append((topic_id, text))
+        return 201
 
     async def set_topic_closed(self, topic_id, closed):
         self.calls.append((topic_id, closed))
@@ -224,6 +225,7 @@ def test_the_opening_message_is_sent_once_per_new_topic_and_before_the_open_list
     svc._on_open = lambda root: topics.events.append("open")
     run(svc.create("r1"))
     run(svc.create("r1"))  # already open: nothing again
+    assert dao.get("s1", "r1").opening_message_id == 201
     assert topics.announced == [(101, "Консультант r1")] and topics.events == ["announce", "open"]
     threads.set_archive_state("s1", "r1", ArchiveState.ARCHIVED, 5)
     run(svc.reconcile())
@@ -250,4 +252,5 @@ def test_a_retried_persist_does_not_repeat_the_opening_message(env, monkeypatch)
         run(svc.create("r1"))
     monkeypatch.setattr(dao, "open", real)
     run(svc.create("r1"))
+    assert dao.get("s1", "r1").opening_message_id == 201
     assert len(topics.announced) == 1 and len(topics.created) == 1

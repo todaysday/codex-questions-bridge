@@ -28,7 +28,7 @@ PERSIST_ATTEMPTS = 3
 class TopicPort(Protocol):
     async def create_topic(self, name: str) -> int: ...
     async def set_topic_closed(self, topic_id: int, closed: bool) -> None: ...
-    async def announce(self, topic_id: int, text: str) -> None: ...
+    async def announce(self, topic_id: int, text: str) -> int: ...
 
 
 class TopicGone(Exception):
@@ -73,7 +73,7 @@ class ConsultantService:
         self._on_open = on_open  # root id of a consultant that just became open (created or reopened)
         self._opening = opening  # root id -> text of the opening message of its new topic (None: send nothing)
         self._locks: dict[str, list] = {}  # root -> [lock, users]; entries live only while in use
-        self._created: dict[str, int] = {}  # root -> topic created but not yet persisted
+        self._created: dict[str, tuple[int, int | None]] = {}  # root -> topic and opening message not yet persisted
 
     def recover(self) -> int:
         """At startup: a CREATING row has an unknown outcome; surface it instead of guessing."""
@@ -114,12 +114,14 @@ class ConsultantService:
             )
             if row.state is ConsultantState.ERROR:
                 self._dao.set_state(row.consultant_id, ConsultantState.CREATING, self._now())
-            topic_id = self._created.get(root_thread_id)
-            if topic_id is None:
+            created = self._created.get(root_thread_id)
+            if created is None:
                 topic_id = await self._create_topic(row, thread)
-                self._created[root_thread_id] = topic_id
-                await self._announce(root_thread_id, topic_id)  # before the row is open: no card can precede it
-            await self._persist_open(row, topic_id)
+                self._created[root_thread_id] = (topic_id, None)
+                message_id = await self._announce(root_thread_id, topic_id)
+                self._created[root_thread_id] = (topic_id, message_id)
+            topic_id, message_id = self._created[root_thread_id]
+            await self._persist_open(row, topic_id, message_id)
             self._created.pop(root_thread_id, None)
             opened = self._dao.get(self._source, root_thread_id)
             assert opened is not None
@@ -164,13 +166,13 @@ class ConsultantService:
         if self._on_open:
             self._on_open(root_thread_id)
 
-    async def _announce(self, root_thread_id: str, topic_id: int) -> None:
+    async def _announce(self, root_thread_id: str, topic_id: int) -> int | None:
         """The opening message (the topic's first message, pinned) goes out once per new topic, best effort."""
         text = self._opening(root_thread_id) if self._opening else None
         if not text:
             return
         try:
-            await self._topics.announce(topic_id, text)
+            return await self._topics.announce(topic_id, text)
         except Exception as exc:
             log.warning("opening message of topic %d failed: %s", topic_id, type(exc).__name__)
 
@@ -182,11 +184,11 @@ class ConsultantService:
             log.warning("create topic failed for consultant %d: %s", row.consultant_id, type(exc).__name__)
             raise ConsultantError("не удалось создать топик в Telegram") from exc
 
-    async def _persist_open(self, row: Consultant, topic_id: int) -> None:
+    async def _persist_open(self, row: Consultant, topic_id: int, message_id: int | None) -> None:
         """The topic exists; its id must reach the DB. Retried, and kept in memory if all fail."""
         for attempt in range(PERSIST_ATTEMPTS):
             try:
-                self._dao.open(row.consultant_id, topic_id, self._now())
+                self._dao.open(row.consultant_id, topic_id, self._now(), message_id)
                 return
             except sqlite3.Error:
                 log.exception("persisting topic %d failed (attempt %d)", topic_id, attempt + 1)

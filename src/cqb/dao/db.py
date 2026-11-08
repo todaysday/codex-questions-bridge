@@ -165,6 +165,9 @@ MIGRATIONS: tuple[str, ...] = (
     CREATE INDEX idx_agent_question_card ON agent_questions(card_message_id);
     ALTER TABLE questions ADD COLUMN card_extra_ids TEXT;
     """,
+    """
+    ALTER TABLE consultants ADD COLUMN opening_message_id INTEGER;
+    """,
 )
 
 

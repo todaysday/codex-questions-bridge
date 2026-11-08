@@ -339,7 +339,7 @@ def test_dao_unique_key_counts_postable_and_prune(conn):
             assert dao.insert_if_new(q) is False  # (source, thread, item, index) is the key
             assert dao.open_counts_by_root("s1") == {"r1": 1}
             assert dao.list_postable("s1") == []  # no open consultant topic
-            conn.execute("INSERT INTO consultants VALUES (1,'s1','r1',1,5,'cqb-x','open',1,1,NULL)")
+            conn.execute("INSERT INTO consultants (consultant_id, source_id, root_thread_id, tg_chat_id, tg_topic_id, pico_session_key, state, created_at, updated_at) VALUES (1,'s1','r1',1,5,'cqb-x','open',1,1)")
             assert [x.agent_question_id for x in dao.list_postable("s1")] == [q.agent_question_id]
             dao.set_card_messages(q.agent_question_id, [77, 78, 79])
             assert dao.find_by_card_message(77).agent_question_id == q.agent_question_id and dao.list_postable("s1") == []
