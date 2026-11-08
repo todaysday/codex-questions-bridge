@@ -7,9 +7,9 @@ The limits line says what is LEFT and the reset as a countdown; there is no abso
 line that opens the thread (the very last thing the shrink gives up, after the summary).
 
 Header (three lines, then the goal line):
-    {state icon} {thread name} · 📁 {project folder, the last path component of the cwd; left out when unknown}
-    🧠 {model short}·{effort} · 🕒 {turn duration} · 🔄 {last activity} 💭 {сейчас}
-     <b>ctx</b> {used}/{window} ({pct}%) · 💾 {cache pct}%
+    {state icon} {thread name} · 📁{project folder, the last path component of the cwd; left out when unknown}
+    🧠{model short}·{effort} · 🕒{turn duration} · 🔄{last activity} 💭{сейчас}
+     <b>ctx</b> {used}/{window} ({pct}%) · 💾{cache pct}%
 """
 
 import html
@@ -25,6 +25,7 @@ from cqb.domain.status import (
 from cqb.telegram.fmt import TEXT_LIMIT, clip
 
 DASH = "—"
+SEP = "<b> · </b>"
 LINK_TEXT = "Открыть в Codex"
 ICON = {
     RunState.WORKING: "🟢", RunState.WAITING_INPUT: "🟡", RunState.WAITING_APPROVAL: "🟡",
@@ -42,7 +43,7 @@ GOAL_WORD = {
     "active": "активна", "paused": "пауза", "blocked": "заблокирована", "usageLimited": "лимит использования",
     "budgetLimited": "лимит бюджета", "complete": "выполнена",
 }
-SUMMARY_UNAVAILABLE = "📝 резюме недоступно"
+SUMMARY_UNAVAILABLE = "📝резюме недоступно"
 MIN_AGENT_LINES = 3
 TITLE_MAX = 32
 FOLDER_MAX = 32  # the project folder on the first line
@@ -67,7 +68,7 @@ class Plan:
     agent_lines: int = AGENT_LINES
     now_max: int = NOW_MAX
     goal: bool = True
-    agent_cache: bool = True  # the `💾 N%` part of a subagent line
+    agent_cache: bool = True  # the `💾N%` part of a subagent line
     progress_max: int = PROGRESS_MAX  # characters of the summary parts, before escaping
     next_max: int = NEXT_MAX
     link: bool = True  # the open-in-Codex line: the very last thing to go
@@ -121,12 +122,12 @@ def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
 
 
 def _link(r: StatusReport, template: str) -> str | None:
-    """`🔗 <a href="https://…">Открыть в Codex</a>` on the last line; the text is fixed and the href is
+    """`🔗<a href="https://…">Открыть в Codex</a>` on the last line; the text is fixed and the href is
     the template with the root's own id (percent-encoded) and nothing else, HTML-escaped."""
     if not template or not r.thread_id:
         return None
     url = template.replace("{thread_id}", quote(r.thread_id, safe=""))
-    return f'🔗 <a href="{html.escape(url, quote=True)}">{LINK_TEXT}</a>'
+    return f'🔗<a href="{html.escape(url, quote=True)}">{LINK_TEXT}</a>'
 
 
 def _e(text: str, limit: int) -> str:
@@ -134,10 +135,10 @@ def _e(text: str, limit: int) -> str:
 
 
 def _title_line(r: StatusReport) -> str:
-    """`🟢 Fox Profile\n📁 gh-runner-dispatcher`: the folder part only when the working directory is known."""
+    """`🟢 Fox Profile\n📁gh-runner-dispatcher`: the folder part only when the working directory is known."""
     folder = folder_name(r.cwd)
-    tail = f"\n📁 {_e(folder, FOLDER_MAX)}" if folder else ""
-    return f"{ICON[r.state]} {_e(r.title or DASH, 60)}{tail}"
+    tail = f"\n📁{_e(folder, FOLDER_MAX)}" if folder else ""
+    return f"{ICON[r.state]}{_e(r.title or DASH, 60)}{tail}"
 
 
 def folder_name(cwd: str | None) -> str | None:
@@ -148,20 +149,20 @@ def folder_name(cwd: str | None) -> str | None:
 
 
 def _status_line(r: StatusReport) -> str:
-    """`🧠 sol 6.1·low · 🕒 25м · 🔄 2м 💭 выполняет: pytest`; the turn and 'сейчас' parts only when there are any."""
-    parts = [f"🧠 {_e(_model(r.model, r.effort) or DASH, MODEL_MAX)}"]
+    """`🧠sol 6.1 low · 🕒25м · 🔄2м 💭выполняет: pytest`; the turn and 'сейчас' parts only when there are any."""
+    parts = [f"🧠{_e(_model(r.model, r.effort) or DASH, MODEL_MAX)}"]
     if r.state in ACTIVE and r.turn_elapsed_s is not None:
-        parts.append(f"🕒 {_minutes(r.turn_elapsed_s)}")
-    line = " · ".join([*parts, f"🔄 {_ago(r.last_activity, r.now, fresh=NOW_WORD, suffix='')}"])
+        parts.append(f"🕒{_minutes(r.turn_elapsed_s)}")
+    line = SEP.join([*parts, f"🔄{_ago(r.last_activity, r.now, fresh=NOW_WORD, suffix='')}"])
     now = _now(r.state, r.activity, r.now)
-    return line if now == DASH else f"{line} 💭 {_e(now, ROOT_NOW_MAX)}"
+    return line if now == DASH else f"{line} 💭{_e(now, ROOT_NOW_MAX)}"
 
 
 def _model(model: str | None, effort: str | None) -> str | None:
-    """`gpt-6.1-sol` + `high` -> `sol 6.1·high`, `gpt-6-luna` -> `luna 6`; any other name is kept whole."""
+    """`gpt-6.1-sol` + `high` -> `sol 6.1 high`, `gpt-6-luna` -> `luna 6`; any other name is kept whole."""
     m = MODEL_NAME.match(model) if model else None
     name = f"{m.group(2)} {m.group(1)}" if m else model
-    return "·".join(x for x in (name, effort) if x) or None
+    return " ".join(x for x in (name, effort) if x) or None
 
 
 def _cache(permille: int) -> str:
@@ -171,12 +172,12 @@ def _cache(permille: int) -> str:
 
 def _compacted(n: int | None) -> str:
     """` · 🗜️5`: how many times the context was compacted; nothing for zero or unknown."""
-    return f" · 🗜️{n}" if n else ""
+    return f"{SEP}🗜️{n}" if n else ""
 
 
 def _context(u: UsageSnapshot | None, compactions: int | None, subagents: int | None = None,
              incomplete: bool = False) -> str:
-    """` <b>ctx</b> 160k/475k (34%) · 💾 80% · 🗜️5`: starts with one space; the cache and 🗜️ parts are left out when unknown."""
+    """` <b>ctx</b> 160k/475k (34%) · 💾80% · 🗜️5`: starts with one space; the cache and 🗜️ parts are left out when unknown."""
     if u is None:
         return f" <b>ctx</b> {DASH}{_compacted(compactions)}"
     total = ""
@@ -185,23 +186,24 @@ def _context(u: UsageSnapshot | None, compactions: int | None, subagents: int | 
         total = f"∑{tokens(u.total_tokens)} ({children}) · "
     window = tokens(u.context_window) if u.context_window else DASH
     fill = f" ({u.fill_percent}%)" if u.fill_percent is not None else ""
-    cache = f" · 💾 {_cache(u.cache_permille)}" if u.cache_permille is not None else ""
-    return f" <b>{total}ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}{_compacted(compactions)}"
+    cache = f"{SEP}💾{_cache(u.cache_permille)}" if u.cache_permille is not None else ""
+    icon = "🌀" if total else ""
+    return f" {icon}<b>{total}ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}{_compacted(compactions)}"
 
 
 def _goal(g: GoalSummary, max_chars: int) -> str:
-    state = f" · {_e(GOAL_WORD.get(g.status, g.status), 20)}" if g.status and g.status != GOAL_ACTIVE else ""
-    return f"<blockquote expandable>🎯{state} {_e(g.objective or DASH, max_chars)}</blockquote>"
+    state = f"{SEP}{_e(GOAL_WORD.get(g.status, g.status), 20)} " if g.status and g.status != GOAL_ACTIVE else ""
+    return f"<blockquote expandable>🎯{state}{_e(g.objective or DASH, max_chars)}</blockquote>"
 
 
 def _agents(r: StatusReport, plan: Plan) -> list[str]:
     if r.agents_total is None:
-        return [f"🤖 <b>Субагенты</b> · {DASH}"]
+        return [f"🤖<b>Субагенты</b>{SEP}{DASH}"]
     if r.agents_total == 0:
-        return ["🤖 <b>Субагенты</b> · нет"]
+        return [f"🤖<b>Субагенты</b>{SEP}нет"]
     counts = ((ICON[RunState.WORKING], r.agents_working), ("🟡", r.agents_waiting), (ICON[RunState.IDLE], r.agents_idle))
     total = f"{r.agents_total}{'+' if r.agents_more else ''}"
-    lines = [" · ".join([f"🤖 <b>Субагенты {total}</b>", *(f"{icon} {n}" for icon, n in counts if n)])]
+    lines = [SEP.join([f"🤖<b>Субагенты {total}</b>", *(f"{icon}{n}" for icon, n in counts if n)])]
     shown = r.agents[: plan.agent_lines]
     lines += [_agent_line(a, r.now, plan.now_max, plan.agent_cache) for a in shown]
     if r.agents_total > len(shown):
@@ -218,7 +220,7 @@ def _agent_line(a: AgentLine, now: int, now_max: int, cache: bool = True) -> str
     if a.context_percent is not None:
         parts.append(f"ctx {a.context_percent}%")
     if cache and a.cache_permille is not None:
-        parts.append(f"💾 {_cache(a.cache_permille)}")
+        parts.append(f"💾{_cache(a.cache_permille)}")
     if a.state in (RunState.WORKING, RunState.STALLED):
         fragment = _now(a.state, a.activity, now)
         if fragment != DASH and now_max:
@@ -230,7 +232,7 @@ def _agent_line(a: AgentLine, now: int, now_max: int, cache: bool = True) -> str
     if a.compactions:
         parts.append(f"🗜️{a.compactions}")
     nested = "↳ " if a.depth is not None and a.depth >= 2 else ""
-    return f" {nested}{ICON[a.state]} " + " · ".join(parts)
+    return f" {nested}{ICON[a.state]}" + SEP.join(parts)
 
 
 def _summary(s: StatusSummary | None, plan: Plan) -> list[str]:

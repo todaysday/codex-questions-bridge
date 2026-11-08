@@ -40,8 +40,8 @@ def test_root_state_icon_and_what_it_is_waiting_for(state, icon, word):
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1", state, updated=NOW - 5)
     lines = render_status(collect(svc)).splitlines()
-    assert lines[0] == f"{icon} Thread r1"  # the state is the icon only
-    assert (lines[1].endswith(f"💭 {word}")) if word else "💭" not in lines[1]
+    assert lines[0] == f"{icon}Thread r1"  # the state is the icon only
+    assert (lines[1].endswith(f"💭{word}")) if word else "💭" not in lines[1]
 
 
 @pytest.mark.parametrize("quiet,stalled", [(0, False), (599, False), (600, False), (601, True), (3600, True)])
@@ -53,7 +53,7 @@ def test_stalled_boundaries_use_updated_at(quiet, stalled):
     if stalled:
         assert report.quiet_minutes == quiet // 60
         lines = render_status(report).splitlines()
-        assert lines[0] == "🟠 Thread r1" and f"🔄 {'1ч' if quiet == 3600 else f'{quiet // 60}м'}" in lines[1]  # the quiet time
+        assert lines[0] == "🟠Thread r1" and f"🔄{'1ч' if quiet == 3600 else f'{quiet // 60}м'}" in lines[1]  # the quiet time
 
 
 def test_stalled_uses_the_latest_broadcast_and_never_applies_to_waiting_or_idle():
@@ -73,7 +73,7 @@ def test_turn_elapsed_only_for_an_active_thread_and_never_negative():
     src.turn_start = NOW - 754
     src.threads["r1"] = snapshot("r1", R.WORKING, updated=NOW - 5)
     report = collect(svc)
-    assert report.turn_elapsed_s == 754 and "🕒 12м" in render_status(report)
+    assert report.turn_elapsed_s == 754 and "🕒12м" in render_status(report)
     src.threads["r2"] = snapshot("r2", R.IDLE)
     src.activities["r2"] = Activity(False, NOW - 900, NOW - 800, None)
     report = collect(svc, "r2")
@@ -88,7 +88,7 @@ def test_context_uses_the_last_call_and_the_cache_rate_the_whole_session():
     src.threads["r1"] = snapshot("r1", path="/p")
     report = collect(svc)
     assert report.usage.fill_percent == 6 and report.usage.cache_permille == 800
-    assert "\n <b>ctx</b> 29.5k/475k (6%) · 💾 80%\n" in render_status(report)
+    assert "\n <b>ctx</b> 29.5k/475k (6%)<b> · </b>💾80%\n" in render_status(report)
 
 
 def test_the_roots_cwd_reaches_the_report_from_the_thread_snapshot_already_read():
@@ -97,8 +97,8 @@ def test_the_roots_cwd_reaches_the_report_from_the_thread_snapshot_already_read(
     src.threads["r2"] = snapshot("r2")
     report = collect(svc)
     assert report.cwd == "/srv/projects/gh-runner-dispatcher/" and src.calls.count("thread") == 1  # no second read
-    assert render_status(report).splitlines()[:2] == ["⚪ Thread r1", "📁 gh-runner-dispatcher"]
-    assert collect(svc, "r2").cwd is None and render_status(collect(svc, "r2")).splitlines()[0] == "⚪ Thread r2"
+    assert render_status(report).splitlines()[:2] == ["⚪Thread r1", "📁gh-runner-dispatcher"]
+    assert collect(svc, "r2").cwd is None and render_status(collect(svc, "r2")).splitlines()[0] == "⚪Thread r2"
 
 
 def test_usage_edge_cases():
@@ -120,8 +120,8 @@ def test_missing_data_is_a_dash_never_invented():
     src.turn_start = None
     text = render_status(collect(svc))
     lines = text.splitlines()
-    assert lines[0] == "🟢 —"
-    assert lines[1] == "🧠 — · 🔄 now"  # no turn start: no duration
+    assert lines[0] == "🟢—"
+    assert lines[1] == "🧠—<b> · </b>🔄now"  # no turn start: no duration
     assert lines[2] == " <b>ctx</b> —" and "📈" not in text and "снимок" not in text  # no usage: no limits line
     assert "🎯" not in text  # no goal: the line is skipped, not dashed
 
@@ -129,10 +129,10 @@ def test_missing_data_is_a_dash_never_invented():
 def test_unreadable_children_are_a_dash_but_no_children_is_none():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
-    assert "🤖 <b>Субагенты</b> · нет" in render_status(collect(svc))
+    assert "🤖<b>Субагенты</b><b> · </b>нет" in render_status(collect(svc))
     src.fail = False
     report = dataclasses.replace(collect(svc, "r1"), agents_total=None)
-    assert "🤖 <b>Субагенты</b> · —" in render_status(report)
+    assert "🤖<b>Субагенты</b><b> · </b>—" in render_status(report)
 
 
 def test_root_unreadable_raises_and_unknown_source_is_refused():
@@ -179,7 +179,7 @@ def test_subagent_counting_and_the_six_line_cap():
     assert len(report.agents) == 6
     assert [a.state for a in report.agents[:4]] == [R.WORKING, R.WORKING, R.WAITING_INPUT, R.WAITING_APPROVAL]
     text = render_status(report)
-    assert "🤖 <b>Субагенты 11</b> · 🟢 2 · 🟡 2 · ⚪ 7\n" in text
+    assert "🤖<b>Субагенты 11</b><b> · </b>🟢2<b> · </b>🟡2<b> · </b>⚪7\n" in text
     assert sum(x.startswith((" 🟢", " 🟡", " ⚪")) for x in text.splitlines()) == 6
     assert "\n … и ещё 5\n" in text and "+" not in text.split("Субагенты")[1].split("🔛")[0]
     assert len(text.splitlines()) <= 20
@@ -205,16 +205,16 @@ def test_agent_line_label_context_from_broadcast_and_dashes():
     run(live.handle(TokenUsageUpdated("a1", UsageSnapshot(50_000, 200_000, 49_000, 0))))
     lines = render_status(collect(svc)).splitlines()
     agent_lines = [x for x in lines if x.startswith((" 🟢", " 🟡", " ⚪"))]
-    assert any(x.startswith(" 🟢 Lovelace · luna·low · ctx 25%") for x in agent_lines)
-    assert any(x.startswith(" ⚪ luna-high · ") and "ctx" not in x and "—" not in x.split(" · ")[1] for x in agent_lines)
-    assert any(x.startswith(" ⚪ — · gpt-6·low · ") for x in agent_lines)  # no path, nickname or role: a dash, never an id
+    assert any(x.startswith(" 🟢Lovelace<b> · </b>luna low<b> · </b>ctx 25%") for x in agent_lines)
+    assert any(x.startswith(" ⚪luna-high<b> · </b>") and "ctx" not in x and "—" not in x.split("<b> · </b>")[1] for x in agent_lines)
+    assert any(x.startswith(" ⚪—<b> · </b>gpt-6 low<b> · </b>") for x in agent_lines)  # no path, nickname or role: a dash, never an id
 
 
 def test_goal_line_present_and_skipped_when_live_says_none():
     svc, src, live, _ = make()
     src.threads["r1"] = snapshot("r1")
     src.goals["r1"] = GoalSummary("Ship the profile page", "active", 12_300, 50_000)
-    assert "<blockquote expandable>🎯 Ship the profile page</blockquote>\n" in render_status(collect(svc))
+    assert "<blockquote expandable>🎯Ship the profile page</blockquote>\n" in render_status(collect(svc))
     run(live.handle(GoalChanged("r1", False)))
     calls = src.calls.count("goal")
     assert collect(svc).goal is None and src.calls.count("goal") == calls  # no daemon call needed
@@ -289,15 +289,15 @@ def test_zero_counts_are_not_shown_in_the_header():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
     children(src, 4)
-    assert header(collect(svc)) == "🤖 <b>Субагенты 4</b> · ⚪ 4"
+    assert header(collect(svc)) == "🤖<b>Субагенты 4</b><b> · </b>⚪4"
     kids = [dataclasses.replace(k, state=R.NOT_LOADED) for k in src.children["r1"]]
     kids[0] = dataclasses.replace(kids[0], state=R.WORKING)
     src.children["r1"] = tuple(kids)
-    assert header(collect(svc)) == "🤖 <b>Субагенты 4</b> · 🟢 1 · ⚪ 3"
+    assert header(collect(svc)) == "🤖<b>Субагенты 4</b><b> · </b>🟢1<b> · </b>⚪3"
     src.children["r1"] = tuple(dataclasses.replace(k, state=R.WAITING_INPUT) for k in kids)
-    assert header(collect(svc)) == "🤖 <b>Субагенты 4</b> · 🟡 4"
+    assert header(collect(svc)) == "🤖<b>Субагенты 4</b><b> · </b>🟡4"
     src.children["r1"] = ()
-    assert header(collect(svc)) == "🤖 <b>Субагенты</b> · нет"
+    assert header(collect(svc)) == "🤖<b>Субагенты</b><b> · </b>нет"
 
 
 def test_the_cap_counts_and_shows_the_plus_only_in_the_header():
@@ -307,7 +307,7 @@ def test_the_cap_counts_and_shows_the_plus_only_in_the_header():
     src.more = True
     report = collect(svc)
     assert (report.agents_total, report.agents_more) == (300, True)
-    assert header(report) == "🤖 <b>Субагенты 300+</b> · ⚪ 300"
+    assert header(report) == "🤖<b>Субагенты 300+</b><b> · </b>⚪300"
     assert "\n … и ещё 294\n" in render_status(report)
 
 
@@ -334,9 +334,9 @@ def test_title_from_the_agent_path_and_the_depth_prefix():
         snapshot("a3", R.WORKING, parent="r1", nickname="Bob", role="worker", agent_path="//", depth=0),
     )
     text = render_status(collect(svc))
-    assert "\n 🟢 Tl 008 oracle known lifecycle · " in text
-    assert "\n ↳ 🟢 Oracle run lifecycle · " in text
-    assert "\n 🟢 Bob · " in text and "↳ Bob" not in text and "↳ 🟢 Tl" not in text
+    assert "\n 🟢Tl 008 oracle known lifecycle<b> · </b>" in text
+    assert "\n ↳ 🟢Oracle run lifecycle<b> · </b>" in text
+    assert "\n 🟢Bob<b> · </b>" in text and "↳ Bob" not in text and "↳ 🟢Tl" not in text
     assert "/root" not in text and "Faraday" not in text
 
 
@@ -345,4 +345,4 @@ def test_long_title_is_clipped():
     src.threads["r1"] = snapshot("r1")
     src.children["r1"] = (snapshot("a1", parent="r1", agent_path="/root/" + "word_" * 20),)
     line = next(x for x in render_status(collect(svc)).splitlines() if x.startswith(" ⚪"))
-    assert "Word word" in line and "… ·" in line and len(line.split(" · ")[0]) <= 3 + 32
+    assert "Word word" in line and "…<b> · </b>" in line and len(line.split("<b> · </b>")[0]) <= 3 + 32

@@ -59,10 +59,10 @@ def test_subagent_lines_show_context_cache_and_compactions_from_the_rollouts_wit
     env.src.threads["r1"], env.src.children["r1"] = root, kids
     assert len(env.live) == 0  # a fresh Bridge: no broadcast seen yet
     card = env.card()
-    assert " <b>ctx</b> 160k/475k (34%) · 💾 99.4% · 🗜️5\n" in card
+    assert " <b>ctx</b> 160k/475k (34%)<b> · </b>💾99.4%<b> · </b>🗜️5\n" in card
     lines = env.agent_lines()
-    assert " ⚪ A1 · gpt-6·low · ctx 35% · 💾 87% · 1м назад · 🗜️2" in lines  # the compaction count is appended
-    a2 = next(x for x in lines if " A2 " in x)
+    assert " ⚪A1<b> · </b>gpt-6 low<b> · </b>ctx 35%<b> · </b>💾87%<b> · </b>1м назад<b> · </b>🗜️2" in lines  # the compaction count is appended
+    a2 = next(x for x in lines if "A2<b>" in x)
     assert "ctx" not in a2 and "💾" not in a2 and "🗜️" not in a2  # no usage in its rollout, zero compactions: nothing
 
 
@@ -73,9 +73,9 @@ def test_the_rollout_wins_over_the_live_value_which_only_fills_in_where_there_is
     for tid in ("a1", "a2", "a3"):
         run(env.live.handle(TokenUsageUpdated(tid, UsageSnapshot(100_000, 200_000, 10, 10, 1000, 500))))
     lines = env.agent_lines()
-    assert " ctx 35% · 💾 87%" in next(x for x in lines if " A1 " in x)  # the rollout, not the live 50%
-    assert " ctx 50% · 💾 50%" in next(x for x in lines if " A2 " in x)  # unreadable rollout: the live value
-    assert " ctx 50% · 💾 50%" in next(x for x in lines if " A3 " in x)  # no path at all: the live value
+    assert "</b>ctx 35%<b> · </b>💾87%" in next(x for x in lines if "A1<b>" in x)  # the rollout, not the live 50%
+    assert "</b>ctx 50%<b> · </b>💾50%" in next(x for x in lines if "A2<b>" in x)  # unreadable rollout: the live value
+    assert "</b>ctx 50%<b> · </b>💾50%" in next(x for x in lines if "A3<b>" in x)  # no path at all: the live value
     assert env.tail_calls.count("/h/sessions/a1") == 1 and "None" not in env.tail_calls  # only paths that exist are read
 
 
@@ -105,7 +105,7 @@ def test_token_totals_include_more_than_a_thousand_subagents_without_extra_displ
     assert calls == [300, 10000]
     assert report.usage.total_tokens == 100 and report.subagent_tokens == 1205 * 3
     assert not report.subagent_tokens_incomplete and len(report.agents) == 6
-    assert "<b>∑100 (3.6k) · ctx</b>" in render_status(report)
+    assert "🌀<b>∑100 (3.6k) · ctx</b>" in render_status(report)
 
 
 def test_unreadable_or_truncated_subagent_totals_are_marked_incomplete():
@@ -115,7 +115,7 @@ def test_unreadable_or_truncated_subagent_totals_are_marked_incomplete():
     env.src.threads["r1"], env.src.children["r1"] = root, kids
     report = run(env.svc.collect("s1", "r1"))
     assert report.subagent_tokens == 75 and report.subagent_tokens_incomplete
-    assert "<b>∑500 (≥75) · ctx</b>" in render_status(report)
+    assert "🌀<b>∑500 (≥75) · ctx</b>" in render_status(report)
 
 
 def test_archived_subagents_are_included_in_the_token_total_not_the_visible_list():

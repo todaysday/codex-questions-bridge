@@ -342,27 +342,27 @@ Before asking the Status Agent, Bridge collects recent events from the root, act
 
 The context line also shows cumulative tokens for the root and, in parentheses, all its subagents, including archived ones. The subagent sum is marked `≥` if some data is missing or collection reaches its limit (10,000 threads per active or archived list); `—` means no total is available.
 
-Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context, the session-wide cache hit and the compaction count (`🗜️N`, hidden when zero) for the root and for each shown subagent (all read from the session files, so they survive a restart), goal, subagent counts (up to 300
+Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6 high`, `sol 6.1 low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context, the session-wide cache hit and the compaction count (`🗜️N`, hidden when zero) for the root and for each shown subagent (all read from the session files, so they survive a restart), goal, subagent counts (up to 300
 read; at most 6 one-line entries named like the Codex app, working first, then waiting, then recent, then `… и ещё N`),
 The subagent list uses an expandable quotation; its counts remain visible outside. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,
 `правит файлы (N)`, `думает`, `ждёт ответа`, ...), built without an LLM from the kind of the newest item. Command heads are
 redacted and cut at 80 characters, and message text and command output are never read. The goal appears in an expandable quotation, clipped only to fit the space left after the other status details. Two parts from the Status
 Agent follow (about 900 characters): `В процессе` (3-5 lines about the thread as a whole, no per-agent breakdown), then after an empty line `Дальше` (2-4 lines about what remains, only as far as
 the recent reports say so). The message is Telegram HTML, sent when all of it is ready (typing indicator meanwhile) and
-never edited. With `[status] open_link` set, the last line is a link `🔗 Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
+never edited. With `[status] open_link` set, the last line is a link `🔗Открыть в Codex` (status card only; dropped last when the card is too long). A card over 4096 characters shrinks (fewer subagent lines, shorter fragments, no goal), and a
 text Telegram cannot parse is resent as plain text. Example:
 
 ```
-🟢 FoxProfile
-📁 foxprofile-api
-🧠 sol 6.1·low · 🕒 25м · 🔄 now 💭 выполняет: pytest -q
- ctx 160k/475k (34%) · 💾 80% · 🗜️3
-<blockquote expandable>🎯 Ship the profile page</blockquote>
+🟢FoxProfile
+📁foxprofile-api
+🧠sol 6.1 low · 🕒25м · 🔄now 💭выполняет: pytest -q
+ ctx 160k/475k (34%) · 💾80% · 🗜️3
+<blockquote expandable>🎯Ship the profile page</blockquote>
 
-🤖 Субагенты 9 · 🟢 2 · 🟡 1 · ⚪ 6
- 🟢 Oracle run lifecycle · luna·high · ctx 44% · 💾 95% · думает · 🗜️2
- 🟡 Spec review · luna·high · ctx 12% · 💾 91% · ждёт ответа
- ↳ ⚪ Parser · luna·low · 12м назад
+🤖Субагенты 9 · 🟢2 · 🟡1 · ⚪6
+ 🟢Oracle run lifecycle · luna high · ctx 44% · 💾95% · думает · 🗜️2
+ 🟡Spec review · luna high · ctx 12% · 💾91% · ждёт ответа
+ ↳ ⚪Parser · luna low · 12м назад
  … и ещё 6
 
 🔛: Правит тесты статуса.
@@ -371,7 +371,7 @@ text Telegram cannot parse is resent as plain text. Example:
 🔜: прогнать e2e
 <2-4 lines in all>
 
-🔗 Открыть в Codex
+🔗Открыть в Codex
 ```
 
 ### Configuration (`config.toml`)
@@ -404,7 +404,7 @@ text Telegram cannot parse is resent as plain text. Example:
 | `[mcp] project_file_deny_extra` | `[]` | extra name patterns to deny (up to 100, no `/`); the built-in table is never reduced |
 | `[status] timeout_seconds` | 300 | 30..3600 |
 | `[status] slots` | 2 | 1..8, each needs a dispatch rule in PicoClaw |
-| `[status] open_link` | `""` | empty = no link. Otherwise an `https://` URL template (at most 200 printable ASCII characters, no whitespace, a host, `{thread_id}` exactly once, no other braces); the root thread id is percent-encoded into it and the card gets a last line `🔗 Открыть в Codex`. An invalid value stops the start and is never printed. Candidate: `https://chatgpt.com/codex/tasks/{thread_id}`; the exact format for threads on a remote server in the ChatGPT iOS app is unconfirmed. Telegram accepts only http(s) and `tg://` links, so `codex://` cannot be used |
+| `[status] open_link` | `""` | empty = no link. Otherwise an `https://` URL template (at most 200 printable ASCII characters, no whitespace, a host, `{thread_id}` exactly once, no other braces); the root thread id is percent-encoded into it and the card gets a last line `🔗Открыть в Codex`. An invalid value stops the start and is never printed. Candidate: `https://chatgpt.com/codex/tasks/{thread_id}`; the exact format for threads on a remote server in the ChatGPT iOS app is unconfirmed. Telegram accepts only http(s) and `tg://` links, so `codex://` cannot be used |
 | `[questions] agent_scan_seconds` | 20 | 5..600, period of the sweep for agent-message questions (at most 25 roots per sweep) |
 
 Environment: `CQB_TELEGRAM_TOKEN` (always), `CQB_PICO_TOKEN` and `CQB_MCP_TOKEN` (with `[pico]`, must differ),

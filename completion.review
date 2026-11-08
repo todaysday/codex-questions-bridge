@@ -1,5 +1,7 @@
 # Completion review
 
+- Status separators use bold formatting throughout, model and reasoning level use a space, and emoji have no trailing space; updated status rendering checks.
+
 - Registry change detection excludes the weekly limit and write time; the Kyiv clock follows daylight saving time and updates when the registry is written.
 
 - Status evidence is prefetched within the root scope; active histories and recently inactive final messages stay bounded and partial collection is marked.
