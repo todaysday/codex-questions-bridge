@@ -109,8 +109,8 @@ def test_usage_edge_cases():
 
 
 def test_tokens_formatting():
-    assert [tokens(n) for n in (0, 999, 1000, 29_500, 475_000, 1_000_000, 1_250_000)] == [
-        "0", "999", "1k", "29.5k", "475k", "1M", "1.2M"]
+    assert [tokens(n) for n in (0, 999, 1000, 29_500, 475_000, 1_000_000, 1_250_000, 14_500_000_000)] == [
+        "0", "999", "1k", "29.5k", "475k", "1M", "1.2M", "14.5B"]
 
 
 def test_missing_data_is_a_dash_never_invented():

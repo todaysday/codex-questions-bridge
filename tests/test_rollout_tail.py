@@ -43,6 +43,7 @@ def test_newest_token_count_wins_and_fields_are_mapped(home):
     u = read_usage(p, str(home))
     assert (u.context_tokens, u.context_window, u.input_tokens, u.cached_input_tokens) == (29_500, 475_000, 29_000, 23_200)
     assert u.fill_percent == 6 and (u.total_input_tokens, u.total_cached_input_tokens) == (290_000, 232_000)
+    assert u.total_tokens == 29_500 * 9
     assert u.cache_permille == 800  # the whole session, not the latest call (23_200 / 29_000 is 80% here by chance)
     last_only = read_usage(write(home, [token_line(session=None)], "l.jsonl"), str(home))
     assert last_only.cache_permille is None  # no session totals: no figure rather than the last call's

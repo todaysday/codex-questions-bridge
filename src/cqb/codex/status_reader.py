@@ -41,6 +41,12 @@ class DaemonStatusReader:
         return cwd if isinstance(cwd, str) and cwd else None
 
     async def descendants(self, root_id: str, limit: int) -> Descendants | None:
+        return await self._descendants(root_id, limit, archived=False)
+
+    async def archived_descendants(self, root_id: str, limit: int) -> Descendants | None:
+        return await self._descendants(root_id, limit, archived=True)
+
+    async def _descendants(self, root_id: str, limit: int, *, archived: bool) -> Descendants | None:
         """All depths, at most `limit` threads in pages of 100; the ancestor filter is cheap (state db only).
 
         Pages are reduced to compact snapshots at once, so memory is bounded by `limit`. `more` says the
@@ -51,6 +57,8 @@ class DaemonStatusReader:
         for _ in range(-(-limit // PAGE_SIZE)):  # a daemon that keeps sending empty pages cannot loop us
             size = min(PAGE_SIZE, limit - len(threads))
             params: dict[str, Any] = {"ancestorThreadId": root_id, "limit": size, "useStateDbOnly": True}
+            if archived:
+                params["archived"] = True
             if cursor:
                 params["cursor"] = cursor
             result = await self._soft("thread/list", params)

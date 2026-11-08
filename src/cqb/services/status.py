@@ -25,6 +25,10 @@ from cqb.services.live_state import LiveState
 log = logging.getLogger(__name__)
 
 AGENT_FETCH_LIMIT = 300  # three daemon pages; more shows as `300+`
+AGENT_TOTAL_FETCH_LIMIT = 10000
+AGENT_TOTAL_BATCH = 32
+AGENT_TOTAL_ENUM_TIMEOUT = 3
+AGENT_TOTAL_TIMEOUT = 8
 STALL_SECONDS = 600
 LIMITS_TTL = 30
 COLLECT_TIMEOUT = 15  # stats and 'now' lines; the summary has its own, much longer deadline
@@ -41,6 +45,7 @@ class StatusUnavailable(Exception):
 class StatusSource(Protocol):
     async def thread(self, thread_id: str) -> ThreadSnapshot | None: ...
     async def descendants(self, root_id: str, limit: int) -> Descendants | None: ...
+    async def archived_descendants(self, root_id: str, limit: int) -> Descendants | None: ...
     async def activity(self, thread_id: str, with_item: bool) -> Activity | None: ...
     async def goal(self, thread_id: str) -> GoalSummary | None: ...
     async def rate_limits(self) -> RateLimits | None: ...
@@ -71,7 +76,7 @@ class StatusService:
     ) -> None:
         self._source = source
         self._live = live
-        self._tail_usage = tail_usage  # rollout path -> latest usage; for the root and for every shown subagent
+        self._tail_usage = tail_usage  # rollout path -> latest usage
         self._compactions = compactions  # rollout path -> how many times the context was compacted (a grep child, may take a moment)
         self._source_id = source_id
         self._narrator = narrator or NoNarrator()
@@ -123,10 +128,11 @@ class StatusService:
         now = int(self._clock())
         live = self._live.get(root_id)
         skip_goal = live is not None and live.has_goal is False
-        activity, goal, agents, limits, compacted = await asyncio.gather(
+        activity, goal, agents, archived, limits, compacted = await asyncio.gather(
             self._activity(root_id, root.state, turn_needed=True),
             _none() if skip_goal else self._source.goal(root_id),
             self._source.descendants(root_id, AGENT_FETCH_LIMIT),
+            self._archived_agents(root_id),
             self._rate_limits(now),
             self._compacted(root.path),
         )
@@ -137,7 +143,19 @@ class StatusService:
         usage = self._tail_usage(root.path) if root.path else None
         started = activity.started_at if activity and activity.turn_running else None
         active = root.state in (RunState.WORKING, RunState.WAITING_INPUT, RunState.WAITING_APPROVAL)
-        lines, total, working, waiting, idle = await self._agents(agents)
+        all_agents = agents
+        if agents and agents.more:
+            try:
+                async with asyncio.timeout(AGENT_TOTAL_ENUM_TIMEOUT):
+                    all_agents = await self._source.descendants(root_id, AGENT_TOTAL_FETCH_LIMIT) or agents
+            except TimeoutError:
+                all_agents = agents
+        if all_agents:
+            all_agents = Descendants(
+                all_agents.threads + (archived.threads if archived else ()),
+                all_agents.more or archived is None or archived.more,
+            )
+        lines, total, working, waiting, idle, sub_tokens, sub_incomplete = await self._agents(agents, all_agents)
         return StatusReport(
             now=now, title=root.name, state=state, quiet_minutes=quiet, model=root.model, effort=root.effort,
             turn_elapsed_s=max(now - started, 0) if active and started is not None else None,
@@ -145,13 +163,14 @@ class StatusService:
             agents_total=total, agents_more=bool(agents and agents.more),
             agents_working=working, agents_waiting=waiting, agents_idle=idle, agents=lines, limits=limits,
             activity=activity, cwd=root.cwd, compactions=compacted, thread_id=root.thread_id,
+            subagent_tokens=sub_tokens, subagent_tokens_incomplete=sub_incomplete,
         )
 
     async def _agents(
-        self, found: Descendants | None
-    ) -> tuple[tuple[AgentLine, ...], int | None, int, int, int]:
+        self, found: Descendants | None, all_found: Descendants | None
+    ) -> tuple[tuple[AgentLine, ...], int | None, int, int, int, int | None, bool]:
         if found is None:
-            return (), None, 0, 0, 0
+            return (), None, 0, 0, 0, None, True
         threads = found.threads
         working = sum(t.state is RunState.WORKING for t in threads)
         waiting = sum(t.state.is_waiting for t in threads)
@@ -162,7 +181,49 @@ class StatusService:
             asyncio.gather(*(self._rollout_facts(t, sem) for t in ranked)),
         )
         lines = tuple(self._line(t, a, *e) for t, a, e in zip(ranked, activities, extras))
-        return lines, len(threads), working, waiting, len(threads) - working - waiting
+        selected = {t.thread_id: facts[0] for t, facts in zip(ranked, extras)}
+        sub_tokens, incomplete = await self._subagent_tokens(all_found, selected)
+        return lines, len(threads), working, waiting, len(threads) - working - waiting, sub_tokens, incomplete
+
+    async def _subagent_tokens(
+        self, found: Descendants | None, selected: dict[str, UsageSnapshot | None],
+    ) -> tuple[int | None, bool]:
+        if found is None:
+            return None, True
+        total, known, incomplete = 0, 0, found.more
+        unique = {t.thread_id: t for t in found.threads}
+        incomplete |= not selected.keys() <= unique.keys()
+        threads = list(unique.values())
+        try:
+            async with asyncio.timeout(AGENT_TOTAL_TIMEOUT):
+                for offset in range(0, len(threads), AGENT_TOTAL_BATCH):
+                    batch = threads[offset:offset + AGENT_TOTAL_BATCH]
+                    remaining = [t for t in batch if t.thread_id not in selected]
+                    usages = await asyncio.to_thread(
+                        lambda: [self._tail_usage(t.path) if t.path else None for t in remaining]
+                    )
+                    current = dict(zip((t.thread_id for t in remaining), usages))
+                    for thread in batch:
+                        usage = selected.get(thread.thread_id) if thread.thread_id in selected else current[thread.thread_id]
+                        if usage is None or usage.total_tokens is None:
+                            live = self._live.get(thread.thread_id)
+                            if live and live.usage and live.usage.total_tokens is not None:
+                                usage = live.usage
+                        if usage is None or usage.total_tokens is None:
+                            incomplete = True
+                        else:
+                            total += usage.total_tokens
+                            known += 1
+        except TimeoutError:
+            incomplete = True
+        return (total if known or not threads else None), incomplete
+
+    async def _archived_agents(self, root_id: str) -> Descendants | None:
+        try:
+            async with asyncio.timeout(AGENT_TOTAL_ENUM_TIMEOUT):
+                return await self._source.archived_descendants(root_id, AGENT_TOTAL_FETCH_LIMIT)
+        except TimeoutError:
+            return None
 
     async def _rollout_facts(self, t: ThreadSnapshot, sem: asyncio.Semaphore) -> tuple[UsageSnapshot | None, int | None]:
         """Context usage and compaction count of one subagent from its rollout, which survives a Bridge restart.

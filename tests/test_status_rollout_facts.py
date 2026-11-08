@@ -5,7 +5,7 @@ import asyncio
 
 from cqb.codex.events import TokenUsageUpdated
 from cqb.domain.enums import RunState as R
-from cqb.domain.status import UsageSnapshot
+from cqb.domain.status import Descendants, UsageSnapshot
 from cqb.services.live_state import LiveState
 from cqb.services.status import StatusService
 from cqb.telegram.status_view import render_status
@@ -79,14 +79,56 @@ def test_the_rollout_wins_over_the_live_value_which_only_fills_in_where_there_is
     assert env.tail_calls.count("/h/sessions/a1") == 1 and "None" not in env.tail_calls  # only paths that exist are read
 
 
-def test_only_the_shown_subagents_are_read_and_a_failing_counter_shows_nothing():
+def test_all_subagent_usage_is_read_but_compactions_only_for_shown_lines():
     env = Env(counts={"/h/sessions/a1": RuntimeError("boom")})
     paths = {f"a{i}": f"/h/sessions/a{i}" for i in range(1, 10)}
     root, kids = family(**paths)
     env.src.threads["r1"], env.src.children["r1"] = root, kids
     card = env.card()
-    assert len(env.tail_calls) == 6 and len(env.count_calls) == 6  # at most the six lines shown
+    assert len(env.tail_calls) == 9 and len(env.count_calls) == 6
     assert "🗜️" not in card and "Субагенты 9" in card
+
+
+def test_token_totals_include_more_than_a_thousand_subagents_without_extra_display_lines():
+    env = Env()
+    env.src.threads["r1"] = snapshot("r1", path="/root")
+    kids = tuple(snapshot(f"a{i}", R.IDLE, parent="r1", path=f"/a{i}") for i in range(1205))
+    calls = []
+
+    async def descendants(root, limit):
+        calls.append(limit)
+        return Descendants(kids[:limit], len(kids) > limit)
+
+    env.src.descendants = descendants
+    env.svc._tail_usage = lambda path: UsageSnapshot(100, 1000, 10, 0, total_tokens=100 if path == "/root" else 3)
+    report = run(env.svc.collect("s1", "r1"))
+    assert calls == [300, 10000]
+    assert report.usage.total_tokens == 100 and report.subagent_tokens == 1205 * 3
+    assert not report.subagent_tokens_incomplete and len(report.agents) == 6
+    assert "<b>∑100 (3.6k) · ctx</b>" in render_status(report)
+
+
+def test_unreadable_or_truncated_subagent_totals_are_marked_incomplete():
+    env = Env(tails={"/root": UsageSnapshot(100, 1000, 10, 0, total_tokens=500),
+                     "/a1": UsageSnapshot(100, 1000, 10, 0, total_tokens=75)})
+    root, kids = family(r1="/root", a1="/a1", a2="/missing")
+    env.src.threads["r1"], env.src.children["r1"] = root, kids
+    report = run(env.svc.collect("s1", "r1"))
+    assert report.subagent_tokens == 75 and report.subagent_tokens_incomplete
+    assert "<b>∑500 (≥75) · ctx</b>" in render_status(report)
+
+
+def test_archived_subagents_are_included_in_the_token_total_not_the_visible_list():
+    env = Env(tails={"/root": UsageSnapshot(100, 1000, 10, 0, total_tokens=500),
+                     "/a1": UsageSnapshot(100, 1000, 10, 0, total_tokens=75),
+                     "/a2": UsageSnapshot(100, 1000, 10, 0, total_tokens=25)})
+    root, kids = family(r1="/root", a1="/a1", a2="/a2")
+    env.src.threads["r1"] = root
+    env.src.children["r1"] = kids[:1]
+    env.src.archived_children["r1"] = kids[1:]
+    report = run(env.svc.collect("s1", "r1"))
+    assert report.agents_total == 1 and len(report.agents) == 1
+    assert report.subagent_tokens == 100 and not report.subagent_tokens_incomplete
 
 
 def test_without_a_counter_or_with_unreadable_rollouts_the_card_has_no_compaction_marks():

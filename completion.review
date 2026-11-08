@@ -1,5 +1,7 @@
 # Completion review
 
+- Reviewed the cumulative token calculation for all available descendants, including archived threads; incomplete totals are marked and the displayed subagent list remains bounded.
+
 - Saved the topic ID and opening-message ID together, including after a database retry; failed sends leave the message ID empty.
 - Verified with 1443 passing tests; Telegram deployment and existing-message ID import remain pending.
 - Kept the context estimate and observed compaction count separate; made the edit path explicit and ensured cancelled journal readers terminate.

@@ -338,6 +338,8 @@ After a consultant reply, the pinned opening message shows PicoClaw’s estimate
 
 ### `/status` content
 
+The context line also shows cumulative tokens for the root and, in parentheses, all its subagents, including archived ones. The subagent sum is marked `≥` if some data is missing or collection reaches its limit (10,000 threads per active or archived list); `—` means no total is available.
+
 Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context, the session-wide cache hit and the compaction count (`🗜️N`, hidden when zero) for the root and for each shown subagent (all read from the session files, so they survive a restart), goal, subagent counts (up to 300
 read; at most 6 one-line entries named like the Codex app, working first, then waiting, then recent, then `… и ещё N`),
 rate limit. The subagent list uses an expandable quotation; its counts remain visible outside. The `💭` line for the root and the tail of each subagent line say what it does right now (`выполняет: <command head>`,

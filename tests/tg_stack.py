@@ -95,6 +95,7 @@ class StatusSourceStub:
     def __init__(self):
         self.threads: dict[str, ThreadSnapshot] = {}
         self.children: dict[str, tuple[ThreadSnapshot, ...]] = {}
+        self.archived_children: dict[str, tuple[ThreadSnapshot, ...]] = {}
         self.more = False
         self.turn_start: int | None = None
         self.activities: dict[str, Activity] = {}  # thread id -> what its latest turn says; absent = unreadable
@@ -111,6 +112,10 @@ class StatusSourceStub:
     async def descendants(self, root_id, limit):
         self.calls.append("descendants")
         return None if self.fail else Descendants(self.children.get(root_id, ()), self.more)
+
+    async def archived_descendants(self, root_id, limit):
+        self.calls.append("archived_descendants")
+        return None if self.fail else Descendants(self.archived_children.get(root_id, ()), False)
 
     async def activity(self, thread_id, with_item):
         self.calls.append("turn")

@@ -130,6 +130,18 @@ def test_descendants_pages_up_to_the_cap():
     arun(main())
 
 
+def test_archived_descendants_are_fetched_separately():
+    async def main():
+        async with connected_client() as (client, fake):
+            fake.add_thread("r1", NOW)
+            fake.add_thread("active", NOW - 1, parent="r1")
+            fake.add_thread("archived", NOW - 2, parent="r1", archived=True)
+            reader = DaemonStatusReader(client)
+            assert [t.thread_id for t in (await reader.descendants("r1", 100)).threads] == ["active"]
+            assert [t.thread_id for t in (await reader.archived_descendants("r1", 100)).threads] == ["archived"]
+    arun(main())
+
+
 def test_descendants_second_page_failure_keeps_what_was_read():
     class Flaky:
         def __init__(self):
@@ -243,7 +255,7 @@ def test_live_map_is_fed_by_broadcasts_without_subscribing_and_whole_card_uses_o
                 fake.turns["r1"] = [{"id": "t1", "status": "inProgress", "startedAt": int(asyncio.get_running_loop().time())}]
                 report = await svc.collect("local", "r1")
                 text = render_status(report)
-                assert " <b>ctx</b> 51k/200k (26%) · 💾 99.0%" in text  # root: rollout tail
+                assert " <b>∑1 (404k) · ctx</b> 51k/200k (26%) · 💾 99.0%" in text  # root: rollout tail
                 assert " 🟢 Ada · luna·low · ctx 40%" in text  # subagent: broadcast usage
                 assert "🎯 Ship · 10/100\n" in text and "📈 осталось 70% нед." in text
                 assert set(fake.methods()) <= {"thread/read", "thread/list", "thread/goal/get",

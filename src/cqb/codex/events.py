@@ -205,16 +205,18 @@ def run_state(status: dict[str, Any]) -> RunState:
 
 def usage_from_wire(raw: dict[str, Any]) -> UsageSnapshot:
     """thread/tokenUsage/updated payload: `last` (the latest call) gives the context fill; `total` (the whole
-    session) only its input and cached input, for the cache hit rate."""
+    session) provides cumulative tokens and its input and cached input for the cache hit rate."""
     last = raw["last"]
     window = raw.get("modelContextWindow")
     total = raw.get("total") if isinstance(raw.get("total"), dict) else {}
     total_input, total_cached = total.get("inputTokens"), total.get("cachedInputTokens")
+    total_tokens = total.get("totalTokens")
     known = isinstance(total_input, int) and isinstance(total_cached, int)
     return UsageSnapshot(
         int(last["totalTokens"]), int(window) if window else None,
         int(last["inputTokens"]), int(last.get("cachedInputTokens") or 0),
         total_input if known else None, total_cached if known else None,
+        total_tokens if type(total_tokens) is int and total_tokens >= 0 else None,
     )
 
 

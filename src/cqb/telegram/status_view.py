@@ -98,7 +98,7 @@ def render_status(r: StatusReport, open_link: str = "") -> str:
 
 
 def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
-    top = [_title_line(r), _status_line(r), _context(r.usage, r.compactions)]
+    top = [_title_line(r), _status_line(r), _context(r.usage, r.compactions, r.subagent_tokens, r.subagent_tokens_incomplete)]
     if r.goal and plan.goal:
         top.append(_goal(r.goal))
     agents = _agents(r, plan)
@@ -164,14 +164,19 @@ def _compacted(n: int | None) -> str:
     return f" · 🗜️{n}" if n else ""
 
 
-def _context(u: UsageSnapshot | None, compactions: int | None) -> str:
+def _context(u: UsageSnapshot | None, compactions: int | None, subagents: int | None = None,
+             incomplete: bool = False) -> str:
     """` <b>ctx</b> 160k/475k (34%) · 💾 80% · 🗜️5`: starts with one space; the cache and 🗜️ parts are left out when unknown."""
     if u is None:
         return f" <b>ctx</b> {DASH}{_compacted(compactions)}"
+    total = ""
+    if u.total_tokens is not None:
+        children = f"{'≥' if incomplete else ''}{tokens(subagents)}" if subagents is not None else DASH
+        total = f"∑{tokens(u.total_tokens)} ({children}) · "
     window = tokens(u.context_window) if u.context_window else DASH
     fill = f" ({u.fill_percent}%)" if u.fill_percent is not None else ""
     cache = f" · 💾 {_cache(u.cache_permille)}" if u.cache_permille is not None else ""
-    return f" <b>ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}{_compacted(compactions)}"
+    return f" <b>{total}ctx</b> {tokens(u.context_tokens)}/{window}{fill}{cache}{_compacted(compactions)}"
 
 
 def _goal(g: GoalSummary) -> str:
@@ -316,4 +321,8 @@ def tokens(n: int) -> str:
         return str(n)
     if n < 1_000_000:
         return f"{n / 1000:.1f}".removesuffix(".0") + "k"
-    return f"{n / 1_000_000:.1f}".removesuffix(".0") + "M"
+    if n < 1_000_000_000:
+        return f"{n / 1_000_000:.1f}".removesuffix(".0") + "M"
+    if n < 1_000_000_000_000:
+        return f"{n / 1_000_000_000:.1f}".removesuffix(".0") + "B"
+    return f"{n / 1_000_000_000_000:.1f}".removesuffix(".0") + "T"

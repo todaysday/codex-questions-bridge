@@ -48,7 +48,7 @@ class Descendants:
 
 @dataclass(frozen=True, slots=True)
 class UsageSnapshot:
-    """The latest model call: context fill and prompt-cache hit rate (never the cumulative totals)."""
+    """Latest context fill plus cumulative session token usage and prompt-cache totals."""
 
     context_tokens: int
     context_window: int | None
@@ -56,6 +56,7 @@ class UsageSnapshot:
     cached_input_tokens: int
     total_input_tokens: int | None = None  # since the session started (cached tokens are part of the input)
     total_cached_input_tokens: int | None = None
+    total_tokens: int | None = None
 
     @property
     def fill_percent(self) -> int | None:
@@ -155,3 +156,5 @@ class StatusReport:
     cwd: str | None = None  # the root's working directory
     compactions: int | None = None  # how many times the root's context was compacted; None = unknown
     thread_id: str | None = None  # the root thread (the only thing that goes into the open link)
+    subagent_tokens: int | None = None
+    subagent_tokens_incomplete: bool = False

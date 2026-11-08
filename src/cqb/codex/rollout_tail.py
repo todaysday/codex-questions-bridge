@@ -84,10 +84,12 @@ def _last_usage(data: bytes, skip_first: bool) -> UsageSnapshot | None:
             window = info.get("model_context_window")
             total = info.get("total_token_usage") or {}
             total_input = _int(total.get("input_tokens"))
+            total_tokens = _int(total.get("total_tokens"))
             return UsageSnapshot(
                 int(last["total_tokens"]), int(window) if window else None,
                 int(last["input_tokens"]), int(last.get("cached_input_tokens") or 0),
                 total_input, _int(total.get("cached_input_tokens")) if total_input is not None else None,
+                total_tokens if total_tokens is not None and total_tokens >= 0 else None,
             )
         except (ValueError, KeyError, TypeError, AttributeError):
             continue
