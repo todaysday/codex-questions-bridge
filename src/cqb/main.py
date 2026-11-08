@@ -140,7 +140,6 @@ async def run(
         registry = RegistryQuery(
             threads, consultant_dao, question_dao, source_id, config.codex.recency_days, live=live,
             agent_questions=agent_dao,
-            recent_hours=tg.registry_recent_hours,
         )
         present = Presenter(api, tg.rich_messages)
         topics = ControlTopics(present, state, tg.chat_id, tg.control_topic_name)

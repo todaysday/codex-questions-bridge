@@ -7,7 +7,7 @@ import dataclasses
 import html
 
 from cqb.telegram.fmt import BUTTON_TEXT_LIMIT, clip
-from cqb.telegram.models import Bold, Button, Divider, Doc, Para, Row, View
+from cqb.telegram.models import Blank, Bold, Button, Divider, Doc, Para, Row, View
 
 RICH_TEXT_LIMIT = 32768  # characters of text in one rich message
 RICH_BLOCK_LIMIT = 500
@@ -19,7 +19,7 @@ def rich_size(doc: Doc) -> tuple[int, int]:
     chars = blocks = 0
     for b in doc.blocks:
         blocks += 1
-        if isinstance(b, Divider):
+        if isinstance(b, (Divider, Blank)):
             continue
         for p in b.buttons if isinstance(b, Row) else b.parts:
             chars += len(p.text) if isinstance(p, (Bold, Button)) else len(p)
@@ -39,6 +39,8 @@ def to_html(doc: Doc) -> str:
     for b in doc.blocks:
         if isinstance(b, Divider):
             out.append("<hr/>")
+        elif isinstance(b, Blank):
+            out.append("<p>&nbsp;</p>")
         elif isinstance(b, Row):
             for i in range(0, len(b.buttons), ROW_BUTTONS):
                 row = "".join(_button(x) for x in b.buttons[i:i + ROW_BUTTONS])
@@ -95,7 +97,7 @@ def to_view(doc: Doc) -> View:
         pending.clear()
 
     for b in blocks:
-        if isinstance(b, Divider):
+        if isinstance(b, (Divider, Blank)):
             continue
         if isinstance(b, Row):
             flush()

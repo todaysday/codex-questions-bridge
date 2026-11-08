@@ -10,7 +10,7 @@ from cqb.domain.enums import QuestionLifecycle as L
 from cqb.domain.labels import question_label
 from cqb.domain.models import Question, QuestionOption
 from cqb.telegram.fmt import clip
-from cqb.telegram.models import ActionSpec, Bold, Button, Divider, Doc, Para, Row, View
+from cqb.telegram.models import ActionSpec, Blank, Bold, Button, Divider, Doc, Para, Row, View
 from cqb.telegram.render import to_view
 
 ANSWER_LIMIT = 1000
@@ -45,8 +45,8 @@ def render_card(q: Question, thread_name: str, armed: bool = False) -> View:
 def card_doc(q: Question, thread_name: str, armed: bool = False) -> Doc:
     header = card_header(q.display_no, thread_name, _tag(q))
     if q.is_secret:
-        return Doc((header, Para((SECRET_NOTICE,))))
-    blocks: list[Para | Row | Divider] = [header]
+        return Doc((header, Blank(), Para((SECRET_NOTICE,))))
+    blocks: list[Para | Row | Divider | Blank] = [header, Blank()]
     choose = _can_choose(q)
     for n, item in enumerate(q.items, start=1):
         buttons = [option_button(i, "opt", q.root_thread_id, f"{q.question_id}:{i}")
@@ -74,13 +74,15 @@ def _can_choose(q: Question) -> bool:
     return len(q.items) == 1 and q.lifecycle is L.PENDING_CONFIRMED and not q.delivered_to_codex
 
 
-def option_paras(texts: list[str], buttons: list[Button] | None) -> list[Para]:
-    """One paragraph per option, `A. <full text>`, and its letter button right after the text (a tight list when
-    classic). `buttons` is None when nothing can be chosen (anymore)."""
-    return [
-        Para((f"{letter(i)}. {text}", *([buttons[i]] if buttons else [])), glue="\n")
+def option_paras(texts: list[str], buttons: list[Button] | None) -> list[Para | Blank]:
+    """An empty line after the question, then one paragraph per option, `A. <full text>`, and its letter button right
+    after the text (consecutive lines when classic). `buttons` is None when nothing can be chosen (anymore)."""
+    if not texts:
+        return []
+    return [Blank(), *(
+        Para((f"{letter(i)}. {text}", *([buttons[i]] if buttons else [])), glue="\n\n" if i == 0 else "\n")
         for i, text in enumerate(texts)
-    ]
+    )]
 
 
 def status_paras(text: str, divided: bool = False) -> list[Para | Divider]:

@@ -7,7 +7,7 @@ Row markers: ❓ a question is pending, 🟢 the thread is working right now (bo
 from cqb.domain.enums import ConsultantState
 from cqb.services.registry import RegistryPage, RegistryRow
 from cqb.telegram.fmt import BUTTON_TEXT_LIMIT, age, clip, topic_link
-from cqb.telegram.models import ActionSpec, Bold, Button, Divider, Doc, Para, Row, View
+from cqb.telegram.models import ActionSpec, Blank, Bold, Button, Divider, Doc, Para, Row, View
 from cqb.telegram.render import to_view
 from cqb.telegram.status_view import folder_name
 
@@ -36,20 +36,20 @@ def render_registry(page: RegistryPage, chat_id: int, now: int) -> View:
 
 
 def registry_doc(page: RegistryPage, chat_id: int, now: int) -> Doc:
-    """Rich: a title, a counts line, then per thread two paragraphs, `markers <b>name</b> [button]` and
-    `📁 folder · age`, then the page row (◀️ n/total ▶️) and the toggles. Classic: the numbered two-line entries, one
+    """Rich: a title, a counts line, then (after one divider) per thread two paragraphs, `markers <b>name</b> [button]` and
+    `📁 folder · age`, then the page row (◀️ n/total ▶️) and the archive toggle. Classic: the numbered two-line entries, one
     button per keyboard row, and the page in the title. No clock time anywhere: the message carries its own."""
     paged = f" · стр. {page.page + 1}/{page.pages}" if page.pages > 1 else ""
     kind = "Архивные треды Codex" if page.archived else "Треды Codex"
     icon = "📦" if page.archived else "📋"
-    suffix = " · ранее" if page.older else ""
     counts = " · ".join(filter(None, (
         f"{QUESTION_MARK} {page.pending}" if page.pending else "",
         f"{WORKING_MARK} {page.working}" if page.working else "", f"всего {page.total}",
     )))
-    blocks: list[Para | Row | Divider] = [
-        Para((f"{icon} ", Bold(kind), suffix), classic=f"{icon} {kind}{suffix}{paged}"),
+    blocks: list[Para | Row | Divider | Blank] = [
+        Para((f"{icon} ", Bold(kind)), classic=f"{icon} {kind}{paged}"),
         Para((counts,), glue="\n"),
+        Divider(),  # once, under the header block; threads are set apart by an empty line
     ]
     for n, row in enumerate(page.rows, start=1):
         marks = "".join(filter(None, (
@@ -62,17 +62,18 @@ def registry_doc(page: RegistryPage, chat_id: int, now: int) -> Doc:
             f"📁 {clip(folder, FOLDER_LIMIT)}" if folder else "", age(row.thread.updated_at, now),
         )))
         button = _row_button(n, row, chat_id, page.archived)
-        blocks.append(Divider())
+        if n > 1:
+            blocks.append(Blank())
         blocks.append(Para(
             (f"{marks} " if marks else "", Bold(name), *([button] if button else [])),
             classic=f"{n}. {marks + ' ' if marks else ''}{name}",
         ))
         blocks.append(Para((line2,), glue="\n", classic=f"   {line2}"))
     if not page.rows:
-        blocks.append(Para((f"Нет тредов{' ранее' if page.older else ''} за последние {page.recency_days} дн.",)))
+        blocks.append(Para((f"Нет тредов за последние {page.recency_days} дн.",)))
     if nav := _nav_buttons(page):
         blocks.append(Row(nav))
-    blocks.append(Row(_toggle_buttons(page)))
+    blocks.append(Row((_archive_toggle(page),)))
     return Doc(tuple(blocks), per_row=1)
 
 
@@ -90,22 +91,19 @@ def _nav_buttons(page: RegistryPage) -> tuple[Button, ...]:
     """◀️ n/total ▶️: the counter is a disabled in-text button; an arrow only where that page exists."""
     if page.pages <= 1:
         return ()
-    flags = f"{int(page.archived)}:{int(page.older)}"
+    a = int(page.archived)
     buttons: list[Button] = []
     if page.page > 0:
-        buttons.append(Button("◀️", ActionSpec("page", payload=f"{page.page - 1}:{flags}")))
+        buttons.append(Button("◀️", ActionSpec("page", payload=f"{page.page - 1}:{a}")))
     buttons.append(Button(f"{page.page + 1}/{page.pages}", disabled=True))
     if page.has_next:
-        buttons.append(Button("▶️", ActionSpec("page", payload=f"{page.page + 1}:{flags}")))
+        buttons.append(Button("▶️", ActionSpec("page", payload=f"{page.page + 1}:{a}")))
     return tuple(buttons)
 
 
-def _toggle_buttons(page: RegistryPage) -> tuple[Button, ...]:
-    a, o = int(page.archived), int(page.older)
-    return (
-        Button("🕘 Недавние" if page.older else "🕘 Ранее", ActionSpec("page", payload=f"0:{a}:{1 - o}")),
-        Button("📋 Активные" if page.archived else "📦 Архивные", ActionSpec("page", payload=f"0:{1 - a}:{o}")),
-    )
+def _archive_toggle(page: RegistryPage) -> Button:
+    a = int(page.archived)
+    return Button("📋 Активные" if page.archived else "📦 Архивные", ActionSpec("page", payload=f"0:{1 - a}"))
 
 
 def _label(text: str) -> str:

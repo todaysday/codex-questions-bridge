@@ -21,6 +21,8 @@ def run(coro):
 
 def hostile_features(text):
     """What the fake Telegram would build from `text`: nothing may be a tag, a button, an image or a tg:// link."""
+    if not text.strip():
+        return [], [], [], [], []
     f = parse_markdown(text).features
     return f["tags"], f["buttons"], f["images"], f["tg_links"], [u for u in f["links"] if not re.match(r"(?i)https?://", u)]
 
@@ -46,16 +48,40 @@ def test_plain_http_and_https_links_are_kept_and_the_title_is_dropped():
 
 
 @pytest.mark.parametrize("raw,expected", [
-    ("![alt text](https://x.org/a.png)", "alt text"),
-    ("![](https://x.org/a.png)", ""),
-    ("before ![a](tg://photo?id=1) after", "before a after"),
-    ("![ref image][r]\n\n[r]: https://x.org/a.png", "ref image\n\n[r]: https://x.org/a.png"),
+    ("![alt text](https://x.org/a.png)", "[🖼 alt text](https://x.org/a.png)"),
+    ("![](https://x.org/a.png)", "[🖼](https://x.org/a.png)"),
+    ("![a  b](HTTP://X.org/p?a=1&b=2 \"title\")", "[🖼 a b](HTTP://X.org/p?a=1&b=2)"),
+    ("before ![a](http://x.org/i.jpg) after", "before [🖼 a](http://x.org/i.jpg) after"),
+    ("![a](tg://photo?id=1)", "a"), ("![a](javascript:alert(1))", "a"), ("![a](data:image/png;base64,AAAA)", "a"),
+    ("![a](file:///etc/passwd)", "a"), ("![a](//x.org/i.png)", "a"), ("![a](/rel.png)", "a"), ("![a]()", "a"),
     ("![ ](tg://emoji?id=5368324170671202286)", ""),
     ("![22:45 tomorrow](tg://time?unix=1647531900&format=wDT)", "22:45 tomorrow"),
-    ("!![x](y)", "!x"),
+    ("![ref image][r]\n\n[r]: https://x.org/a.png", "[🖼 ref image][r]\n\n[r]: https://x.org/a.png"),
+    ("!![x](y)", "!x"), ("![x](https://x.org/" + "a" * 1980 + ")", "[🖼 x](https://x.org/" + "a" * 1980 + ")"),
+    ("![x](https://x.org/" + "a" * 2100 + ")", "x"),  # a very long address is capped: the label stays
+    # an image inside a link: one link, to the page when that is http(s), else to the image
+    ("[![alt](https://i.org/x.png)](https://page.org/p)", "[🖼 alt](https://page.org/p)"),
+    ("[![alt](https://i.org/x.png)](javascript:x)", "[🖼 alt](https://i.org/x.png)"),
+    ("[![alt](tg://photo?id=1)](tg://user?id=1)", "alt"),
+    # raw HTML media and links with an http(s) address become links, anything else is just its label
+    ('<img src="https://x.org/a.png?a=1&amp;b=2" alt="Cat [1]">', "[🖼 Cat (1)](https://x.org/a.png?a=1&b=2)"),
+    ("<img src='https://x.org/a.png'/>", "[🖼](https://x.org/a.png)"), ("<IMG SRC=https://x.org/a.png>", "[🖼](https://x.org/a.png)"),
+    ('<img src="data:image/png;base64,AA" alt="x">', "x"), ('<img src="tg://photo?id=1">', ""), ("<img>", ""),
+    ('<a href="https://x.org">click</a>', "[click](https://x.org)"), ('<a href="javascript:x">click</a>', "click"),
+    ('<a href="tg://user?id=1">me</a>', "me"), ('<a href="https://x.org"></a>', "[https://x.org](https://x.org)"),
+    ('<video src="https://v.org/a.mp4"></video>', "[🔗 video](https://v.org/a.mp4)"),
+    ('<tg-document src="https://d.org/a.zip"></tg-document>', "[🔗 tg-document](https://d.org/a.zip)"),
+    ('<audio src="javascript:x"></audio>', ""),
 ])
-def test_images_and_media_become_their_alt_text(raw, expected):
-    assert clean_markdown(raw) == expected
+def test_images_and_media_become_links_when_http_else_their_label(raw, expected):
+    clean = clean_markdown(raw)
+    assert clean == expected
+    assert hostile_features(clean) == ([], [], [], [], [])  # and none of it is an image, tag or non-http link
+
+
+def test_no_image_syntax_survives_anywhere():
+    out = clean_markdown("![a](https://x.org/1.png) ![b](tg://photo?id=1) [![c](https://x.org/2.png)](https://p.org) <img src=\"https://x.org/3.png\">")
+    assert "![" not in out and "<img" not in out and out.count("[🖼") == 3
 
 
 @pytest.mark.parametrize("raw", [

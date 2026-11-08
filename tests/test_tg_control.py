@@ -214,7 +214,7 @@ def test_unauthorized_input_never_reaches_services(conn):
             fake.push_message("/threads", st.control_topic, user_id=STRANGER)
             fake.push_message("/questions", topic, user_id=STRANGER)
             await st.pump()
-            assert st.relay.got == [] and st.inventory.polls == 0 and st.publisher.view() == (0, False, False)
+            assert st.relay.got == [] and st.inventory.polls == 0 and st.publisher.view() == (0, False)
             assert fake.callback_answers == []  # strangers get no confirmation at all
             assert st.router.rejected == 9
     run(main())

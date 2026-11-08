@@ -453,3 +453,12 @@ def test_card_survives_a_deleted_message_and_a_stale_key_heals(conn):
             await st.settle()
             assert "Кнопка устарела" in toasts(st)[-1] and st.fake.button(old, "A")
     run(main())
+
+
+def test_card_spacing_agent_card_has_an_empty_line_after_the_header_and_before_the_options(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox")) as st:
+            [aqid] = await posted(st, Q1)
+            text = text_of(st, aqid)
+            assert text.startswith("❓ Q1 · Fox\n\nWhere to store the settings?\n\nA. Existing table\nB. Separate table\n\n")
+    run(main())

@@ -312,8 +312,8 @@ class Router:
             case "create":
                 return await self._create(a.root_thread_id or "")
             case "page":
-                page, archived, older = ((a.payload or "") + "::").split(":")[:3]
-                self._publisher.set_view(int(page or 0), archived == "1", older == "1")
+                page, _, archived = (a.payload or "0:0").partition(":")
+                self._publisher.set_view(int(page), archived == "1")
                 await self._publisher.refresh(force=True)  # edits the same message
                 return Reply()
             case "opt":

@@ -120,23 +120,23 @@ def test_paging_edits_the_same_message_and_the_page_is_remembered(conn):
             click(st, msg, "▶️")
             await st.pump()  # no settle: the page switch itself edits the message
             assert "Thread 05" in fake.messages[msg]["text"] and st.registry_message == msg
-            assert st.state.get("registry.view") == "1:0:0" and st.publisher.view() == (1, False, False)
+            assert st.state.get("registry.view") == "1:0" and st.publisher.view() == (1, False)
             assert len(fake.methods("sendMessage")) == sent_before and fake.messages[msg]["edits"] == 1
             await st.settle()
             assert st.registry_message == msg
             again = Stack(conn, fake)  # restart: the page comes from bot_state
             await again.api.start()
-            assert again.publisher.view() == (1, False, False)
+            assert again.publisher.view() == (1, False)
             await again.publisher.refresh(force=True)
             assert "Thread 05" in fake.messages[msg]["text"] and "Thread 00" not in fake.messages[msg]["text"]
             await again.api.close()
             click(st, msg, "◀️")
             await st.pump()
-            assert "Thread 00" in fake.messages[msg]["text"] and st.publisher.view() == (0, False, False)
+            assert "Thread 00" in fake.messages[msg]["text"] and st.publisher.view() == (0, False)
             # a page that no longer exists falls back to the first one
             st.publisher.set_view(9, False)
             await st.publisher.refresh()
-            assert st.publisher.view() == (0, False, False) and "Thread 00" in fake.messages[msg]["text"]
+            assert st.publisher.view() == (0, False) and "Thread 00" in fake.messages[msg]["text"]
     run(main())
 
 

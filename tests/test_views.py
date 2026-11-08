@@ -47,9 +47,9 @@ def test_deep_link_format():
     assert topic_link(-12345, 3) is None and topic_link(123, 3) is None
 
 
-def reg(rows, p=0, pages=1, archived=False, older=False, **counts):
+def reg(rows, p=0, pages=1, archived=False, **counts):
     nxt = p + 1 < pages
-    return RegistryPage(tuple(rows), p, nxt, archived, 30, pages, older, counts.get("pending", 0),
+    return RegistryPage(tuple(rows), p, nxt, archived, 30, pages, counts.get("pending", 0),
                         counts.get("working", 0), counts.get("total", len(rows)))
 
 
@@ -71,7 +71,7 @@ def test_registry_page_text_and_buttons():
     opens = {b.text: b.url for b in buttons(view) if b.url}
     assert opens["2. 💬 Открыть"] == "https://t.me/c/1234567890/55"
     assert [b.text for b in view.keyboard[-2]] == ["▶️"]  # the counter is rich only
-    assert [b.text for b in view.keyboard[-1]] == ["🕘 Ранее", "📦 Архивные"]  # no refresh button
+    assert [b.text for b in view.keyboard[-1]] == ["📦 Архивные"]  # no refresh button, no recent/earlier toggle
     create = next(b for b in buttons(view) if b.text.startswith("1. ➕"))
     assert create.action == ActionSpec("create", "thread-0001")
     assert not any(b.action and b.action.action in ("status", "refresh") for b in buttons(view))
@@ -94,19 +94,19 @@ def test_archived_row_without_consultant_has_no_buttons_and_no_empty_keyboard_ro
     assert len(view.keyboard) == 1 and all(len(r) > 0 for r in view.keyboard)  # only the toggles
 
 
-def test_registry_pagination_and_toggles():
+def test_registry_pagination_and_the_archive_toggle():
     middle = render_registry(reg([row(1)], p=2, pages=5), CHAT, NOW)
     nav = {b.text: b.action for b in middle.keyboard[-2]}
-    assert nav["◀️"].payload == "1:0:0" and nav["▶️"].payload == "3:0:0"
+    assert nav["◀️"].payload == "1:0" and nav["▶️"].payload == "3:0" and set(nav) == {"◀️", "▶️"}  # the counter is rich only
     toggles = {b.text: b.action for b in middle.keyboard[-1]}
-    assert toggles["🕘 Ранее"].payload == "0:0:1" and toggles["📦 Архивные"].payload == "0:1:0"
-    arch = render_registry(reg([row(1)], archived=True, older=True), CHAT, NOW)
-    assert arch.text.startswith("📦 Архивные треды Codex · ранее")
+    assert list(toggles) == ["📦 Архивные"] and toggles["📦 Архивные"].payload == "0:1"
+    arch = render_registry(reg([row(1)], archived=True), CHAT, NOW)
+    assert arch.text.startswith("📦 Архивные треды Codex") and "ранее" not in arch.text
     assert not any("Создать" in b.text for b in buttons(arch))
-    assert [(b.text, b.action.payload) for b in arch.keyboard[-1]] == [("🕘 Недавние", "0:1:0"), ("📋 Активные", "0:0:1")]
-    assert "Нет тредов ранее" in render_registry(reg([], older=True), CHAT, NOW).text
+    assert [(b.text, b.action.payload) for b in arch.keyboard[-1]] == [("📋 Активные", "0:0")]
+    assert "Нет тредов" in render_registry(reg([]), CHAT, NOW).text
     only = render_registry(reg([row(1)]), CHAT, NOW)  # one page: no page row at all
-    assert [[b.text for b in r] for r in only.keyboard][-2:] == [["1. ➕ Создать консультанта"], ["🕘 Ранее", "📦 Архивные"]]
+    assert [[b.text for b in r] for r in only.keyboard][-2:] == [["1. ➕ Создать консультанта"], ["📦 Архивные"]]
 
 
 def test_registry_limits_with_hostile_names():
@@ -234,3 +234,24 @@ def test_card_header_has_a_state_tag_only_when_not_pending():
     stale = render_card(q(lifecycle=L.EXPIRED_OR_STALE), "T").header
     assert done.endswith("· ✅ отвечено") and elsewhere.endswith("· отвечено в другом месте") and stale.endswith("· устарел")
     assert render_card(q(lifecycle=L.DECISION_STAGED, staged={"a": ("A",)}), "T").header == "❓ Q3 · T"
+
+
+def test_card_spacing_classic_and_rich_one_empty_line_after_the_header_and_before_the_options():
+    from cqb.telegram.card_view import card_doc
+    from cqb.telegram.render import to_html
+    v = render_card(q(), "FoxProfile")
+    assert v.header == "❓ Q3 · FoxProfile"
+    assert v.body.startswith("Storage: Where store profile settings?\n\nA. Existing table — reuse\nB. Separate table\n\n")  # options tight
+    assert v.text.startswith("❓ Q3 · FoxProfile\n\nStorage:")
+    keyed = card_doc(q(), "FoxProfile").mapped(lambda b: dataclasses.replace(b, callback_data="k:1") if b.action else b)
+    html = to_html(keyed)
+    assert html.count("<p>&nbsp;</p>") == 2 and "</p><p>&nbsp;</p><p>Storage:" in html and "settings?</p><p>&nbsp;</p><p>A. " in html
+    assert "</tg-button></p><p>B. Separate" in html  # no blank between options
+    secret = render_card(q(is_secret=True, items=()), "FoxProfile")
+    assert secret.text == f"❓ Q3 · FoxProfile\n\n{SECRET_NOTICE}"
+    two = tuple(QuestionItem(str(i), "", f"Q{i}?", False, (QuestionOption("X"),)) for i in range(2))
+    assert render_card(q(items=two), "T").body.startswith("1. Q0?\n\nA. X\n\n2. Q1?\n\nA. X")
+    items = (QuestionItem("a", "", "Name?", True, ()),)
+    assert render_card(q(items=items), "T").body.startswith("Name?\n\n")  # the status line follows, still one empty line
+    bound = card_doc(q(items=items), "T").mapped(lambda b: dataclasses.replace(b, callback_data="k:1") if b.action else b)
+    assert to_html(bound).count("<p>&nbsp;</p>") == 1  # only after the header: no options, no second empty line

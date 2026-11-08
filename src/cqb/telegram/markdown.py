@@ -7,12 +7,15 @@ tables, plain http(s) links, quotes) and removes the rest:
 
 - control and bidirectional-override characters are dropped;
 - every `<` becomes `&lt;` (a literal `＜` inside code, where entities are not decoded): there is no raw HTML at all;
-- images (`![alt](url)`, `![alt][ref]`) become their alt text;
-- a link keeps only an http(s) address (an allow-list: `tg://`, `javascript:`, `data:`, `#anchor`, ... drop the link and
+- an image (`![alt](url)`, `<img src=...>`) becomes a plain link `[🖼 alt](url)` when its address is http(s), else its alt
+  text; `<a href=...>` and other media tags with an http(s) src/href become `[label](url)` too (the owner can open
+  what the model wanted to show, nothing is embedded);
+- a link keeps only an http(s) address of a sane length (an allow-list: `tg://`, `javascript:`, `data:`, `#anchor`, ... drop the link and
   keep its text), reference definitions with another scheme are removed, a bare `tg://` is broken up;
 - a `$` outside code is escaped so prices are not read as formulas.
 """
 
+import html as _html
 import re
 import unicodedata
 
@@ -23,9 +26,17 @@ CUT = "\n\n…[ответ обрезан]"
 _DROPPED = {0x2028: "\n", 0x2029: "\n"}
 _FORMAT_DROP = {*range(0x202A, 0x202F), *range(0x2066, 0x206A), 0x200E, 0x200F, 0x061C, 0xFEFF}
 # Every repetition is bounded, so hostile input (`![![![...`) cannot make the patterns quadratic.
-_DEST = r"\(((?:[^()\n]|\([^()\n]{0,300}\)){0,1000})\)"  # a link destination, one level of nested parentheses
+MAX_URL = 2000  # a longer address is dropped, the label stays
+_DEST = r"\(((?:[^()\n]|\([^()\n]{0,300}\)){0,2400})\)"  # a link destination, one level of nested parentheses
 _INLINE_IMAGE = re.compile(r"!\[([^\]\n]{0,300})\]" + _DEST)
-_REF_IMAGE = re.compile(r"!\[([^\]\n]{0,300})\]\[[^\]\n]{0,100}\]")
+_LINKED_IMAGE = re.compile(r"\[!\[([^\]\n]{0,300})\]" + _DEST + r"\]" + _DEST)
+_REF_IMAGE = re.compile(r"!\[([^\]\n]{0,300})\]\[([^\]\n]{0,100})\]")
+_ATTR = r"""\b{}\s*=\s*(?:"([^"]{{0,2500}})"|'([^']{{0,2500}})'|([^\s"'<>=`]{{1,2500}}))"""
+_SRC, _HREF, _ALT = (re.compile(_ATTR.format(n), re.I) for n in ("src", "href", "alt"))
+_HTML_IMG = re.compile(r"<img\b([^<>]{0,5000})>", re.I)
+_HTML_MEDIA = re.compile(r"<(video|audio|source|iframe|embed|tg-document)\b([^<>]{0,5000})>", re.I)
+_HTML_MEDIA_END = re.compile(r"</(?:video|audio|iframe|embed|tg-document)\s*>", re.I)
+_HTML_LINK = re.compile(r"<a\b([^<>]{0,5000})>([^<]{0,300})</a\s*>", re.I)
 _BANG = re.compile(r"!(?=\[)")
 _LINK = re.compile(r"\[([^\]\n]{0,300})\]" + _DEST)
 _DEFINITION = re.compile(r"^ {0,3}\[[^\]\n]+\]:[ \t]*(\S*).*$", re.MULTILINE)
@@ -38,8 +49,12 @@ _DOLLAR = re.compile(r"(?<!\\)\$")
 
 def clean_markdown(text: str) -> str:
     text = _controls(text[: LIMIT * MAX_PARTS])  # more than that is cut later anyway; this bounds the work
-    text = _INLINE_IMAGE.sub(lambda m: m.group(1), text)
-    text = _REF_IMAGE.sub(lambda m: m.group(1), text)
+    text = _HTML_IMG.sub(_html_image, text)
+    text = _HTML_MEDIA_END.sub("", _HTML_MEDIA.sub(_html_media, text))
+    text = _HTML_LINK.sub(_html_link, text)
+    text = _LINKED_IMAGE.sub(_linked_image, text)
+    text = _INLINE_IMAGE.sub(lambda m: _image(m.group(1), m.group(2)), text)
+    text = _REF_IMAGE.sub(lambda m: f"[{_label('🖼', m.group(1))}][{m.group(2)}]", text)
     text = _BANG.sub("", text)
     text = _LINK.sub(_link, text)
     text = _DEFINITION.sub(lambda m: m.group(0) if _http(m.group(1)) else "", text)
@@ -87,7 +102,43 @@ def _controls(text: str) -> str:
 def _http(dest: str) -> str | None:
     token = dest.strip().split(None, 1)[0] if dest.strip() else ""
     token = token.lstrip("<").rstrip(">")
-    return token if _HTTP.fullmatch(token) else None
+    return token if len(token) <= MAX_URL and _HTTP.fullmatch(token) else None
+
+
+def _label(icon: str, alt: str) -> str:
+    alt = " ".join(alt.replace("[", "(").replace("]", ")").split())
+    return f"{icon} {alt}" if alt else icon
+
+
+def _image(alt: str, dest: str) -> str:
+    """`[🖼 alt](url)` for an http(s) address, else just the alt text."""
+    url = _http(dest)
+    return f"[{_label('🖼', alt)}]({url})" if url else alt
+
+
+def _linked_image(m: re.Match[str]) -> str:
+    """`[![alt](img)](page)`: one link to the page when it is http(s), else the image's own link."""
+    return _image(m.group(1), m.group(3) if _http(m.group(3)) else m.group(2))
+
+
+def _attr(pattern: re.Pattern[str], attrs: str) -> str:
+    m = pattern.search(attrs)
+    return _html.unescape(next((g for g in m.groups() if g is not None), "")) if m else ""
+
+
+def _html_image(m: re.Match[str]) -> str:
+    return _image(_attr(_ALT, m.group(1)), _attr(_SRC, m.group(1)))
+
+
+def _html_media(m: re.Match[str]) -> str:
+    url = _http(_attr(_SRC, m.group(2)))
+    return f"[{_label('🔗', m.group(1).lower())}]({url})" if url else ""
+
+
+def _html_link(m: re.Match[str]) -> str:
+    url = _http(_attr(_HREF, m.group(1)))
+    label = " ".join(m.group(2).replace("[", "(").replace("]", ")").split())
+    return f"[{label or url}]({url})" if url else label
 
 
 def _link(m: re.Match[str]) -> str:

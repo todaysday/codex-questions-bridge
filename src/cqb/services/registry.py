@@ -32,8 +32,7 @@ class RegistryPage:
     archived: bool
     recency_days: int
     pages: int = 1  # how many pages the current list has (at least 1)
-    older: bool = False  # the list of threads that are not relevant now
-    pending: int = 0  # threads with a pending question, of the whole archive state (both lists)
+    pending: int = 0  # threads with a pending question, of the whole list
     working: int = 0
     total: int = 0
 
@@ -49,7 +48,6 @@ class RegistryQuery:
         clock: Callable[[], float] = time.time,
         live: LiveState | None = None,
         agent_questions: AgentQuestionDao | None = None,
-        recent_hours: int = 24,
     ) -> None:
         self._threads = threads
         self._consultants = consultants
@@ -59,35 +57,25 @@ class RegistryQuery:
         self._clock = clock
         self._live = live
         self._agent_questions = agent_questions
-        self._recent = recent_hours * 3600
 
     def is_root(self, thread_id: str) -> bool:
         thread = self._threads.get(self._source, thread_id)
         return thread is not None and thread.is_root
 
-    def page(self, page: int, page_size: int, archived: bool = False, older: bool | None = None) -> RegistryPage:
-        """Roots (never nested workers) in the recency window: questions first, then working, then by activity.
-
-        `older` None lists every root; False only the relevant ones (a pending question, working, a consultant, or
-        updated within `recent_hours`); True the others."""
+    def page(self, page: int, page_size: int, archived: bool = False) -> RegistryPage:
+        """Roots (never nested workers) in the recency window: questions first, then working, then by activity."""
         page = max(page, 0)
         state = ArchiveState.ARCHIVED if archived else ArchiveState.ACTIVE
-        now = int(self._clock())
-        since = now - self._recency_days * 86400
+        since = int(self._clock()) - self._recency_days * 86400
         roots = self._threads.list_roots(self._source, state, MAX_ROOTS, 0, since)  # updated_at desc, id
-        everything = sorted(self._rows(roots), key=lambda r: (not r.pending_questions, not r.working))  # stable
-        rows = everything if older is None else [r for r in everything if self._relevant(r, now) is not older]
+        rows = sorted(self._rows(roots), key=lambda r: (not r.pending_questions, not r.working))  # stable
         start = page * page_size
         return RegistryPage(
             rows=tuple(rows[start:start + page_size]), page=page, has_next=len(rows) > start + page_size,
             archived=archived, recency_days=self._recency_days, pages=max(-(-len(rows) // page_size), 1),
-            older=bool(older), pending=sum(1 for r in everything if r.pending_questions),
-            working=sum(1 for r in everything if r.working), total=len(everything),
+            pending=sum(1 for r in rows if r.pending_questions), working=sum(1 for r in rows if r.working),
+            total=len(rows),
         )
-
-    def _relevant(self, row: RegistryRow, now: int) -> bool:
-        return bool(row.pending_questions or row.working or row.consultant_state is not None
-                    or row.thread.updated_at >= now - self._recent)
 
     def describe(self, root_thread_id: str) -> RegistryRow | None:
         thread = self._threads.get(self._source, root_thread_id)

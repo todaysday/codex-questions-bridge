@@ -141,19 +141,25 @@ class Divider:
 
 
 @dataclass(frozen=True, slots=True)
+class Blank:
+    """One empty line between blocks (rich: an empty paragraph). The classic text already separates its paragraphs
+    with a blank line wherever it is wanted: nothing."""
+
+
+@dataclass(frozen=True, slots=True)
 class Doc:
     """What a view wants to say, neutral between rich messages and the classic text + inline keyboard.
 
     `per_row`: how many in-line buttons share one classic keyboard row."""
 
-    blocks: tuple[Para | Row | Divider, ...]
+    blocks: tuple[Para | Row | Divider | Blank, ...]
     per_row: int = 5
 
     def mapped(self, fn: Callable[[Button], Button]) -> "Doc":
         """The same document with every button replaced by `fn(button)` (binding callback ids)."""
-        blocks: list[Para | Row | Divider] = []
+        blocks: list[Para | Row | Divider | Blank] = []
         for b in self.blocks:
-            if isinstance(b, Divider):
+            if isinstance(b, (Divider, Blank)):
                 blocks.append(b)
             elif isinstance(b, Row):
                 blocks.append(Row(tuple(fn(x) for x in b.buttons)))
@@ -167,11 +173,13 @@ class Doc:
         return hashlib.sha1(raw.encode()).hexdigest()
 
 
-def _stable(block: "Para | Row | Divider") -> object:
+def _stable(block: "Para | Row | Divider | Blank") -> object:
     def one(b: Button) -> tuple[object, ...]:
         return (b.text, b.action, b.url, b.style, b.disabled)
     if isinstance(block, Divider):
         return "---"
+    if isinstance(block, Blank):
+        return "blank"
     if isinstance(block, Row):
         return tuple(one(b) for b in block.buttons)
     return (block.glue, block.classic, tuple(one(p) if isinstance(p, Button) else p for p in block.parts))

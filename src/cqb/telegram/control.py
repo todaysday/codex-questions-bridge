@@ -85,7 +85,7 @@ class RegistryPublisher:
         chat_id: int,
         *,
         interval: float,
-        rows: int = 8,
+        rows: int = 10,
         safety: float = SAFETY_SECONDS,
         clock: Callable[[], float] = time.time,
     ) -> None:
@@ -109,13 +109,13 @@ class RegistryPublisher:
     def message_id(self) -> int | None:
         return self._state.get_int("registry.message_id")
 
-    def view(self) -> tuple[int, bool, bool]:
-        """(page, archived, older) the pinned message currently shows; remembered across restarts."""
-        page, archived, older = ((self._state.get("registry.view") or "") + "::").split(":")[:3]
-        return (int(page) if page.isdigit() else 0), archived == "1", older == "1"
+    def view(self) -> tuple[int, bool]:
+        """(page, archived) the pinned message currently shows; remembered across restarts."""
+        page, archived, *_ = ((self._state.get("registry.view") or "") + "::").split(":")
+        return (int(page) if page.isdigit() else 0), archived == "1"
 
-    def set_view(self, page: int, archived: bool, older: bool = False) -> None:
-        self._state.set("registry.view", f"{max(page, 0)}:{int(archived)}:{int(older)}")
+    def set_view(self, page: int, archived: bool) -> None:
+        self._state.set("registry.view", f"{max(page, 0)}:{int(archived)}")
 
     def request_refresh(self, force: bool = False) -> None:
         """Marks the message dirty. Any number of marks before the next pass cause at most one edit."""
@@ -156,11 +156,11 @@ class RegistryPublisher:
 
     async def _write(self, force: bool, rich: bool) -> bool:
         now = int(self._clock())
-        page_no, archived, older = self.view()
-        page = self._query.page(page_no, self._rows, archived, older)
+        page_no, archived = self.view()
+        page = self._query.page(page_no, self._rows, archived)
         if not page.rows and page_no > 0:
-            self.set_view(0, archived, older)
-            page = self._query.page(0, self._rows, archived, older)
+            self.set_view(0, archived)
+            page = self._query.page(0, self._rows, archived)
         doc = registry_doc(page, self._chat_id, now)
         digest = doc.fingerprint() + ("+rich" if rich else "")
         message_id = self.message_id

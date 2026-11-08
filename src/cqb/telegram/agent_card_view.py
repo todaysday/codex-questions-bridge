@@ -7,7 +7,7 @@ from cqb.telegram.card_view import (
     ARMED_HINT, DISCUSS_HINT, TAG_ANSWERED, TAG_ELSEWHERE, TAG_STALE, card_header, confirm_row, join_lines, option_button,
     option_paras, status_paras, text_row,
 )
-from cqb.telegram.models import Divider, Doc, Para, Row, View
+from cqb.telegram.models import Blank, Divider, Doc, Para, Row, View
 from cqb.telegram.render import to_view
 
 
@@ -22,8 +22,10 @@ def agent_card_doc(q: AgentQuestion, thread_name: str, armed: bool = False) -> D
     can_choose = q.is_open and q.answerable and q.sent_at is None and q.staged is None
     buttons = [option_button(i, "aopt", root, f"{qid}:{i}") for i in range(len(q.options))] if can_choose else None
     closing = q.state in (S.ANSWERED, S.STALE) or q.sent_at is not None
-    blocks: list[Para | Row | Divider] = [header, Para((q.title,)), *option_paras(list(q.options), buttons),
-                                          *status_paras(_status(q, armed), divided=closing)]
+    blocks: list[Para | Row | Divider | Blank] = [
+        header, Blank(), Para((q.title,)), *option_paras(list(q.options), buttons),
+        *status_paras(_status(q, armed), divided=closing),
+    ]
     if can_choose:
         blocks.append(text_row(armed, "aother", root, qid))
     elif q.is_open and q.answerable and q.sent_at is None:  # staged: send or cancel

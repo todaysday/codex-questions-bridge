@@ -229,7 +229,10 @@ def test_rich_question_card_layout_and_flow_to_a_delivered_answer(conn):
             fake = st.fake
             assert not fake.methods("sendMessage") or all("Q1" not in p["text"] for p in fake.methods("sendMessage"))
             html = fake.messages[msg]["rich"]
-            assert html.startswith("<p>❓ <b>Q1</b> · Fox &lt;b&gt;&amp;&lt;/b&gt;</p><p>Storage:")  # no clock time, its own paragraph
+            # no clock time; the header is its own paragraph, then ONE empty line, the question, ONE empty line, the options
+            assert html.startswith("<p>❓ <b>Q1</b> · Fox &lt;b&gt;&amp;&lt;/b&gt;</p><p>&nbsp;</p><p>Storage:")
+            assert "settings?</p><p>&nbsp;</p><p>A. Existing table" in html and html.count("<p>&nbsp;</p>") == 2
+            assert "Ответить A</tg-button></p><p>B. Separate" in html  # the options themselves are consecutive lines
             assert "<p>Storage: Where &lt;store&gt; profile &amp; settings?</p>" in html
             assert re.search(r'<p>A\. Existing table — no migration <tg-button type="callback_data" style="primary" data="a:\w+">Ответить A</tg-button></p>', html)
             assert re.search(r'<p>B\. Separate &lt;table&gt; <tg-button type="callback_data" style="primary" data="a:\w+">Ответить B</tg-button></p>', html)
@@ -392,6 +395,7 @@ def test_agent_card_rich_flow_and_a_stale_key_on_a_rich_card_heals_it(conn):
             html = st.fake.messages[msg]["rich"]
             assert re.search(r'<p>A\. Existing table <tg-button type="callback_data" style="primary" data="a:\w+">Ответить A</tg-button></p>', html)
             assert "<p>Where to store it?</p>" in html and st.fake.rows(msg) == [["✍️ Ответить текстом"]]
+            assert "Thread r1</p><p>&nbsp;</p><p>Where to store it?</p><p>&nbsp;</p><p>A. Existing table" in html  # spacing as the request card
             stale = st.fake.button(msg, "B")["callback_data"]
             st.keys._actions.consume(stale, 0)  # used up
             st.fake.push_callback(stale, msg)
@@ -449,7 +453,7 @@ def test_a_card_over_the_rich_limit_goes_out_classic_without_asking_telegram(con
 # --- the registry ----------------------------------------------------------------------
 
 
-def test_rich_registry_layout_filter_and_toggles(conn):
+def test_rich_registry_layout_and_archive_toggle(conn):
     async def main():
         async with stack(conn, thread("r1", name="Fox", updated=NOW - 10), thread("r2", name="Old <x>", updated=NOW - 900),
                          thread("r3", name="Done", updated=NOW - 500),
@@ -463,23 +467,18 @@ def test_rich_registry_layout_filter_and_toggles(conn):
             html = reg["rich"]
             assert "обновлено" not in html and not re.search(r"\d\d:\d\d", html) and "UTC" not in html  # no clock time
             assert html.startswith("<p>📋 <b>Треды Codex</b></p><p>❓ 1 · 🟢 1 · всего 4</p><hr/>")
-            rows = re.findall(r"<hr/><p>(.*?)</p><p>(.*?)</p>", html)
-            assert [r[1] for r in rows] == ["📁 w · 15м", "📁 w · 5м", "📁 w · сейчас"]  # ❓ first, then 🟢, then newest
+            rows = re.findall(r"(?:<hr/>|<p>&nbsp;</p>)<p>(.*?)</p><p>(.*?)</p>", html)
+            assert [r[1] for r in rows] == ["📁 w · 15м", "📁 w · 5м", "📁 w · сейчас", "📁 w · 3д"]  # ❓, 🟢, then newest
             assert re.fullmatch(r"❓ <b>Old &lt;x&gt;</b> <tg-button [^>]+>➕ Создать</tg-button>", rows[0][0])
             assert re.fullmatch(r"🟢 <b>Done</b> <tg-button [^>]+>➕ Создать</tg-button>", rows[1][0])
             assert re.fullmatch(r'<b>Fox</b> <tg-button type="url" url="https://t.me/c/1234567890/\d+">💬 Открыть</tg-button>', rows[2][0])
-            assert html.count("<hr/>") == 3 and "Ancient" not in html and "консультант" not in html and "✅" not in html
-            assert st.fake.rows(msg) == [["🕘 Ранее", "📦 Архивные"]] and reg["markup"] is None  # one page: no page row
-            await press(st, msg, "🕘 Ранее")  # the threads that are not relevant now
-            older = st.fake.messages[msg]["rich"]
-            assert "<b>Треды Codex</b> · ранее" in older and "Ancient" in older and "Fox" not in older
-            assert "<p>📁 w · 3д</p>" in older and st.fake.rows(msg) == [["🕘 Недавние", "📦 Архивные"]]
-            assert st.state.get("registry.view") == "0:0:1"
-            await press(st, msg, "🕘 Недавние")
-            assert "Fox" in st.fake.messages[msg]["rich"] and "Ancient" not in st.fake.messages[msg]["rich"]
+            # ONE divider, under the header block; the threads are set apart by an empty paragraph each
+            assert html.count("<hr/>") == 1 and html.count("<p>&nbsp;</p>") == 3
+            assert "консультант" not in html and "✅" not in html and "Ранее" not in html and "Недавние" not in html
+            assert st.fake.rows(msg) == [["📦 Архивные"]] and reg["markup"] is None  # one page: no page row, no recent toggle
             await press(st, msg, "📦 Архивные")
-            assert "<b>Архивные треды Codex</b>" in st.fake.messages[msg]["rich"]
-            assert st.fake.rows(msg) == [["🕘 Ранее", "📋 Активные"]]
+            assert "<b>Архивные треды Codex</b>" in st.fake.messages[msg]["rich"] and st.fake.rows(msg) == [["📋 Активные"]]
+            assert st.state.get("registry.view") == "0:1"
     run(main())
 
 
@@ -490,7 +489,8 @@ def test_rich_registry_pages_with_a_disabled_counter_and_no_arrow_at_the_edges(c
             msg = st.registry_message
             fake = st.fake
             html = fake.messages[msg]["rich"]
-            assert html.count("<hr/>") == 8 and html.count("➕ Создать") == 8 and html.count("<p>") == 2 + 16
+            assert html.count("<hr/>") == 1 and html.count("<p>&nbsp;</p>") == 7 and html.count("➕ Создать") == 8
+            assert html.count("<p>") == 2 + 16 + 7
             assert fake.rows(msg)[0] == ["1/4", "▶️"]  # no ◀️ on the first page
             assert '<tg-button type="disabled">1/4</tg-button>' in html
             assert fake.button(msg, "1/4").get("callback_data") is None  # the counter does nothing
@@ -499,7 +499,7 @@ def test_rich_registry_pages_with_a_disabled_counter_and_no_arrow_at_the_edges(c
             await press(st, msg, "▶️")
             await press(st, msg, "▶️")
             assert fake.rows(msg)[0] == ["◀️", "4/4"] and fake.messages[msg]["rich"].count("➕ Создать") == 6  # no ▶️ on the last
-            assert st.state.get("registry.view") == "3:0:0" and len(st.control_messages()) == 1
+            assert st.state.get("registry.view") == "3:0" and len(st.control_messages()) == 1
             await press(st, msg, "◀️")
             await press(st, msg, "◀️")
             await press(st, msg, "◀️")
@@ -606,7 +606,7 @@ def test_rich_unsupported_on_edit_only_falls_back_for_a_card_and_resizes_the_reg
             await st.settle()
             reg = st.fake.messages[st.registry_message]
             assert not st.present.rich and "rich" not in reg and len(reg["text"]) <= 4096
-            assert "стр. 1/5" in reg["text"] and len(st.fake.buttons(st.registry_message)) == 5 + 3  # the page is in the text; ▶️, two toggles
+            assert "стр. 1/5" in reg["text"] and len(st.fake.buttons(st.registry_message)) == 5 + 2  # the page is in the text; ▶️ and the archive toggle
     run(main())
 
 
@@ -722,7 +722,7 @@ def test_registry_stays_classic_when_the_fresh_rich_send_is_refused_too_and_is_n
             await st.settle()
             m = st.fake.messages[old]
             assert st.registry_message == old and not m.get("deleted") and "rich" not in m and st.present.rich
-            assert len(m["text"]) <= 4096 and len(st.fake.buttons(old)) == 5 + 3  # drawn classic: 5 rows, ▶️ and two toggles
+            assert len(m["text"]) <= 4096 and len(st.fake.buttons(old)) == 5 + 2  # drawn classic: 5 rows, ▶️ and the archive toggle
             assert not st.state.get("registry.hash").endswith("+rich") and len(st.control_messages()) == 1
             asked = len(st.fake.methods("sendRichMessage")), sum("rich_message" in p for p in st.fake.methods("editMessageText"))
             for _ in range(3):  # every refresh from now on stays classic without asking for rich
@@ -732,7 +732,7 @@ def test_registry_stays_classic_when_the_fresh_rich_send_is_refused_too_and_is_n
             assert (len(st.fake.methods("sendRichMessage")), sum("rich_message" in p for p in st.fake.methods("editMessageText"))) == asked
             assert st.registry_message == old and len(st.control_messages()) == 1
             await press(st, old, "▶️")  # the classic keyboard still works
-            assert st.publisher.view() == (1, False, False)
+            assert st.publisher.view() == (1, False)
     run(main())
 
 

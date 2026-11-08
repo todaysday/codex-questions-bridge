@@ -272,7 +272,7 @@ occasional cleanup.
 | Dead gateway | If `GET /health` fails or the hook heartbeat is silent, the topic answers `Консультант временно недоступен` ("consultant temporarily unavailable"). A dead cached socket is replaced once; an unexpected error in a session worker gives `внутренняя ошибка шлюза: <Type>` and the queue goes on. |
 | Web access | `web_fetch` (PicoClaw) and `web_search` (a Bridge tool, off by default) are for the consultant only, never for Status Agent slots, and take known argument names only. The hook checks every `web_fetch` URL: http/https, ports 80 and 443, no userinfo, no private, loopback, link-local, CGNAT (tailnet), ULA, multicast or metadata address (IP literals in any encoding; DNS answers are checked too, best effort against rebinding), URL up to 300 characters and query up to 120, no token-like runs or key-like parameters; `maxChars` is clamped to 20000. PicoClaw refuses private IPs at dial time, also on redirects (at most 5). A search query is up to 200 characters without key-like runs; results are cut to title, URL and snippet and redacted. A server-only systemd egress drop-in adds a kernel-level guard (`deploy/picoclaw/egress.conf.example`). Residual risks: redirects to public hosts, DNS rebinding, data hidden in queries or URLs made of short words, and prompt injection through public pages. |
 | Project files | Off by default (`[mcp] project_files`). The Bridge runs as root, so confinement is by file descriptor: `O_NOFOLLOW` at every step, no symlinks, no `..`, regular files only, root = the thread's working directory (broad roots such as `/`, home, `/srv`, `/tmp` refused). Secrets, keys, `.git`, `.env*`, databases, `node_modules` and similar names are denied by a built-in table without revealing whether they exist; output is capped (`project_file_max_bytes`) and redacted. Only the consultant can call these tools. |
-| Queue | One turn at a time per consultant, at most 5 queued messages. Replies are sent as rich Markdown after sanitizing (images become alt text, only http(s) links, control and bidi characters removed, up to 4 parts split between blocks), at most 12000 characters; a refused rich message falls back to plain text, and system and failure lines stay plain. |
+| Queue | One turn at a time per consultant, at most 5 queued messages. Replies are sent as rich Markdown after sanitizing (images become http(s) links or alt text, only http(s) links, control and bidi characters removed, up to 4 parts split between blocks), at most 12000 characters; a refused rich message falls back to plain text, and system and failure lines stay plain. |
 
 ## 🌐 Tailscale: reaching a loopback-only model gateway
 
@@ -326,7 +326,9 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 | `🟢` | The thread is working right now (status `active` without a waiting flag). |
 | `⚠️` / `🔒` | Consultant in error / closed (its thread is archived). No other consultant text is shown. |
 
-Layout: the header `📋 Треды Codex` with the counts `❓ n · 🟢 n · всего N`; each thread is a line `markers name [button]` plus a `📁 folder · age` line, threads separated by a divider; ages are `сейчас`, `5м`, `2ч`, `вчера`, `3д` (no clock times). By default only relevant threads are listed (pending question, working, a consultant, or updated within `registry_recent_hours`); `🕘 Ранее` / `Недавние` toggles the rest and `📦 Архивные` the archive. A page holds `registry_rows_per_page` threads and the page row is `◀️ [n/total] ▶️` (arrows hidden at the edges; on the classic path `стр. n/total` is in the title).
+Question cards have blank lines after the header and before the answer options.
+
+Layout: the header `📋 Треды Codex` with the counts `❓ n · 🟢 n · всего N`; each thread is a line `markers name [button]` plus a `📁 folder · age` line, one divider after the header and blank lines between threads; ages are `сейчас`, `5м`, `2ч`, `вчера`, `3д` (no clock times). All unarchived threads in the inventory are listed; `📦 Архивные` opens the archive. A page holds `registry_rows_per_page` threads and the page row is `◀️ [n/total] ▶️` (arrows hidden at the edges; on the classic path `стр. n/total` is in the title).
 
 Order: pending questions first, then working threads, then by last activity. The message is edited at most once per
 `registry_refresh_seconds` and not at all when nothing changed. Archiving a thread closes its consultant topic;
@@ -380,8 +382,7 @@ text Telegram cannot parse is resent as plain text. Example:
 | `[telegram] allowed_user_ids` | none (required) | 1..50 positive ids |
 | `[telegram] control_topic_name` | `📋 Треды Codex` | 1..128 characters |
 | `[telegram] registry_refresh_seconds` | 5 | 5..3600 |
-| `[telegram] registry_rows_per_page` | 8 | 3..25, threads per registry page |
-| `[telegram] registry_recent_hours` | 24 | 1..720, a thread updated within this window counts as relevant for the default registry filter |
+| `[telegram] registry_rows_per_page` | 10 | 3..25, threads per registry page |
 | `[telegram] rich_messages` | true | Bot API 10.3 rich messages with in-text buttons for question cards and the registry (25 registry rows per page instead of 5); `false` = classic text + inline keyboard only. An unsupported method switches to classic for the rest of the process, a refused message falls back for that message only |
 | `[pico] url` | `ws://127.0.0.1:18790/pico/ws` | Loopback `ws://` only. Presence of `[pico]` enables consultants |
 | `[pico] session_prefix` | `cqb-` | `[a-z0-9-]{2,16}`, do not change after consultants exist |
