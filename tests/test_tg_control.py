@@ -152,7 +152,7 @@ def test_create_double_click_makes_exactly_one_topic(conn):
             assert "устарела" in answer_for(st, q2)["text"]  # the one-time key is used up
             topic = st.consultant_dao.get("s1", "r1").tg_topic_id
             opening = fake.live_messages(topic)
-            assert len(opening) == 1 and "Консультант: FoxProfile — User Access" in opening[0]["text"]
+            assert len(opening) == 1 and "🤖 FoxProfile — User Access" in opening[0]["text"]
             await st.settle()
             url = fake.button(msg, "Открыть")["url"]
             assert url == f"https://t.me/c/1234567890/{topic}"
@@ -252,9 +252,9 @@ def test_commands_in_the_right_topics_and_relay_of_free_text(conn):
             assert fake.messages[st.registry_message]["edits"] == edits_before + 1  # /threads re-rendered it
             assert cmd in fake.deleted_user_messages  # and removed the command message (as it did the /questions one)
             texts = [m["text"] for m in fake.live_messages(topic)]
-            assert not any(t.startswith("Тред:") for t in texts)  # /thread is disabled: nothing is answered by the Bridge
+            assert not any(t.startswith("Тред:") for t in texts)
             assert any(t == "Нет неотвеченных вопросов" for t in texts)
-            # /status is handled by the Bridge, not relayed; /thread (ours or not) is like any unknown slash text
+            # /status is handled by the Bridge; /thread remains an ordinary escaped command
             assert st.relay.got == [("r1", "/thread@cqb_test_bot"), ("r1", "why option A?")]
             await st.ask("r2", "i1")
             await st.ask("r1", "i2", request_id=2)

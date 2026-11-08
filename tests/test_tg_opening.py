@@ -2,8 +2,8 @@
 
 import asyncio
 
-from cqb.domain.enums import ArchiveState
-from tg_stack import make_stack, thread
+from cqb.domain.enums import ArchiveState, RunState
+from tg_stack import NOW, make_stack, snapshot, thread
 
 
 def run(coro):
@@ -45,8 +45,74 @@ def test_opening_message_goes_first_and_is_pinned_then_cards_follow(conn):
             assert topic_calls(st, topic) == [("sendMessage", opening), ("pinChatMessage", opening), ("sendMessage", card)]
             assert st.fake.pinned[1:] == [opening] and card not in st.fake.pinned  # [0] is the registry message
             first = st.fake.messages[opening]["text"]
-            assert first.startswith("Консультант: Fox") and "/status" in first and "/questions" in first
-            assert "/thread" not in first  # disabled by owner request
+            assert first.startswith("ctx — · 🗜️—\n🤖 Fox") and "/status" in first
+            assert [b["text"] for b in st.fake.buttons(opening)] == ["❓ Вопросы", "📊 Статус"]
+    run(main())
+
+
+def test_opening_buttons_route_to_the_bound_topic_and_keep_the_pin(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), thread("r2", name="Other")) as st:
+            topic = await st.open_consultant("r1")
+            await st.settle()
+            st.status_source.threads["r1"] = snapshot("r1", RunState.WORKING, updated=NOW - 5, name="Fox")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.clock.now += 3 * 86400  # these buttons remain usable without an expiring action key
+            st.fake.press(opening, "Статус")
+            await st.pump()
+            await st.status_done()
+            assert any("📈" in m["text"] for m in st.fake.live_messages(topic))
+            st.fake.press(opening, "Вопросы")
+            await st.pump()
+            assert any(m["text"] == "Нет неотвеченных вопросов" for m in st.fake.live_messages(topic))
+            assert not st.fake.messages[opening].get("deleted") and st.fake.buttons(opening)
+            assert st.relay.got == []
+    run(main())
+
+
+def test_opening_questions_button_reposts_pending_cards_not_the_pin(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox")) as st:
+            topic = await st.open_consultant("r1")
+            await st.ask("r1", "i1")
+            await st.settle()
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            qid = st.qid_of("i1")
+            old = st.card_of(qid)
+            st.fake.press(opening, "Вопросы")
+            await st.pump()
+            assert st.fake.messages[old].get("deleted")
+            assert st.card_of(qid) != old and not st.fake.messages[opening].get("deleted")
+            assert st.fake.messages[st.card_of(qid)]["thread_id"] == topic
+    run(main())
+
+
+def test_opening_buttons_reject_unknown_messages_and_other_users(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox")) as st:
+            topic = await st.open_consultant("r1")
+            await st.settle()
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            data = st.fake.button(opening, "Статус")["callback_data"]
+            other = st.fake.push_message("other", topic)
+            st.fake.push_callback(data, other)
+            st.fake.push_callback(data, opening, user_id=999999)
+            await st.pump()
+            assert st.status_source.calls == []
+            assert not st.fake.messages[opening].get("deleted")
+    run(main())
+
+
+def test_status_button_reports_an_inflight_status(conn, monkeypatch):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox")) as st:
+            await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            monkeypatch.setattr(st.status_cards, "request", lambda root, topic: False)
+            st.fake.press(opening, "Статус")
+            await st.pump()
+            assert st.fake.callback_answers[-1]["text"] == "статус уже собирается"
+            assert not st.fake.messages[opening].get("deleted")
     run(main())
 
 
@@ -73,7 +139,7 @@ def test_a_failed_pin_does_not_hold_back_the_cards(conn):
             await st.settle()
             opening, *cards = sorted(i for i, m in st.fake.messages.items() if m["thread_id"] == topic)
             assert st.consultant_dao.get("s1", "r1").opening_message_id == opening
-            assert len(cards) == 2 and texts(st, topic)[0].startswith("Консультант: Fox")
+            assert len(cards) == 2 and texts(st, topic)[0].startswith("ctx — · 🗜️—\n🤖 Fox")
             assert [m for m, _ in topic_calls(st, topic)] == ["sendMessage", "pinChatMessage", "sendMessage", "sendMessage"]
             assert len(st.fake.pinned) == 1  # the registry only: nothing was pinned, and no card in particular
     run(main())
@@ -109,7 +175,7 @@ def test_reopening_posts_cards_after_the_existing_pinned_message_and_adds_no_ope
             ids = [i for i, m in sorted(st.fake.messages.items()) if m["thread_id"] == topic]
             assert ids == [opening, st.card_of(st.qid_of("i1"))]
             assert st.fake.pinned[1:] == [opening]  # still the one pin, never a card
-            assert texts(st, topic)[0].startswith("Консультант: Fox")
+            assert texts(st, topic)[0].startswith("ctx — · 🗜️—\n🤖 Fox")
     run(main())
 
 

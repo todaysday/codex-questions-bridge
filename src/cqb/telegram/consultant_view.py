@@ -4,28 +4,27 @@ from cqb.services.registry import RegistryRow
 from cqb.telegram.fmt import when
 from cqb.telegram.registry_view import CONSULTANT_MARK, thread_name
 from cqb.telegram.status_view import tokens
+from cqb.telegram.models import Button, Keyboard
 
-THREAD_COMMAND_ENABLED = False  # /thread: disabled by owner request, may return later
+OPENING_QUESTIONS = "opening:questions"
+OPENING_STATUS = "opening:status"
 
 
-def _commands() -> str:
-    lines = ["/questions — показать неотвеченные вопросы этого треда карточками заново."]
-    if THREAD_COMMAND_ENABLED:
-        lines.append("/thread — сведения о привязке.")
-    lines.append("/status — состояние треда, контекст, субагенты, лимиты.")
-    return "\n".join(lines)
+def opening_keyboard() -> Keyboard:
+    return ((Button("❓ Вопросы", callback_data=OPENING_QUESTIONS),
+             Button("📊 Статус", callback_data=OPENING_STATUS)),)
 
 
 def render_opening(
     row: RegistryRow, source_id: str, usage: tuple[int, int] | None = None, compactions: int | None = None,
 ) -> str:
-    context = f" · ≈ ctx {tokens(usage[0])}/{tokens(usage[1])} ({round(usage[0] * 100 / usage[1])}%)" if usage else ""
-    compact = f" · 🗜️≥{compactions}" if compactions is not None else ""
+    context = f"ctx {tokens(usage[0])}/{tokens(usage[1])} ({round(usage[0] * 100 / usage[1])}%)" if usage else "ctx —"
+    compact = f"🗜️{compactions}" if compactions is not None else "🗜️—"
     return (
-        f"Консультант: {thread_name(row)}{context}{compact}\n"
+        f"{context} · {compact}\n"
+        f"🤖 {thread_name(row)}\n"
         f"Codex source: {source_id} · thread: …{row.thread.thread_id[-8:]}\n\n"
-        f"{_commands()}\n"
-        "Диалог с моделью пока не подключён."
+        "/status — состояние треда, контекст, субагенты, лимиты."
     )
 
 

@@ -105,8 +105,8 @@ class ConsultantRelay:
 
         async def deliver(result: DialogResult) -> None:
             await self._leave(topic)
-            await self._say(topic, present(result), markdown=result.outcome is Outcome.REPLY)
-            if result.outcome is Outcome.REPLY and result.context_usage is not None and self._on_usage:
+            posted = await self._say(topic, present(result), markdown=result.outcome is Outcome.REPLY)
+            if posted and result.outcome is Outcome.REPLY and result.context_usage is not None and self._on_usage:
                 try:
                     await self._on_usage(consultant, result.context_usage)
                 except Exception as exc:
@@ -180,14 +180,16 @@ class ConsultantRelay:
         except Exception:
             return True
 
-    async def _say(self, topic: int, text: str, markdown: bool = False) -> None:
+    async def _say(self, topic: int, text: str, markdown: bool = False) -> bool:
         try:
             if markdown:  # a consultant reply: the sink renders its Markdown; failure and system lines stay plain
                 await self._sink.say(topic, text, markdown=True)
             else:
                 await self._sink.say(topic, text)
+            return True
         except Exception as exc:  # the Bot API client already retried; a lost reply must not kill a worker
             log.warning("could not post consultant reply to topic %d: %s", topic, type(exc).__name__)
+            return False
 
 
 def present(result: DialogResult) -> str:

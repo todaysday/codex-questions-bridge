@@ -22,6 +22,12 @@ class ConsultantDao:
         ).fetchone()
         return _to_consultant(row) if row else None
 
+    def get_by_opening_message(self, chat_id: int, message_id: int) -> Consultant | None:
+        row = self._conn.execute(
+            "SELECT * FROM consultants WHERE tg_chat_id=? AND opening_message_id=?", (chat_id, message_id)
+        ).fetchone()
+        return _to_consultant(row) if row else None
+
     def get_by_session_key(self, session_key: str) -> Consultant | None:
         row = self._conn.execute(
             "SELECT * FROM consultants WHERE pico_session_key=?", (session_key,)

@@ -19,8 +19,9 @@ def run(coro):
 class Dialog:
     """Records submissions; `outcome` decides the submit result, `results` what deliver gets."""
 
-    def __init__(self, outcome=Submit.ACCEPTED, results=(DialogResult(Outcome.REPLY, "pong"),), reason=""):
+    def __init__(self, outcome=Submit.ACCEPTED, results=(DialogResult(Outcome.REPLY, "pong"),), reason="", delay=0):
         self.outcome, self.results, self.calls, self.reason = outcome, results, [], reason
+        self.delay = delay
 
     def unavailable_reason(self):
         return self.reason
@@ -29,6 +30,8 @@ class Dialog:
         self.calls.append((session_id, text))
         if self.outcome in (Submit.ACCEPTED, Submit.QUEUED):
             async def go():
+                if self.delay:
+                    await asyncio.sleep(self.delay)
                 for r in self.results:
                     await deliver(r)
             asyncio.get_running_loop().create_task(go())
@@ -84,6 +87,22 @@ def test_relay_updates_context_after_a_reply_without_blocking_the_reply():
         await relay.relay(consultant(), "hi")
         await wait_until(lambda: bool(seen))
         assert sink.said == [(7, "pong")] and seen == [("r1", (123, 1000))]
+    run(main())
+
+
+def test_relay_does_not_update_context_if_reply_was_not_posted():
+    async def main():
+        seen = []
+        async def update(c, usage):
+            seen.append(usage)
+        class BrokenSink(Sink):
+            async def say(self, topic, text, markdown=False):
+                raise RuntimeError("send failed")
+        relay = ConsultantRelay(Dialog(results=(DialogResult(Outcome.REPLY, "pong", (123, 1000)),)), BrokenSink(),
+                                on_usage=update)
+        await relay.relay(consultant(), "hi")
+        await asyncio.sleep(0.05)
+        assert seen == []
     run(main())
 
 
@@ -287,7 +306,7 @@ def test_typing_does_not_outlive_a_submit_that_raises():
 def test_router_forwards_only_registered_open_topics_to_the_dialog_and_replies_in_topic(conn):
     async def main():
         async with make_stack(conn, thread("r1", name="Fox"), thread("r2", name="Plain")) as st:
-            dialog = Dialog(results=(DialogResult(Outcome.REPLY, "a" * 5000 + "\n" + "b" * 5000),))
+            dialog = Dialog(results=(DialogResult(Outcome.REPLY, "a" * 5000 + "\n" + "b" * 5000),), delay=0.02)
             st.router._relay = ConsultantRelay(dialog, st.tg_topics, typing_seconds=0.01)
             await st.router._create("r1")
             topic = st.consultant_dao.get("s1", "r1").tg_topic_id
@@ -308,7 +327,7 @@ def test_router_forwards_only_registered_open_topics_to_the_dialog_and_replies_i
             key = st.consultant_dao.get("s1", "r1").pico_session_key
             fake.push_message("why option A?", topic)
             fake.push_message("/clear", topic)  # escaping is the gateway's job; the relay passes text through
-            fake.push_message("/thread", topic)  # disabled by owner request: any other slash text, forwarded to the consultant
+            fake.push_message("/thread", topic)  # forwarded to the consultant
             await st.pump()
             await wait_until(lambda: len(fake.live_messages(topic)) >= 6)
             assert dialog.calls == [(key, "why option A?"), (key, "/clear"), (key, "/thread")]
@@ -316,6 +335,7 @@ def test_router_forwards_only_registered_open_topics_to_the_dialog_and_replies_i
             assert replies and all(len(t) <= 4096 for t in replies)  # chunked below the Telegram limit
             sent = fake.methods("sendMessage")
             assert all("parse_mode" not in p for p in sent)  # plain text: entities can never fail a reply
+            await wait_until(lambda: bool(fake.methods("sendChatAction")))
             assert any(p["message_thread_id"] == topic and p["action"] == "typing" for p in fake.methods("sendChatAction"))
             # archived consultant: closed topic, nothing forwarded
             st.threads.set_archive_state("s1", "r1", ArchiveState.ARCHIVED, 1)

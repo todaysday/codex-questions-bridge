@@ -50,7 +50,7 @@ from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.api import API_BASE, BadRequest, BotApi
 from cqb.telegram.present import Presenter
 from cqb.telegram.cards import QuestionCards
-from cqb.telegram.consultant_view import render_opening
+from cqb.telegram.consultant_view import opening_keyboard, render_opening
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.poller import Poller
@@ -168,7 +168,7 @@ async def run(
                 count = await observed_compactions(consultant.pico_session_key)
                 text = render_opening(row, source_id, usage, count)
                 try:
-                    await api.edit_message_text(tg.chat_id, consultant.opening_message_id, text)
+                    await api.edit_message_text(tg.chat_id, consultant.opening_message_id, text, keyboard=opening_keyboard())
                 except BadRequest as exc:
                     if not exc.not_modified:
                         raise

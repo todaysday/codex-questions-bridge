@@ -17,7 +17,7 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.telegram.api import TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
-from cqb.telegram.consultant_view import THREAD_COMMAND_ENABLED, render_thread
+from cqb.telegram.consultant_view import OPENING_QUESTIONS, OPENING_STATUS
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
@@ -140,7 +140,7 @@ class Router:
         except TelegramError as exc:
             log.debug("cannot delete the command message: %s", exc)
 
-    async def _questions_command(self, root: str, m: Message) -> None:
+    async def _questions_command(self, root: str, topic_id: int, message_id: int | None = None) -> None:
         """Post the pending questions of this thread anew: the old card messages go, fresh full cards follow in the
         order of their numbers. The command message is removed if the bot may; with nothing pending a short notice
         answers and is removed after a few seconds."""
@@ -148,9 +148,10 @@ class Router:
             [(q.display_no, 0, q.question_id) for q in self._questions.open_questions(root)]
             + [(a.display_no, 1, a.agent_question_id) for a in self._agent_questions.open_questions(root)]
         )
-        await self._delete_quietly(m.message_id)
+        if message_id is not None:
+            await self._delete_quietly(message_id)
         if not pending:
-            sent = await self._api.send_message(self._cfg.chat_id, NO_QUESTIONS, thread_id=m.thread_id)
+            sent = await self._api.send_message(self._cfg.chat_id, NO_QUESTIONS, thread_id=topic_id)
             self._forget_later(sent.message_id)
             return
         for _, kind, question_id in pending:
@@ -190,12 +191,8 @@ class Router:
         consultant = self._consultants.by_topic(m.thread_id)
         if consultant is None or consultant.state is not ConsultantState.OPEN:
             return  # unknown, unbound or closed topic
-        if THREAD_COMMAND_ENABLED and command == "thread":
-            row = self._registry.describe(consultant.root_thread_id)
-            if row:
-                await self._say(m, render_thread(row, self._source, int(self._clock())))
-        elif command == "questions":
-            await self._questions_command(consultant.root_thread_id, m)
+        if command == "questions":
+            await self._questions_command(consultant.root_thread_id, m.thread_id, m.message_id)
         elif command == "status":
             if not self._status.request(consultant.root_thread_id, m.thread_id):
                 await self._say(m, STATUS_BUSY)
@@ -252,6 +249,9 @@ class Router:
             self.rejected += 1
             return  # no answer: do not confirm anything to a stranger
         assert cb.data is not None and cb.message_id is not None
+        if cb.data in (OPENING_QUESTIONS, OPENING_STATUS):
+            await self._opening_callback(cb)
+            return
         action = self._keys.resolve(cb.data)
         retire: str | None = None  # what to do with a confirmation message once the press is answered
         if action is None:
@@ -278,6 +278,30 @@ class Router:
             log.debug("answerCallbackQuery failed: %s", exc)
         if retire is not None and not self._is_card(cb.message_id):
             await self._retire(cb.message_id, retire)
+
+    async def _opening_callback(self, cb: CallbackQuery) -> None:
+        assert cb.message_id is not None
+        try:
+            consultant = self._consultants.by_opening_message(cb.message_id)
+            if consultant is None or consultant.state is not ConsultantState.OPEN or consultant.tg_topic_id is None:
+                reply = Reply(STALE, alert=True)
+            elif cb.data == OPENING_QUESTIONS:
+                await self._questions_command(consultant.root_thread_id, consultant.tg_topic_id)
+                reply = Reply()
+            elif not self._status.request(consultant.root_thread_id, consultant.tg_topic_id):
+                reply = Reply(STATUS_BUSY)
+            else:
+                reply = Reply()
+        except TelegramError as exc:
+            log.warning("opening callback failed: %s", type(exc).__name__)
+            reply = Reply("Ошибка Telegram, повторите позже", alert=True)
+        except Exception:
+            log.exception("opening callback failed")
+            reply = Reply("Внутренняя ошибка; подробности в логе", alert=True)
+        try:
+            await self._api.answer_callback_query(cb.query_id, reply.text, reply.alert)
+        except TelegramError as exc:
+            log.debug("answerCallbackQuery failed: %s", exc)
 
     def _is_card(self, message_id: int) -> bool:
         return (self._questions.by_card_message(message_id) is not None

@@ -119,14 +119,15 @@ Important distinction:
 - If an unrecognized topic is manually created by a user, do not automatically bind it to Codex.
 - Consultant remains the **same logical session** across messages and archive/unarchive, even if the physical PicoClaw process restarts.
 
-**Opening message (v0.11).** It is sent and pinned right after the topic is created, before the consultant row becomes open, so the cards for pending questions always follow it. Reopening a topic posts no new opening message and no pin. Suggested text (from the Bridge bot, informational only; `/thread` is no longer listed):
+**Opening message (v0.11).** It is sent and pinned right after the topic is created, before the consultant row becomes open, so the cards for pending questions always follow it. Reopening a topic posts no new opening message and no pin. The opening message contains `❓ Вопросы` and `📊 Статус` buttons. Example:
 
 ```text
-Консультант: FoxProfile — User Access
+ctx 123.3k/1M (12%) · 🗜️0
+🤖 FoxProfile — User Access
 Codex source: mac-codex-work · thread: 019…a9
 
 Можно обсуждать решения и уточнять вопросы Codex.
-/questions — неотвеченные вопросы этого треда.
+[❓ Вопросы] [📊 Статус]
 /status — снимок: состояние треда, контекст, субагенты, лимиты, что делает сейчас, резюме и что дальше (одно сообщение).
 История Codex читается по необходимости и только на чтение.
 ```
@@ -178,7 +179,7 @@ An option button stages the choice (`decision_staged`) and asks for confirmation
 | `/status` | One static snapshot message of the bound root and all its descendants (consultant topic only): numbers, a 'now' phrase for the root and each listed subagent, and the Status Agent's two-part summary (`В процессе` / `Дальше`) or `📝 резюме недоступно`. Sent once when all of it is ready (typing indicator meanwhile), never edited; a second request while one collects answers `статус уже собирается` | Bridge-handled; 'now' phrases without an LLM; one Status Agent call per request in its own routed slot session; no consultant routing turn, nothing enters the consultant's context |
 | `/questions` | Re-sends the unanswered questions of the bound Codex root, both kinds (v0.16): deletes the old cards of the pending questions and the command message, then posts fresh full cards in number order; `Нет неотвеченных вопросов` (auto-deleted after about 10 s) when none | Deterministic, Bridge-handled; no LLM |
 
-**`/thread` (v0.11).** Disabled by the owner (`THREAD_COMMAND_ENABLED = False` in `consultant_view.py`) and may return: it is not handled, not listed in the opening message and, like any other slash text, forwarded to the consultant with the `User says: ` escape.
+**Opening message buttons.** `❓ Вопросы` re-posts pending questions like `/questions`, and `📊 Статус` starts the same snapshot as `/status`. Both callbacks are resolved against the saved opening message ID and authorized user. `/thread` remains unhandled by the Bridge.
 
 **Command collision:** PicoClaw's built-in `/subagents` describes **PicoClaw** subagents, **not** Codex workers. Codex workers are shown in `/status` (the `30m`, `agents`, `full` and `<agent>` variants are deferred). Because Bridge relays consultant text, PicoClaw's built-in slash commands (`/clear`, `/switch`, `/reload`, `/use`, `/subagents`, `/help`, `/stop`, ...) would be executed by PicoClaw before any hook and without the model, and `/new`, `/model`, `/reset` would reach the model as ordinary text. Bridge therefore escapes every relayed message that PicoClaw would treat as a command. Verified on v0.3.1 (mock model): a message is a command if its first whitespace token, after trimming Unicode whitespace, starts with `/` or `!` (case-insensitive, `/cmd@bot` accepted), so leading space/tab/newline/NBSP/U+3000 do **not** escape and `!clear` also executes. Bridge rule: if the text, after stripping Unicode whitespace and invisible chars (U+200B/200C/200D/2060/FEFF), starts with `/` or `!`, prepend the visible text `User says: `. PicoClaw handles 13 commands without the model (`start`, `help`, `stop`, `show`, `list`, `use`, `btw`, `switch`, `check`, `clear`, `context`, `subagents`, `reload`); `/status`, `/new`, `/model`, `/reset` and unknown commands reach the model verbatim, and `/btw` makes a tool-less model call with the full history. `/status` is a **project-defined command, not a stock PicoClaw feature**: PicoClaw passes it to the model, so Bridge intercepts and handles it deterministically, and answers it with the status snapshot (§5.5): deterministic numbers and 'now' phrases plus a two-part summary from a Status Agent in its own routed pico session, which never reaches the consultant (§5.1). `/status` works only in a consultant topic; the registry never receives it.
 

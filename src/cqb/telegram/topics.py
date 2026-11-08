@@ -5,6 +5,7 @@ import logging
 from cqb.services.consultants import TopicGone
 from cqb.telegram.api import BadRequest, RichRejected, TelegramError
 from cqb.telegram.fmt import chunks
+from cqb.telegram.consultant_view import opening_keyboard
 from cqb.telegram.markdown import markdown_parts
 from cqb.telegram.present import Presenter
 
@@ -36,7 +37,7 @@ class TelegramTopics:
     async def announce(self, topic_id: int, text: str) -> int:
         """Opening message in a new consultant topic, pinned (by its own message id). A failed pin (no rights) is only
         logged: the message stays. A failed send raises; the caller decides."""
-        sent = await self._api.send_message(self._chat_id, text, thread_id=topic_id)
+        sent = await self._api.send_message(self._chat_id, text, thread_id=topic_id, keyboard=opening_keyboard())
         try:
             await self._api.pin_chat_message(self._chat_id, sent.message_id)
         except TelegramError as exc:

@@ -91,6 +91,10 @@ class ConsultantService:
     def by_topic(self, topic_id: int) -> Consultant | None:
         return self._dao.get_by_topic(self._chat_id, topic_id)
 
+    def by_opening_message(self, message_id: int) -> Consultant | None:
+        consultant = self._dao.get_by_opening_message(self._chat_id, message_id)
+        return consultant if consultant and consultant.source_id == self._source else None
+
     def scope_for_session(self, session_key: str) -> tuple[str, str] | None:
         """(source_id, root_thread_id) a pico session may read, only while its consultant is open."""
         c = self._dao.get_by_session_key(session_key)

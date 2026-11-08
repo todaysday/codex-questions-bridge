@@ -313,8 +313,8 @@ and `api_base` set to `http://127.0.0.1:<port>/v1`. It works, but Tailscale need
 | Where | Command | Effect |
 | --- | --- | --- |
 | Control topic | `/threads` | Re-render the registry message now (the command message is deleted if the bot may). |
-| Consultant topic | `/status` | One static snapshot message. A second request while one collects answers `статус уже собирается`. |
-| Consultant topic | `/questions` | Re-sends the unanswered questions of this thread (both kinds, with `Q` numbers): the old cards and the command message are deleted and fresh full cards follow in number order; `Нет неотвеченных вопросов` (auto-deleted after about 10 s) when none. Deterministic, no LLM. |
+| Consultant topic | `📊 Статус` / `/status` | One static snapshot message. A second request while one collects answers `статус уже собирается`. |
+| Consultant topic | `❓ Вопросы` / `/questions` | Re-sends the unanswered questions of this thread (both kinds, with `Q` numbers): the old cards and the command message are deleted and fresh full cards follow in number order; `Нет неотвеченных вопросов` (auto-deleted after about 10 s) when none. Deterministic, no LLM. |
 | Consultant topic | `/stop` | Cancels the running consultant turn (the one command passed to PicoClaw). |
 | Consultant topic | free text | Goes to the consultant, with a context line about pending questions. A reply to a question card is a discussion unless armed by `✍️ Ответить текстом`. |
 
@@ -334,7 +334,7 @@ Order: pending questions first, then working threads, then by last activity. The
 `registry_refresh_seconds` and not at all when nothing changed. Archiving a thread closes its consultant topic;
 unarchiving reopens the same one.
 
-After a consultant reply, the pinned opening message shows PicoClaw’s estimated context usage. `🗜️≥N` counts observed compression and summarization events among the last 5000 relevant gateway journal events; older or unavailable logs may make the lifetime count higher. If the session cannot be mapped to the journal, the count is omitted.
+After a consultant reply, the pinned opening message shows PicoClaw’s estimated context usage. `🗜️N` counts observed compression and summarization events among the last 5000 relevant gateway journal events; older or unavailable logs may make the lifetime count higher. If the session cannot be mapped to the journal, the count is `—`.
 
 ### `/status` content
 

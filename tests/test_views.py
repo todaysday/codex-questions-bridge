@@ -44,8 +44,9 @@ def buttons(view):
 
 def test_opening_context_is_consultant_estimate_on_first_line():
     text = render_opening(row(), "s1", (123300, 475000), 2)
-    assert text.splitlines()[0] == "Консультант: FoxProfile — User Access · ≈ ctx 123.3k/475k (26%) · 🗜️≥2"
-    assert "🗜️" not in render_opening(row(), "s1", (123300, 475000))
+    assert text.splitlines()[0] == "ctx 123.3k/475k (26%) · 🗜️2"
+    assert "🗜️—" in render_opening(row(), "s1", (123300, 475000))
+    assert text.splitlines()[1] == "🤖 FoxProfile — User Access"
 
 
 def test_deep_link_format():
