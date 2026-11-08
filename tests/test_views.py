@@ -9,6 +9,7 @@ from cqb.domain.models import Question, QuestionItem, QuestionOption, Thread
 from cqb.services.registry import RegistryPage, RegistryRow
 from cqb.telegram.fmt import CALLBACK_LIMIT, TEXT_LIMIT, callback_key, topic_link
 from cqb.telegram.card_view import SECRET_NOTICE, render_card
+from cqb.telegram.consultant_view import render_opening
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import ActionSpec
 from cqb.telegram.registry_view import registry_doc, render_registry
@@ -39,6 +40,12 @@ def page(rows, p=0, nxt=False, archived=False):
 
 def buttons(view):
     return [b for r in view.keyboard for b in r]
+
+
+def test_opening_context_is_consultant_estimate_on_first_line():
+    text = render_opening(row(), "s1", (123300, 475000), 2)
+    assert text.splitlines()[0] == "Консультант: FoxProfile — User Access · ≈ ctx 123.3k/475k (26%) · 🗜️≥2"
+    assert "🗜️" not in render_opening(row(), "s1", (123300, 475000))
 
 
 def test_deep_link_format():

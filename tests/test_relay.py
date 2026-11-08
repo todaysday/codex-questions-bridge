@@ -73,6 +73,20 @@ def test_not_configured_replies_without_any_dialog():
     run(main())
 
 
+def test_relay_updates_context_after_a_reply_without_blocking_the_reply():
+    async def main():
+        seen = []
+        async def update(c, usage):
+            seen.append((c.root_thread_id, usage))
+        sink = Sink()
+        relay = ConsultantRelay(Dialog(results=(DialogResult(Outcome.REPLY, "pong", (123, 1000)),)), sink,
+                                on_usage=update)
+        await relay.relay(consultant(), "hi")
+        await wait_until(lambda: bool(seen))
+        assert sink.said == [(7, "pong")] and seen == [("r1", (123, 1000))]
+    run(main())
+
+
 def test_status_lines_for_every_submit_and_dialog_outcome():
     async def main():
         for outcome, line in [(Submit.QUEUED, QUEUED), (Submit.QUEUE_FULL, QUEUE_FULL), (Submit.UNAVAILABLE, UNAVAILABLE)]:

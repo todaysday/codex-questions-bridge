@@ -57,9 +57,17 @@ async def create_consultant(tg, name):
     return tg.topic_named(name)[0]
 
 
-def test_run_with_consultant_chat_replies_in_topic_and_serves_mcp(tmp_path):
+def test_run_with_consultant_chat_replies_in_topic_and_serves_mcp(tmp_path, monkeypatch):
     async def main():
-        app, tg, pico = FakeAppServer(), FakeTelegram(), FakePico()
+        async def answer(sid, text):
+            return [create(f"echo:{text}", context_usage={"used_tokens": 123300, "total_tokens": 475000})]
+
+        async def compactions(sid):
+            return 2
+
+        monkeypatch.setattr(cqb_main, "observed_compactions", compactions)
+
+        app, tg, pico = FakeAppServer(), FakeTelegram(), FakePico(answer)
         for s in (app, tg, pico):
             await s.start()
         app.add_thread("t1", 2_000_000_000, name="FoxProfile")
@@ -74,6 +82,7 @@ def test_run_with_consultant_chat_replies_in_topic_and_serves_mcp(tmp_path):
             topic = await create_consultant(tg, "FoxProfile")
             tg.push_message("why option A?", topic)
             await wait_until(lambda: any(m["text"] == "echo:why option A?" for m in tg.live_messages(topic)))
+            await wait_until(lambda: any("≈ ctx 123.3k/475k (26%) · 🗜️≥2" in m["text"] for m in tg.live_messages(topic)))
             tg.push_message("/clear", topic)  # escaped on the way to PicoClaw
             await wait_until(lambda: any(m["text"] == "echo:User says: /clear" for m in tg.live_messages(topic)))
             key = next(iter(pico.sockets))

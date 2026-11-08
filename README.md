@@ -334,6 +334,8 @@ Order: pending questions first, then working threads, then by last activity. The
 `registry_refresh_seconds` and not at all when nothing changed. Archiving a thread closes its consultant topic;
 unarchiving reopens the same one.
 
+After a consultant reply, the pinned opening message shows PicoClaw’s estimated context usage. `🗜️≥N` counts observed compression and summarization events among the last 5000 relevant gateway journal events; older or unavailable logs may make the lifetime count higher. If the session cannot be mapped to the journal, the count is omitted.
+
 ### `/status` content
 
 Header: state icon, thread name and project folder (only the last component of the working directory, left out when unknown), then model (short, `luna 6·high`, `sol 6.1·low`), turn time (like `2ч15м`), last activity (`now`, `N м`, `N ч`, `N д`) and what it does now, then context, the session-wide cache hit and the compaction count (`🗜️N`, hidden when zero) for the root and for each shown subagent (all read from the session files, so they survive a restart), goal, subagent counts (up to 300

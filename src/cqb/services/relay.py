@@ -56,6 +56,7 @@ class Submit(StrEnum):
 class DialogResult:
     outcome: Outcome
     text: str = ""
+    context_usage: tuple[int, int] | None = None
 
 
 Deliver = Callable[[DialogResult], Awaitable[None]]
@@ -82,9 +83,11 @@ class ConsultantRelay:
     def __init__(
         self, dialog: ConsultantDialog | None, sink: TopicSink, *, typing_seconds: float = TYPING_SECONDS,
         context: ContextLine | None = None, typing_max: float = TYPING_MAX_SECONDS,
+        on_usage: Callable[[Consultant, tuple[int, int]], Awaitable[None]] | None = None,
     ) -> None:
         self._dialog = dialog  # None: consultants are not configured
         self._context = context
+        self._on_usage = on_usage
         self._sink = sink
         self._typing_seconds = typing_seconds
         self._typing_max = typing_max
@@ -103,6 +106,11 @@ class ConsultantRelay:
         async def deliver(result: DialogResult) -> None:
             await self._leave(topic)
             await self._say(topic, present(result), markdown=result.outcome is Outcome.REPLY)
+            if result.outcome is Outcome.REPLY and result.context_usage is not None and self._on_usage:
+                try:
+                    await self._on_usage(consultant, result.context_usage)
+                except Exception as exc:
+                    log.warning("could not update consultant context: %s", type(exc).__name__)
 
         if text.strip() != STOP:
             text = (lead if lead is not None else self._pending_line(consultant)) + text

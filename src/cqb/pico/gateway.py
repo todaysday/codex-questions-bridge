@@ -114,6 +114,7 @@ class ReplyAssembler:
         self.text = ""
         self.error: str | None = None
         self.error_text = ""
+        self.context_usage: tuple[int, int] | None = None
 
     @property
     def has_reply(self) -> bool:
@@ -134,9 +135,16 @@ class ReplyAssembler:
             return
         content = payload.get("content")
         text = content if isinstance(content, str) else ""
+        if kind == "message.create":
+            self.context_usage = None
         if payload.get("kind") == "tool_calls" or (kind == "message.create" and not text.strip()):
             self.text = ""  # a tool call follows: anything before it was intermediate narration
             return
+        usage = payload.get("context_usage")
+        if isinstance(usage, dict):
+            used, total = usage.get("used_tokens"), usage.get("total_tokens")
+            if type(used) is int and type(total) is int and used >= 0 and total > 0:
+                self.context_usage = (used, total)
         if text.strip():
             self.text = text[: self._max]  # updates are cumulative; the newest content replaces
 
@@ -414,7 +422,7 @@ class PicoGateway:
                 msg = await ws.receive(timeout=wait)
             except TimeoutError:
                 if asm.has_reply:
-                    return DialogResult(Outcome.REPLY, asm.text)
+                    return DialogResult(Outcome.REPLY, asm.text, asm.context_usage)
                 continue
             except _SOCKET_ERRORS as exc:  # e.g. ClientConnectionResetError while answering a ping
                 log.warning("pico socket failed mid-turn (session %s): %s; the reply is lost", s.sid[:8],

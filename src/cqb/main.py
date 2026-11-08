@@ -26,9 +26,10 @@ from cqb.dao.bot_state import BotStateDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import SourceDao, ThreadDao
-from cqb.domain.models import AgentQuestion, Question, Source
+from cqb.domain.models import AgentQuestion, Consultant, Question, Source
 from cqb.mcp.server import McpServer
 from cqb.mcp.tools import build_tools
+from cqb.pico.compactions import observed_compactions
 from cqb.pico.gateway import PicoGateway
 from cqb.pico.health import PicoHealth, health_url
 from cqb.pico.status_narrator import STATUS_PROMPT, PicoStatusNarrator
@@ -46,7 +47,7 @@ from cqb.services.relay import ConsultantRelay
 from cqb.services.scope import SessionScopes
 from cqb.services.status import StatusNarrator, StatusService
 from cqb.telegram.agent_cards import AgentQuestionCards
-from cqb.telegram.api import API_BASE, BotApi
+from cqb.telegram.api import API_BASE, BadRequest, BotApi
 from cqb.telegram.present import Presenter
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.consultant_view import render_opening
@@ -159,6 +160,19 @@ async def run(
             row = registry.describe(root)
             return render_opening(row, source_id) if row else None
 
+        async def update_opening_usage(consultant: Consultant, usage: tuple[int, int]) -> None:
+            if consultant.opening_message_id is None:
+                return
+            row = registry.describe(consultant.root_thread_id)
+            if row:
+                count = await observed_compactions(consultant.pico_session_key)
+                text = render_opening(row, source_id, usage, count)
+                try:
+                    await api.edit_message_text(tg.chat_id, consultant.opening_message_id, text)
+                except BadRequest as exc:
+                    if not exc.not_modified:
+                        raise
+
         consultants = ConsultantService(
             consultant_dao, threads, tg_topics, source_id, tg.chat_id, on_open=cards_for_root, opening=opening_text
         )
@@ -205,7 +219,8 @@ async def run(
             RouterConfig(tg.chat_id, frozenset(tg.allowed_user_ids), me.username),
             present, keys, topics, publisher, cards, agent_cards, consultants, registry, questions,
             agent_questions,
-            ConsultantRelay(gateway, tg_topics, context=focus), focus, status, source_id, inventory.poke,
+            ConsultantRelay(gateway, tg_topics, context=focus, on_usage=update_opening_usage),
+            focus, status, source_id, inventory.poke,
         )
         closers.append(router.close)
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)

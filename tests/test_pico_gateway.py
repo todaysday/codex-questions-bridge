@@ -86,6 +86,17 @@ def test_assembler_plain_reply_and_ignored_frames():
     assert a.text == "hi" and a.has_reply and a.error is None
 
 
+def test_assembler_keeps_valid_context_from_final_frame():
+    a = assemble(create("answer"), {"type": "message.update", "payload": {
+        "content": "answer", "context_usage": {"used_tokens": 123300, "total_tokens": 475000}}})
+    assert a.context_usage == (123300, 475000)
+    a.feed(create("", "tool"))
+    assert a.context_usage is None
+    a.feed({"type": "message.create", "payload": {"content": "x", "context_usage": {
+        "used_tokens": True, "total_tokens": 475000}}})
+    assert a.context_usage is None
+
+
 def test_assembler_streaming_updates_are_cumulative_and_replace():
     a = assemble(create("He", "m"), update("Hel", "m"), update("Hello", "m"))
     assert a.text == "Hello"

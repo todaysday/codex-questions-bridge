@@ -3,6 +3,7 @@
 from cqb.services.registry import RegistryRow
 from cqb.telegram.fmt import when
 from cqb.telegram.registry_view import CONSULTANT_MARK, thread_name
+from cqb.telegram.status_view import tokens
 
 THREAD_COMMAND_ENABLED = False  # /thread: disabled by owner request, may return later
 
@@ -15,9 +16,13 @@ def _commands() -> str:
     return "\n".join(lines)
 
 
-def render_opening(row: RegistryRow, source_id: str) -> str:
+def render_opening(
+    row: RegistryRow, source_id: str, usage: tuple[int, int] | None = None, compactions: int | None = None,
+) -> str:
+    context = f" · ≈ ctx {tokens(usage[0])}/{tokens(usage[1])} ({round(usage[0] * 100 / usage[1])}%)" if usage else ""
+    compact = f" · 🗜️≥{compactions}" if compactions is not None else ""
     return (
-        f"Консультант: {thread_name(row)}\n"
+        f"Консультант: {thread_name(row)}{context}{compact}\n"
         f"Codex source: {source_id} · thread: …{row.thread.thread_id[-8:]}\n\n"
         f"{_commands()}\n"
         "Диалог с моделью пока не подключён."
