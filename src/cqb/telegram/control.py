@@ -10,6 +10,7 @@ import time
 from collections.abc import Awaitable, Callable
 
 from cqb.dao.bot_state import BotStateDao
+from cqb.domain.status import RateLimits
 from cqb.services.registry import RegistryQuery
 from cqb.telegram.api import BadRequest, RichRejected, TelegramError
 from cqb.telegram.keys import ActionKeys
@@ -22,6 +23,7 @@ log = logging.getLogger(__name__)
 
 MAX_MESSAGE_AGE = 6 * 3600  # re-render at least this often so callback ids never expire on screen
 SAFETY_SECONDS = 60  # periodic re-render in case an event was missed; unchanged content is not written
+LIMITS_TTL = 30
 
 
 class ControlTopics:
@@ -88,6 +90,7 @@ class RegistryPublisher:
         rows: int = 10,
         safety: float = SAFETY_SECONDS,
         clock: Callable[[], float] = time.time,
+        limits: Callable[[], Awaitable[RateLimits | None]] | None = None,
     ) -> None:
         self._present = present
         self._api = present.api
@@ -100,6 +103,8 @@ class RegistryPublisher:
         self._rows = rows  # threads per page
         self._safety = safety
         self._clock = clock
+        self._limits_source = limits
+        self._limits_cache: tuple[int, RateLimits | None] | None = None
         self._lock = asyncio.Lock()
         self._wake = asyncio.Event()
         self._force = False
@@ -161,7 +166,8 @@ class RegistryPublisher:
         if not page.rows and page_no > 0:
             self.set_view(0, archived)
             page = self._query.page(0, self._rows, archived)
-        doc = registry_doc(page, self._chat_id, now)
+        limits = await self._rate_limits(now)
+        doc = registry_doc(page, self._chat_id, now, limits)
         digest = doc.fingerprint() + ("+rich" if rich else "")
         message_id = self.message_id
         fresh = now - (self._state.get_int("registry.written_at") or 0) < MAX_MESSAGE_AGE
@@ -182,6 +188,22 @@ class RegistryPublisher:
         self._state.set("registry.written_at", now)
         self._keys.purge_expired()
         return True
+
+    async def _rate_limits(self, now: int) -> RateLimits | None:
+        if self._limits_source is None:
+            return None
+        if self._limits_cache is None or now - self._limits_cache[0] >= LIMITS_TTL:
+            try:
+                async with asyncio.timeout(3):
+                    limits = await self._limits_source()
+            except Exception as exc:
+                log.debug("registry limits unavailable: %s", type(exc).__name__)
+                limits = None
+            if limits is None:
+                self._limits_cache = None
+                return None
+            self._limits_cache = (now, limits)
+        return self._limits_cache[1]
 
     async def _edit(self, message_id: int, doc: Doc, rich: bool) -> int | None:
         """Edit in place; None when the message is gone. A classic message Telegram will not turn into a rich one is

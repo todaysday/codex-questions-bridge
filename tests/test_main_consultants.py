@@ -80,6 +80,10 @@ def test_run_with_consultant_chat_replies_in_topic_and_serves_mcp(tmp_path, monk
             consultant_tokens=ConsultantTokens(PICO_TOKEN, MCP_TOKEN)))
         try:
             topic = await create_consultant(tg, "FoxProfile")
+            control = tg.topic_named("📋 Треды Codex")[0]
+            tg.push_message("/threads", control)
+            await wait_until(lambda: any("📈 осталось 70% нед." in m["text"] for m in tg.live_messages(control)))
+            assert "account/rateLimits/read" in app.methods()
             tg.push_message("why option A?", topic)
             await wait_until(lambda: any(m["text"] == "echo:why option A?" for m in tg.live_messages(topic)))
             await wait_until(lambda: any("ctx 123.3k/475k (26%) · 🗜️2" in m["text"] for m in tg.live_messages(topic)))

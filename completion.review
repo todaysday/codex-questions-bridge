@@ -6,3 +6,4 @@
 - Gateway event counts are lower bounds limited to the retained journal. Live Telegram rendering remains to be verified after deployment.
 - The opening message uses durable, authorized buttons for questions and status; the pinned context is refreshed only after a consultant reply was delivered.
 - Source-derived compaction events are counted from the retained gateway journal; the user chose to display the observed count without a lower-bound marker.
+- The registry shows only an available weekly Codex limit, with a cached read and a bounded timeout; startup remains available before the daemon connects.

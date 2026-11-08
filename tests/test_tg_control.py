@@ -5,6 +5,7 @@ import time
 
 
 from cqb.domain.enums import ArchiveState, ConsultantState as S
+from cqb.domain.status import RateLimits
 from cqb.telegram.keys import ACTION_TTL
 from fake_telegram import OWNER
 from tg_stack import NOW, Stack, make_stack, snapshot, thread
@@ -14,6 +15,30 @@ STRANGER = 4242
 
 def run(coro):
     return asyncio.run(coro)
+
+
+def test_registry_refreshes_weekly_limits_and_fails_soft(conn):
+    async def main():
+        async with make_stack(conn, thread("r1"), rich=True) as st:
+            st.publisher._limits_source = st.status_source.rate_limits
+            msg = st.registry_message
+            st.status_source.limits = RateLimits(80, NOW + 3600, 10080)
+            await st.publisher.refresh()
+            assert "📈 осталось 20% нед. · сброс через 1ч 00м" in st.fake.messages[msg]["text"]
+            st.status_source.limits = RateLimits(90, NOW + 3600, 10080)
+            st.clock.now += 10
+            await st.publisher.refresh()
+            assert "осталось 20%" in st.fake.messages[msg]["text"]
+            st.clock.now += 21
+            await st.publisher.refresh()
+            assert "осталось 10%" in st.fake.messages[msg]["text"]
+            async def unavailable():
+                raise OSError("offline")
+            st.publisher._limits_source = unavailable
+            st.clock.now += 31
+            await st.publisher.refresh()
+            assert "📈" not in st.fake.messages[msg]["text"] and "r1" in st.fake.messages[msg]["text"]
+    run(main())
 
 
 def click(st: Stack, message_id, part, user=OWNER):

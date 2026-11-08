@@ -5,6 +5,7 @@ import time
 import pytest
 
 from cqb.domain.enums import ArchiveState, ConsultantState as S, QuestionLifecycle as L, VerificationSource
+from cqb.domain.status import RateLimits
 from cqb.domain.models import Question, QuestionItem, QuestionOption, Thread
 from cqb.services.registry import RegistryPage, RegistryRow
 from cqb.telegram.fmt import CALLBACK_LIMIT, TEXT_LIMIT, callback_key, topic_link
@@ -13,6 +14,7 @@ from cqb.telegram.consultant_view import render_opening
 from cqb.telegram.keys import ActionKeys
 from cqb.telegram.models import ActionSpec
 from cqb.telegram.registry_view import registry_doc, render_registry
+from cqb.telegram.render import to_html, to_view
 from cqb.dao.actions import ActionDao
 
 CHAT = -1001234567890
@@ -40,6 +42,16 @@ def page(rows, p=0, nxt=False, archived=False):
 
 def buttons(view):
     return [b for r in view.keyboard for b in r]
+
+
+def test_registry_weekly_limit_in_header_on_rich_and_classic_paths():
+    doc = registry_doc(page([row()]), CHAT, NOW, RateLimits(80, NOW + 2 * 86400 + 17 * 3600 + 47 * 60, 10080))
+    line = "📈 осталось 20% нед. · сброс через 2д 17ч 47м"
+    bound = doc.mapped(lambda b: dataclasses.replace(b, callback_data="k:1"))
+    assert f"<p>{line}</p><hr/>" in to_html(bound)
+    assert f"всего 0\n{line}\n\n" in to_view(doc).text
+    short = registry_doc(page([row()]), CHAT, NOW, RateLimits(10, NOW + 60, 300))
+    assert "📈" not in to_html(short.mapped(lambda b: dataclasses.replace(b, callback_data="k:1")))
 
 
 def test_opening_context_is_consultant_estimate_on_first_line():

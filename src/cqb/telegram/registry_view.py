@@ -5,11 +5,12 @@ Row markers: ❓ a question is pending, 🟢 the thread is working right now (bo
 """
 
 from cqb.domain.enums import ConsultantState
+from cqb.domain.status import RateLimits
 from cqb.services.registry import RegistryPage, RegistryRow
 from cqb.telegram.fmt import BUTTON_TEXT_LIMIT, age, clip, topic_link
 from cqb.telegram.models import ActionSpec, Bold, Button, Divider, Doc, Para, Row, View
 from cqb.telegram.render import to_view
-from cqb.telegram.status_view import folder_name
+from cqb.telegram.status_view import folder_name, limits_line
 
 NAME_LIMIT = 60
 FOLDER_LIMIT = 32
@@ -35,7 +36,7 @@ def render_registry(page: RegistryPage, chat_id: int, now: int) -> View:
     return to_view(registry_doc(page, chat_id, now))
 
 
-def registry_doc(page: RegistryPage, chat_id: int, now: int) -> Doc:
+def registry_doc(page: RegistryPage, chat_id: int, now: int, limits: RateLimits | None = None) -> Doc:
     """Rich: a title, a counts line, then (after one divider) a quote per thread with `markers <b>name</b> [button]` and
     `📁 folder · age` on separate lines, then the page row (◀️ n/total ▶️) and the archive toggle. Classic: the numbered two-line entries, one
     button per keyboard row, and the page in the title. No clock time anywhere: the message carries its own."""
@@ -49,8 +50,10 @@ def registry_doc(page: RegistryPage, chat_id: int, now: int) -> Doc:
     blocks: list[Para | Row | Divider] = [
         Para((f"{icon} ", Bold(kind)), classic=f"{icon} {kind}{paged}"),
         Para((counts,), glue="\n"),
-        Divider(),
     ]
+    if limits and limits.window_minutes == 10080 and (line := limits_line(limits, now)):
+        blocks.append(Para((line,), glue="\n"))
+    blocks.append(Divider())
     for n, row in enumerate(page.rows, start=1):
         marks = "".join(filter(None, (
             QUESTION_MARK if row.pending_questions else "", WORKING_MARK if row.working else "",

@@ -104,7 +104,7 @@ def _card(r: StatusReport, plan: Plan, open_link: str = "") -> str:
     agents = _agents(r, plan)
     if len(agents) > 1:
         agents = [agents[0], "<blockquote expandable>\n" + "\n".join(agents[1:]) + "\n</blockquote>"]
-    blocks = ["\n".join(top), "\n".join(agents), "\n".join(_summary(r.summary, plan)), _limits(r.limits, r.now)]
+    blocks = ["\n".join(top), "\n".join(agents), "\n".join(_summary(r.summary, plan)), limits_line(r.limits, r.now)]
     text = "\n\n".join(b for b in blocks if b)
     link = _link(r, open_link) if plan.link else None
     return f"{text}\n{link}" if link else text
@@ -264,7 +264,7 @@ def _item_phrase(item: ItemBrief) -> str:
     return DASH
 
 
-def _limits(lim: RateLimits | None, now: int) -> str:
+def limits_line(lim: RateLimits | None, now: int) -> str:
     """`📈 осталось 49% нед. · сброс через 1д 10ч 05м`: what is left, and the reset as a countdown. Empty (no line at
     all) when the usage is unknown; no countdown when the reset is unknown or already past."""
     if lim is None or lim.used_percent is None:

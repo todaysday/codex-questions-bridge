@@ -27,6 +27,7 @@ from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import SourceDao, ThreadDao
 from cqb.domain.models import AgentQuestion, Consultant, Question, Source
+from cqb.domain.status import RateLimits
 from cqb.mcp.server import McpServer
 from cqb.mcp.tools import build_tools
 from cqb.pico.compactions import observed_compactions
@@ -143,11 +144,16 @@ async def run(
             agent_questions=agent_dao,
         )
         present = Presenter(api, tg.rich_messages)
+        reader = DaemonStatusReader(client)
+
+        async def registry_limits() -> RateLimits | None:
+            return await reader.rate_limits() if client.connected else None
+
         topics = ControlTopics(present, state, tg.chat_id, tg.control_topic_name)
         tg_topics = TelegramTopics(present, tg.chat_id)
         publisher = RegistryPublisher(
             present, topics, state, keys, registry, tg.chat_id, interval=tg.registry_refresh_seconds,
-            rows=tg.registry_rows_per_page,
+            rows=tg.registry_rows_per_page, limits=registry_limits,
         )
         cards = QuestionCards(present, keys, questions, registry, tg.chat_id, publisher.request_refresh)
         agent_cards = AgentQuestionCards(present, keys, agent_questions, registry, tg.chat_id, publisher.request_refresh)
@@ -184,7 +190,6 @@ async def run(
             on_change=publisher.request_refresh,
         )
         home = config.codex.codex_home
-        reader = DaemonStatusReader(client)
         mcp: McpServer | None = None
         narrator: StatusNarrator | None = None
         if config.pico is not None and consultant_tokens is not None:
