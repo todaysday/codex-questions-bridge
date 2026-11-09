@@ -430,7 +430,7 @@ class Router:
                 text = f"{name}{item.get('tool')} {args}"
             elif kind == "commandExecution":
                 text = "$ " + str(item.get("command") or "")
-            can_group = kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) <= 180
+            can_group = kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage", "commandExecution") and len(text) <= 180
             if (can_group and groups and groups[-1][0] == kind
                     and len("\n\n".join(groups[-1][1])) + 2 + len(text) <= 180):
                 groups[-1][1].append(text)
@@ -460,10 +460,13 @@ class Router:
                 older = True
             size += len(label) + len(text.encode("utf-16-le")) // 2 + 4
             body = html.escape(text)
-            if kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) > 180:
+            if kind == "commandExecution" or (
+                kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) > 180
+            ):
                 block = f"<b>{html.escape(label)}</b>\n<blockquote expandable>{body}</blockquote>"
             elif agent_interaction:
-                block = f"🤖 {body}"
+                action, separator, rest = text.partition(" · ")
+                block = f"🤖 <b>{html.escape(action)}</b>{separator}{html.escape(rest)}"
             elif len(parts) > 1 and "\n\n" in text:
                 heading = "🧠 <b>reasoning</b>" if kind == "reasoning" else f"<b>{html.escape(label)}</b>"
                 bullets = "\n".join(f"▪️ {html.escape(part)}" for part in text.split("\n\n"))

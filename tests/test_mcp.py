@@ -542,3 +542,35 @@ def test_status_evidence_timeout_keeps_root_and_cancels_child_reads(conn, monkey
         assert result['root'] is not None and result['incomplete']
         assert cancelled.is_set()
     arun(main())
+
+
+def test_status_evidence_omits_encoded_data_before_truncation_for_root_and_agents(conn, monkeypatch):
+    async def main():
+        w = World(conn)
+        monkeypatch.setattr('cqb.services.context.time.time', lambda: NOW)
+        w.source.children['r1'] = (
+            snapshot('c1', RunState.WORKING, updated=NOW, parent='r1'),
+            snapshot('g1', RunState.IDLE, updated=NOW, parent='r1'),
+        )
+        token = 'gAAAAA' + 'ab_CD-09' * 100
+        w.history.items['r1'] = [entry('t', 'root', text='before ' + token + ' after'),
+                                 entry('t', 'blob', text='before ' + 'Q' * 300 + ' after')]
+        w.history.items['c1'] = [entry('t', 'active', kind='mcpToolCall', server='s', tool='t',
+                                      arguments={'message': token, 'note': 'useful tail'})]
+        w.history.items['g1'] = [entry('t', 'final', text='done ' + token + ' next', phase='final_answer')]
+        evidence = await w.ctx.status_evidence('r1', 's1')
+        root = evidence['root']['events'][0]
+        active = next(a for a in evidence['agents'] if a['thread_id'] == 'c1')['history']['events'][0]
+        final = next(a for a in evidence['agents'] if a['thread_id'] == 'g1')['summary']
+        assert root['text'] == 'before [encoded data omitted] after' and root['redacted']
+        assert evidence['root']['events'][1]['text'] == 'before [BLOB 300 chars omitted] after'
+        assert 'useful tail' in active['text'] and '[encoded data omitted]' in active['text'] and active['redacted']
+        assert final['text'] == 'done [encoded data omitted] next' and final['redacted']
+        assert token[:50] not in json.dumps(evidence)
+
+        # Consultant history keeps its own existing behavior; only status evidence uses the new preprocessing.
+        short = 'gAAAAA' + 'a' * 80
+        w.history.items['r1'] = [entry('t', 'normal', text='plain ' + short)]
+        page = await w.ctx.recent_events('r1', 's1')
+        assert short in page.events[0].text
+    arun(main())

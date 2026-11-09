@@ -29,3 +29,5 @@
 - Reviewed compact thread formatting and completion events; consolidated grouped marker rendering while preserving separate expandable blocks.
 
 - Reviewed uniform agent activity labels and single-entry truncation; simplified activity handling and verified grouped markers.
+
+- Reviewed status evidence preprocessing and command formatting: encoded fragments are removed before truncation, command blocks stay separate, and interaction types retain bold formatting.

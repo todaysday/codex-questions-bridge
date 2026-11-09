@@ -13,7 +13,7 @@ import re
 import time
 from typing import Any, Protocol
 
-from cqb.codex.history import HistoryReader, HistoryUnavailable, event_from_entry, split_ref
+from cqb.codex.history import SUMMARY_CHARS, HistoryReader, HistoryUnavailable, event_from_entry, split_ref
 from cqb.dao.agent_questions import AgentQuestionDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
@@ -45,6 +45,7 @@ DETAIL = (4000, 2000, 26)
 SCOPE_FETCH = 100
 STATUS_EVIDENCE_TIMEOUT = 8
 _ID = re.compile(r"^[A-Za-z0-9._-]{1,100}$")
+_OPAQUE = re.compile(r"(?<![A-Za-z0-9_-])gAAAAA[A-Za-z0-9_-]{40,}={0,2}")
 
 
 class ToolError(Exception):
@@ -129,12 +130,14 @@ class ContextService:
         thread = await self._thread_in_scope(root_id, thread_id or root_id)
         return await self._recent_events(root_id, thread, events, budget, since)
 
-    async def _recent_events(self, root_id: str, thread: str, events: int, budget: int, since: int | None = None) -> EventPage:
+    async def _recent_events(
+        self, root_id: str, thread: str, events: int, budget: int, since: int | None = None, *, status: bool = False,
+    ) -> EventPage:
         try:
             entries, more = await self._history.recent(thread, events)
         except HistoryUnavailable:
             raise ToolError("unavailable", "Codex history is not readable right now") from None
-        normalized = (event_from_entry(thread, e) for e in entries)
+        normalized = (_status_event(thread, e) if status else event_from_entry(thread, e) for e in entries)
         wanted = [
             self._present(ev) for ev in normalized
             if ev is not None and (since is None or ev.at_ms is None or ev.at_ms >= since * 1000)
@@ -156,7 +159,7 @@ class ContextService:
         self._root(root_id, source_id)
         result: dict[str, Any] = {"root": None, "agents": [], "incomplete": False}
         async def root() -> None:
-            result["root"] = dataclasses.asdict(await self._recent_events(root_id, root_id, 30, DEFAULT_BYTES))
+            result["root"] = dataclasses.asdict(await self._recent_events(root_id, root_id, 30, DEFAULT_BYTES, status=True))
 
         async def descendants() -> None:
             active, archived = await asyncio.gather(
@@ -181,12 +184,12 @@ class ContextService:
                         data = {"thread_id": t.thread_id, "name": redact(_clean(t.nickname) or "")[0],
                                 "state": t.state.value, "updated_at": t.updated_at}
                         if is_active:
-                            page = await self._recent_events(root_id, t.thread_id, 10, 4096)
+                            page = await self._recent_events(root_id, t.thread_id, 10, 4096, status=True)
                             data["history"] = dataclasses.asdict(page)
                         else:
                             entries, _ = await self._history.recent(t.thread_id, 30)
                             final = next((e for row in reversed(entries)
-                                          if (e := event_from_entry(t.thread_id, row, max_chars=4000))
+                                          if (e := _status_event(t.thread_id, row, max_chars=4000))
                                           and e.kind == "agentMessage" and e.status == "final_answer"), None)
                             final = self._present(final) if final else None
                             data["summary"] = dataclasses.asdict(final) if final else None
@@ -279,6 +282,26 @@ class ContextService:
     def _present(self, ev: HistoryEvent) -> HistoryEvent:
         text, changed = redact(ev.text)
         return dataclasses.replace(ev, text=text, redacted=ev.redacted or changed)
+
+
+def _status_event(thread: str, entry: dict[str, Any], *, max_chars: int = SUMMARY_CHARS) -> HistoryEvent | None:
+    """Remove unreadable encoded data before clipping, so useful surrounding text survives."""
+    def clean(value: Any) -> Any:
+        if isinstance(value, str):
+            return redact(_OPAQUE.sub("[encoded data omitted]", value))[0]
+        if isinstance(value, list):
+            return [clean(v) for v in value]
+        if isinstance(value, dict):
+            return {k: clean(v) for k, v in value.items()}
+        return value
+
+    item = entry.get("item")
+    if not isinstance(item, dict):
+        return event_from_entry(thread, entry, max_chars=max_chars)
+    fields = ("text", "content", "summary", "command", "arguments", "query")
+    sanitized = {**item, **{key: clean(item[key]) for key in fields if key in item}}
+    event = event_from_entry(thread, {**entry, "item": sanitized}, max_chars=max_chars)
+    return dataclasses.replace(event, redacted=True) if event is not None and sanitized != item else event
 
 
 def cap_int(name: str, value: Any, default: int, lo: int, hi: int) -> int:
