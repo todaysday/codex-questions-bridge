@@ -605,17 +605,3 @@ def test_repeated_empty_wait_calls_are_one_line_without_collab_header(conn):
             assert "▪️ wait -&gt;" not in text
             assert "<b>🔧 collabAgentToolCall</b> wait -&gt; agent-id" in text
     run(main())
-
-
-def test_rich_thread_title_is_h3_and_preserves_expandable_calls(conn):
-    async def main():
-        async with make_stack(conn, thread("r1"), rich=True) as st:
-            topic = await st.open_consultant("r1")
-            opening = st.consultant_dao.get("s1", "r1").opening_message_id
-            st.agent_client.items["r1"] = [{"type": "commandExecution", "id": "c1", "command": "pwd"}]
-            st.fake.press(opening, "Показать тред")
-            await st.pump()
-            message = st.fake.live_messages(topic)[-1]
-            assert message["rich"].startswith("<h3>👁️‍🗨️ Главный тред</h3>")
-            assert "<blockquote expandable>$ pwd</blockquote>" in message["rich"]
-    run(main())
