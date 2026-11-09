@@ -9,12 +9,14 @@ from cqb.telegram.models import Button, Keyboard
 OPENING_QUESTIONS = "opening:questions"
 OPENING_STATUS = "opening:status"
 OPENING_THREAD = "opening:thread"
+OPENING_AGENTS = "opening:agents"
 
 
 def opening_keyboard() -> Keyboard:
     return ((Button("❓ Вопросы", callback_data=OPENING_QUESTIONS),
              Button("📊 Статус", callback_data=OPENING_STATUS),
-             Button("📜 Показать тред", callback_data=OPENING_THREAD)),)
+             Button("📜 Показать тред", callback_data=OPENING_THREAD)),
+            (Button("🔄 Субагенты", callback_data=OPENING_AGENTS),))
 
 
 def render_opening(

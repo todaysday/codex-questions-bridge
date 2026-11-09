@@ -55,6 +55,7 @@ from cqb.telegram.cards import QuestionCards
 from cqb.telegram.consultant_view import opening_keyboard, render_opening
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
+from cqb.telegram.opening_agents import OpeningAgents
 from cqb.telegram.poller import Poller
 from cqb.telegram.router import Router, RouterConfig
 from cqb.telegram.status_post import StatusPoster
@@ -162,23 +163,15 @@ async def run(
         def cards_for_root(root: str) -> None:
             cards.mark_root(root)
             agent_cards.mark_root(root)
+            opening_agents.request(root)
 
         def opening_text(root: str) -> str | None:
             row = registry.describe(root)
             return render_opening(row, source_id) if row else None
 
         async def update_opening_usage(consultant: Consultant, usage: tuple[int, int]) -> None:
-            if consultant.opening_message_id is None:
-                return
-            row = registry.describe(consultant.root_thread_id)
-            if row:
-                count = await observed_compactions(consultant.pico_session_key)
-                text = render_opening(row, source_id, usage, count)
-                try:
-                    await api.edit_message_text(tg.chat_id, consultant.opening_message_id, text, keyboard=opening_keyboard())
-                except BadRequest as exc:
-                    if not exc.not_modified:
-                        raise
+            count = await observed_compactions(consultant.pico_session_key)
+            await opening_agents.update_usage(consultant, usage, count)
 
         consultants = ConsultantService(
             consultant_dao, threads, tg_topics, source_id, tg.chat_id, on_open=cards_for_root, opening=opening_text
@@ -212,13 +205,16 @@ async def run(
             )
         else:
             log.info("consultant chat is not configured: no [pico] section")
+        status_service = StatusService(
+            reader, live, lambda path: read_usage(path, home), source_id, narrator,
+            summary_timeout=config.status.timeout_seconds, compactions=CompactionCounter(home),
+        )
         status = StatusPoster(
-            api, StatusService(
-                reader, live, lambda path: read_usage(path, home), source_id, narrator,
-                summary_timeout=config.status.timeout_seconds, compactions=CompactionCounter(home),
-            ),
+            api, status_service,
             tg.chat_id, source_id, open_link=config.status.open_link, keys=keys, presenter=present,
         )
+        opening_agents = OpeningAgents(present, keys, consultants, registry, status_service, tg.chat_id, source_id, state)
+        closers.append(opening_agents.close)
         closers.append(status.close)
         focus = QuestionFocus(consultant_dao, questions, agent_questions, source_id)
         router = Router(
@@ -228,6 +224,7 @@ async def run(
             ConsultantRelay(gateway, tg_topics, context=focus, on_usage=update_opening_usage),
             focus, status, source_id, inventory.poke, client, home,
         )
+        router.opening_agents = opening_agents
         closers.append(router.close)
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
         questions.subscribe(on_question=cards.on_question, on_resolved=cards.on_resolved)

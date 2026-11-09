@@ -33,3 +33,5 @@
 - Reviewed status evidence preprocessing and command formatting: encoded fragments are removed before truncation, command blocks stay separate, and interaction types retain bold formatting.
 
 - Reviewed answer suffixes and thread snapshots; simplified suffix checks and verified compact replies, grouped calls, line caps, reasoning character counts, and collapsed waits.
+
+- Reviewed pinned agent updates and the eight-agent limit; corrected rollout-fact test expectations for the increased limit.

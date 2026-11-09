@@ -85,7 +85,7 @@ def test_all_subagent_usage_is_read_but_compactions_only_for_shown_lines():
     root, kids = family(**paths)
     env.src.threads["r1"], env.src.children["r1"] = root, kids
     card = env.card()
-    assert len(env.tail_calls) == 9 and len(env.count_calls) == 6
+    assert len(env.tail_calls) == 9 and len(env.count_calls) == 8
     assert "🗜️" not in card and "Субагенты 9" in card
 
 
@@ -104,7 +104,7 @@ def test_token_totals_include_more_than_a_thousand_subagents_without_extra_displ
     report = run(env.svc.collect("s1", "r1"))
     assert calls == [300, 10000]
     assert report.usage.total_tokens == 100 and report.subagent_tokens == 1205 * 3
-    assert not report.subagent_tokens_incomplete and len(report.agents) == 6
+    assert not report.subagent_tokens_incomplete and len(report.agents) == 8
     assert "🌀<b>∑100 (3.6k) · ctx</b>" in render_status(report)
 
 

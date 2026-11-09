@@ -46,7 +46,7 @@ def test_opening_message_goes_first_and_is_pinned_then_cards_follow(conn):
             assert st.fake.pinned[1:] == [opening] and card not in st.fake.pinned  # [0] is the registry message
             first = st.fake.messages[opening]["text"]
             assert first.startswith("ctx — · 🗜️—\n🤖 Fox") and "/status" in first
-            assert [b["text"] for b in st.fake.buttons(opening)] == ["❓ Вопросы", "📊 Статус", "📜 Показать тред"]
+            assert [b["text"] for b in st.fake.buttons(opening)] == ["❓ Вопросы", "📊 Статус", "📜 Показать тред", "🔄 Субагенты"]
     run(main())
 
 
@@ -532,7 +532,7 @@ def test_thread_view_has_no_heading_even_when_history_is_truncated(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.startswith("👁️‍🗨️ <b>Главный тред</b>\n\n<b>🤖 Codex</b>")
+            assert text.startswith("<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>Главный тред</b>\n<blockquote>\u00a0</blockquote>\n\n<b>🤖 Codex</b>")
             assert "Показана последняя часть треда" not in text and "Тред Codex" not in text
     run(main())
 
@@ -606,7 +606,7 @@ def test_repeated_empty_wait_calls_are_one_line_without_collab_header(conn):
     run(main())
 
 
-def test_rich_thread_uses_divider_and_keeps_command_collapsible(conn):
+def test_thread_uses_classic_html_and_keeps_command_collapsible(conn):
     async def main():
         async with make_stack(conn, thread("r1"), rich=True) as st:
             topic = await st.open_consultant("r1")
@@ -615,9 +615,9 @@ def test_rich_thread_uses_divider_and_keeps_command_collapsible(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             message = st.fake.live_messages(topic)[-1]
-            assert message["rich"].startswith("<p>👁️‍🗨️ <b>Главный тред</b></p><hr/>")
-            assert "<blockquote expandable>$ pwd</blockquote>" in message["rich"]
-            assert "──────────" not in message["text"]
+            assert message["text"].startswith("<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>Главный тред</b>\n<blockquote>\u00a0</blockquote>")
+            assert "<blockquote expandable>$ pwd</blockquote>" in message["text"]
+            assert message["parse_mode"] == "HTML"
     run(main())
 
 
@@ -631,4 +631,91 @@ def test_long_mcp_tool_call_has_character_limit(conn):
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
             assert "s/t " + "x" * 1496 + "\n... 504 chars more</blockquote>" in text
+    run(main())
+
+
+def test_pinned_agent_refresh_keeps_usage_and_coalesces(conn):
+    from cqb.telegram.opening_agents import OpeningAgents
+    from cqb.domain.enums import RunState
+    from tg_stack import snapshot
+
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), rich=True) as st:
+            st.status_source.threads["r1"] = snapshot("r1", name="Fox")
+            st.status_source.children["r1"] = (snapshot("child1", RunState.WORKING, parent="r1", nickname="Ada"),)
+            manager = OpeningAgents(st.present, st.keys, st.consultants, st.registry, st.status_service, st.router._cfg.chat_id, "s1", st.state)
+            st.router.opening_agents = manager
+            topic = await st.open_consultant("r1")
+            consultant = st.consultant_dao.get("s1", "r1")
+            await manager.update_usage(consultant, (100, 200), 2)
+            st.fake.press(consultant.opening_message_id, "🔄 Субагенты")
+            await st.pump()
+            await asyncio.gather(*list(manager._tasks.values()))
+            message = st.fake.messages[consultant.opening_message_id]
+            assert "ctx 100/200 (50%)" in message["text"]
+            assert "Ada" in message["text"]
+            assert "<details><summary>🤖 Субагенты · 1</summary>" in message["rich"]
+            assert st.fake.button(consultant.opening_message_id, "🔄 Субагенты")
+            edits = len(st.fake.methods("editMessageText"))
+            manager.request("r1")
+            manager.request("r1")
+            await asyncio.gather(*list(manager._tasks.values()))
+            assert len(st.fake.methods("editMessageText")) == edits
+            st.status_source.children["r1"] += (snapshot("child2", RunState.IDLE, parent="r1", nickname="Bob"),)
+            st.fake.press(consultant.opening_message_id, "❓ Вопросы")
+            await st.pump()
+            await asyncio.gather(*list(manager._tasks.values()))
+            assert "Bob" in st.fake.messages[consultant.opening_message_id]["text"]
+            await manager.update_usage(consultant, (150, 200), 3)
+            message = st.fake.messages[consultant.opening_message_id]
+            assert "ctx 150/200 (75%)" in message["text"] and "Ada" in message["text"]
+            await manager.close()
+            restarted = OpeningAgents(st.present, st.keys, st.consultants, st.registry, st.status_service, st.router._cfg.chat_id, "s1", st.state)
+            await restarted._refresh("r1")
+            assert "ctx 150/200 (75%)" in st.fake.messages[consultant.opening_message_id]["text"]
+            await restarted.close()
+    run(main())
+
+
+def test_pinned_agent_list_classic_fallback(conn):
+    from cqb.telegram.opening_agents import OpeningAgents
+    from cqb.domain.enums import RunState
+    from tg_stack import snapshot
+
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), rich=False) as st:
+            st.status_source.threads["r1"] = snapshot("r1", name="Fox")
+            st.status_source.children["r1"] = (snapshot("child1", RunState.WORKING, parent="r1", nickname="Ada"),)
+            manager = OpeningAgents(st.present, st.keys, st.consultants, st.registry, st.status_service, st.router._cfg.chat_id, "s1", st.state)
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            await manager._refresh("r1")
+            message = st.fake.messages[opening]
+            assert "<blockquote expandable>" in message["text"]
+            assert st.fake.button(opening, "Ada")
+            assert st.fake.button(opening, "🔄 Субагенты")
+            assert message["thread_id"] == topic
+            await manager.close()
+    run(main())
+
+
+def test_pinned_agent_list_shows_eight_and_counts_the_rest(conn):
+    from cqb.telegram.opening_agents import OpeningAgents
+    from cqb.domain.enums import RunState
+    from tg_stack import snapshot
+
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), rich=True) as st:
+            st.status_source.threads["r1"] = snapshot("r1", name="Fox")
+            st.status_source.children["r1"] = tuple(
+                snapshot(f"child{i}", RunState.WORKING, parent="r1", nickname=f"Agent{i}") for i in range(10)
+            )
+            manager = OpeningAgents(st.present, st.keys, st.consultants, st.registry, st.status_service, st.router._cfg.chat_id, "s1", st.state)
+            await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            await manager._refresh("r1")
+            message = st.fake.messages[opening]
+            assert message["rich"].count('<tg-button type="callback_data"') == 8
+            assert "… и ещё 2" in message["text"]
+            await manager.close()
     run(main())

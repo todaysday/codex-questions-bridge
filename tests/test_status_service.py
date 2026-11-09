@@ -165,7 +165,7 @@ def children(src, n, **kw):
                  model="luna", effort="high", role="luna-high") for i in range(n))
 
 
-def test_subagent_counting_and_the_six_line_cap():
+def test_subagent_counting_and_the_eight_line_cap():
     svc, src, live, _ = make()
     src.threads["r1"] = snapshot("r1")
     children(src, 11)
@@ -177,12 +177,12 @@ def test_subagent_counting_and_the_six_line_cap():
     src.children["r1"] = tuple(kids)
     report = collect(svc)
     assert (report.agents_total, report.agents_working, report.agents_waiting, report.agents_idle) == (11, 2, 2, 7)
-    assert len(report.agents) == 6
+    assert len(report.agents) == 8
     assert [a.state for a in report.agents[:4]] == [R.WORKING, R.WORKING, R.WAITING_INPUT, R.WAITING_APPROVAL]
     text = render_status(report)
     assert "🤖<b>Субагенты 11</b><b> · </b>🟢2<b> · </b>🟡2<b> · </b>⚪7\n" in text
-    assert sum(x.startswith((" 🟢", " 🟡", " ⚪")) for x in text.splitlines()) == 6
-    assert "\n … и ещё 5\n" in text and "+" not in text.split("Субагенты")[1].split("🔛")[0]
+    assert sum(x.startswith((" 🟢", " 🟡", " ⚪")) for x in text.splitlines()) == 8
+    assert "\n … и ещё 3\n" in text and "+" not in text.split("Субагенты")[1].split("🔛")[0]
     assert len(text.splitlines()) <= 20
 
 
@@ -192,7 +192,7 @@ def test_more_pages_than_fetched_is_marked():
     children(src, 9)
     src.more = True
     text = render_status(collect(svc))
-    assert "Субагенты 9+</b>" in text and "\n … и ещё 3\n" in text and "ещё+" not in text
+    assert "Субагенты 9+</b>" in text and "\n … и ещё 1\n" in text and "ещё+" not in text
 
 
 def test_agent_line_label_context_from_broadcast_and_dashes():
@@ -309,10 +309,10 @@ def test_the_cap_counts_and_shows_the_plus_only_in_the_header():
     report = collect(svc)
     assert (report.agents_total, report.agents_more) == (300, True)
     assert header(report) == "🤖<b>Субагенты 300+</b><b> · </b>⚪300"
-    assert "\n … и ещё 294\n" in render_status(report)
+    assert "\n … и ещё 292\n" in render_status(report)
 
 
-def test_the_six_lines_are_working_then_waiting_then_most_recent():
+def test_the_eight_lines_are_working_then_waiting_then_most_recent():
     svc, src, *_ = make()
     src.threads["r1"] = snapshot("r1")
     kids = [snapshot(f"i{i}", R.IDLE, updated=NOW - 10 * (i + 1), parent="r1", nickname=f"Idle{i}") for i in range(6)]
@@ -321,7 +321,7 @@ def test_the_six_lines_are_working_then_waiting_then_most_recent():
     kids.append(snapshot("q", R.WAITING_APPROVAL, updated=NOW - 4000, parent="r1", nickname="Waits"))
     src.children["r1"] = tuple(kids)
     labels = [a.label for a in collect(svc).agents]
-    assert labels == ["WorkNew", "WorkOld", "Waits", "Idle0", "Idle1", "Idle2"]
+    assert labels == ["WorkNew", "WorkOld", "Waits", "Idle0", "Idle1", "Idle2", "Idle3", "Idle4"]
 
 
 def test_title_from_the_agent_path_and_the_depth_prefix():

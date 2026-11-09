@@ -113,9 +113,9 @@ def test_zero_counts_are_hidden_in_the_header():
     assert header([agent(), agent(state=R.WAITING_INPUT)]) == "🤖<b>Субагенты 2</b><b> · </b>🟢1<b> · </b>🟡1"
 
 
-def test_at_most_six_subagent_lines_and_the_rest_is_counted():
+def test_at_most_eight_subagent_lines_and_the_rest_is_counted():
     text = valid(render_status(with_agents([agent(f"A{i}") for i in range(8)], total=40)))
-    assert sum(x.startswith(" 🟢") for x in text.splitlines()) == 6 and "\n … и ещё 34\n" in text
+    assert sum(x.startswith(" 🟢") for x in text.splitlines()) == 8 and "\n … и ещё 32\n" in text
     text = valid(render_status(with_agents([agent(f"A{i}") for i in range(4)])))
     assert sum(x.startswith(" 🟢") for x in text.splitlines()) == 4 and "и ещё" not in text
 
@@ -388,7 +388,7 @@ def test_a_long_summary_is_kept_whole_while_the_card_fits():
 
 def test_plans_shrink_in_the_documented_order():
     plans = view.PLANS
-    assert plans[0] == view.Plan(6, 40, True)
+    assert plans[0] == view.Plan(8, 40, True)
     lines = [p.agent_lines for p in plans]
     assert lines == sorted(lines, reverse=True) and MIN_AGENT_LINES in lines
     first_short = next(i for i, p in enumerate(plans) if p.now_max < 40)

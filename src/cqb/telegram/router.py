@@ -22,9 +22,9 @@ from cqb.services.question_context import discussion_prefix
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
-from cqb.telegram.api import RichRejected, TelegramError
+from cqb.telegram.api import TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
-from cqb.telegram.consultant_view import OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD
+from cqb.telegram.consultant_view import OPENING_AGENTS, OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
@@ -106,6 +106,7 @@ class Router:
         self._thread_client = thread_client
         self._codex_home = codex_home
         self._notices: set[asyncio.Task[None]] = set()
+        self.opening_agents = None
         self.rejected = 0
 
     async def handle(self, update: Update) -> None:
@@ -279,10 +280,12 @@ class Router:
             self.rejected += 1
             return  # no answer: do not confirm anything to a stranger
         assert cb.data is not None and cb.message_id is not None
-        if cb.data in (OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD):
+        if cb.data in (OPENING_AGENTS, OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD):
             await self._opening_callback(cb)
             return
         action = self._keys.resolve(cb.data)
+        if action is not None and self.opening_agents is not None:
+            self.opening_agents.request(action.root_thread_id)
         retire: str | None = None  # what to do with a confirmation message once the press is answered
         if action is None:
             retire = None if self._heal(cb.message_id) else STALE_NOTE
@@ -313,8 +316,12 @@ class Router:
         assert cb.message_id is not None
         try:
             consultant = self._consultants.by_opening_message(cb.message_id)
+            if consultant is not None and self.opening_agents is not None:
+                self.opening_agents.request(consultant.root_thread_id)
             if consultant is None or consultant.state is not ConsultantState.OPEN or consultant.tg_topic_id is None:
                 reply = Reply(STALE, alert=True)
+            elif cb.data == OPENING_AGENTS:
+                reply = Reply()
             elif cb.data == OPENING_QUESTIONS:
                 await self._questions_command(consultant.root_thread_id, consultant.tg_topic_id)
                 reply = Reply()
@@ -464,7 +471,7 @@ class Router:
             else:
                 groups.append((kind, [text], expandable))
         blocks = []
-        size = len(f"👁️‍🗨️ {title}\n\n".encode("utf-16-le")) // 2
+        size = len(f"\u00a0\n👁️‍🗨️ {title}\n\u00a0\n\n".encode("utf-16-le")) // 2
         for kind, parts, expandable in reversed(groups):
             text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
             agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
@@ -522,19 +529,7 @@ class Router:
             if size >= 3598:
                 break
         body = "\n\n".join(reversed(blocks)) or "История пуста"
-        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n\n" + body
-        if self._present.rich:
-            parts = re.split(r"(<blockquote expandable>.*?</blockquote>)", body, flags=re.DOTALL)
-            rich = f"<p>👁️‍🗨️ <b>{html.escape(title)}</b></p><hr/>" + "".join(
-                part.replace("\n", "<br>") if part.startswith("<blockquote expandable>")
-                else "<p>" + part.strip("\n").replace("\n", "<br>") + "</p>"
-                for part in parts if part.strip("\n")
-            )
-            try:
-                await self._api.send_rich_message(self._cfg.chat_id, rich, thread_id=topic_id)
-                return
-            except RichRejected as exc:
-                self._present.rejected(exc)
+        text = f"<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>{html.escape(title)}</b>\n<blockquote>\u00a0</blockquote>\n\n" + body
         await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:

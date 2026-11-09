@@ -4,7 +4,7 @@ from dataclasses import dataclass
 
 from cqb.domain.enums import ItemKind, RunState
 
-AGENT_LINES = 6  # subagent lines the card can show; the service reads 'now' data for exactly these
+AGENT_LINES = 8  # subagent lines the card can show; the service reads 'now' data for exactly these
 PROGRESS_MAX = 650  # characters of the Status Agent's `В процессе` part (the prompt asks for about 900 in all)
 NEXT_MAX = 400  # and of its `Дальше` part
 

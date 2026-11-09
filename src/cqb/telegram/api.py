@@ -159,12 +159,15 @@ class BotApi:
     async def edit_message_text(
         self, chat_id: int, message_id: int, text: str,
         keyboard: tuple[tuple[Button, ...], ...] | None = None,
+        *, parse_mode: str | None = None,
     ) -> None:
         params: dict[str, Any] = {
             "chat_id": chat_id, "message_id": message_id, "text": text,
             "disable_web_page_preview": True,
             "reply_markup": _markup(keyboard or ()),
         }
+        if parse_mode:
+            params["parse_mode"] = parse_mode
         await self._call("editMessageText", params)
 
     async def edit_message_keyboard(self, chat_id: int, message_id: int, keyboard: tuple[tuple[Button, ...], ...]) -> None:

@@ -206,9 +206,9 @@ def test_subagent_lines_get_now_data_concurrently_with_a_small_semaphore_and_onl
 
     src.activity = slow
     report = run(svc.collect("s1", "r1"))
-    assert len(report.agents) == 6
+    assert len(report.agents) == 8
     assert 1 < live["peak"] <= NOW_FETCHES
-    assert src.calls.count("turn") <= 1 + 6  # the root and the lines shown; the other six are never read
+    assert src.calls.count("turn") <= 1 + 8  # the root and the lines shown; the other four are never read
     assert render_status(report).count("<b> · </b>думает") >= 1
 
 
