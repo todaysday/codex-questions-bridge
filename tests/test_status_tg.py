@@ -336,6 +336,9 @@ def test_status_agent_button_opens_agent_thread(conn, rich):
                 assert '<tg-button type="callback_data"' in card["rich"]
                 assert '<details><summary>🤖<b>Субагенты' in card["rich"]
                 assert "Показать агентов" not in card["rich"]
+                assert "</summary><p><br>" not in card["rich"]
+                assert "<br></p></details>" not in card["rich"]
+                assert "</details><p><br>" not in card["rich"]
                 label = "👁️‍🗨️"
             else:
                 assert '<blockquote expandable>' in card["text"]

@@ -92,12 +92,13 @@ class StatusPoster:
                             if '<tg-button ' in part and i:
                                 before, _, heading = parts[i - 1].rstrip("\n").rpartition("\n")
                                 parts[i - 1] = before
-                                parts[i] = part.replace("<blockquote expandable>", f"<details><summary>{heading}</summary><p>", 1).replace("</blockquote>", "</p></details>", 1)
+                                content = part[len("<blockquote expandable>"):-len("</blockquote>")].strip("\n")
+                                parts[i] = f"<details><summary>{heading}</summary><p>{content}</p></details>"
                         rich_text = "".join(
                             part.replace("\n", "<br>") if part.startswith("<details>")
                             else part.replace("\n", "<br>") if part.startswith("<blockquote expandable>")
-                            else "<p>" + part.replace("\n", "<br>") + "</p>"
-                            for part in parts if part
+                            else "<p>" + part.strip("\n").replace("\n", "<br>") + "</p>"
+                            for part in parts if part.strip("\n")
                         )
                 parse_mode = "HTML"
             except StatusUnavailable:
