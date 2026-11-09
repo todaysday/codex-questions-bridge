@@ -459,7 +459,7 @@ class Router:
             else:
                 groups.append((kind, [text], expandable))
         blocks = []
-        size = len(f"👁️‍🗨️ {title}\n\n".encode("utf-16-le")) // 2
+        size = len(f"👁️‍🗨️ {title}\n──────────\n\n".encode("utf-16-le")) // 2
         for kind, parts, expandable in reversed(groups):
             text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
             agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
@@ -516,7 +516,7 @@ class Router:
             blocks.append(block)
             if size >= 3598:
                 break
-        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n\n" + ("\n\n".join(reversed(blocks)) or "История пуста")
+        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n──────────\n\n" + ("\n\n".join(reversed(blocks)) or "История пуста")
         await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:
