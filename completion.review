@@ -27,3 +27,5 @@
 - Reviewed compact thread rendering: incoming agent messages use sender and recipient only, long tool calls remain separate, and collaboration message contents are never displayed.
 
 - Reviewed compact thread formatting and completion events; consolidated grouped marker rendering while preserving separate expandable blocks.
+
+- Reviewed uniform agent activity labels and single-entry truncation; simplified activity handling and verified grouped markers.

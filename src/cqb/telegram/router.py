@@ -402,21 +402,22 @@ class Router:
                 recipient = item["recipient"].rstrip("/").split("/")[-1]
                 author = "Codex" if author == "root" else author
                 recipient = "Codex" if recipient == "root" else recipient
-                text = f"сообщение · {author} → {recipient}"
+                text = f"message · {author} → {recipient}"
             elif kind == "subAgentActivity":
                 agent_id = item.get("agentThreadId")
                 path = item.get("agentPath")
-                action, target = interactions.get(item.get("id"), (str(item.get("kind") or "interacted"), None))
-                if item.get("kind") == "completed":
+                activity = item.get("kind")
+                action, target = interactions.get(item.get("id"), (str(activity or "interacted"), None))
+                if activity in ("started", "completed"):
                     target = None
                 if target:
                     target_name = names.get(target) or target.rstrip("/").split("/")[-1]
                     if re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", target_name):
-                        target_name = "неизвестный агент"
+                        target_name = "unknown agent"
                 else:
-                    target_name = names.get(agent_id) or (path.rstrip("/").split("/")[-1] if isinstance(path, str) and path else None) or "неизвестный агент"
-                if item.get("kind") == "completed":
-                    text = f"{target_name} завершил работу"
+                    target_name = names.get(agent_id) or (path.rstrip("/").split("/")[-1] if isinstance(path, str) and path else None) or "unknown agent"
+                if activity in ("started", "completed"):
+                    text = f"{activity} · {target_name}"
                 else:
                     text = f"{action} · {sender} → {target_name}"
             elif kind in ("mcpToolCall", "dynamicToolCall"):
@@ -463,9 +464,9 @@ class Router:
                 block = f"<b>{html.escape(label)}</b>\n<blockquote expandable>{body}</blockquote>"
             elif agent_interaction:
                 block = f"🤖 {body}"
-            elif len(parts) > 1:
+            elif len(parts) > 1 and "\n\n" in text:
                 heading = "🧠 <b>reasoning</b>" if kind == "reasoning" else f"<b>{html.escape(label)}</b>"
-                bullets = "\n".join(f"◾️ {html.escape(part)}" for part in text.split("\n\n"))
+                bullets = "\n".join(f"▪️ {html.escape(part)}" for part in text.split("\n\n"))
                 block = f"{heading}\n{bullets}"
             elif kind == "reasoning":
                 block = f"🧠 <b>reasoning</b> {body}"

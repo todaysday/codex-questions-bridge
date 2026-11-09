@@ -260,7 +260,7 @@ def test_show_thread_groups_reasoning_and_shows_collaboration_input(conn, tmp_pa
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
             assert text.count("🧠 <b>reasoning</b>") == 1
-            assert "🧠 <b>reasoning</b>\n◾️ First\n◾️ Second" in text and "**" not in text
+            assert "🧠 <b>reasoning</b>\n▪️ First\n▪️ Second" in text and "**" not in text
             assert "ind008" in text and "uuid-agent" not in text
             assert "🤖 send_message · Codex → ind008" in text
             assert "🔧 subAgentActivity" not in text
@@ -316,7 +316,7 @@ def test_incoming_agent_message_is_placed_in_order_without_content(conn, tmp_pat
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "🤖 сообщение · ind008 → Codex" in text
+            assert "🤖 message · ind008 → Codex" in text
             assert "🔧 incomingAgentMessage" not in text
             assert text.index("before") < text.index("ind008") < text.index("after")
             assert "MUST_NOT_APPEAR" not in text
@@ -346,6 +346,38 @@ def test_completed_agent_is_shown_as_finished_not_as_message(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "🤖 tl_241_oracle_setup_preflight завершил работу" in text
-            assert "completed" not in text and "→" not in text
+            assert "🤖 completed · tl_241_oracle_setup_preflight" in text
+            assert "→" not in text
+    run(main())
+
+
+def test_truncated_reasoning_group_with_one_visible_entry_uses_inline_format(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "reasoning", "id": "a", "summary": ["first " * 10]},
+                {"type": "reasoning", "id": "b", "summary": ["last " * 12]},
+                {"type": "userMessage", "id": "c", "content": [{"type": "text", "text": "x" * 3540}]},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "🧠 <b>reasoning</b> …" in text
+            assert "▪️" not in text
+    run(main())
+
+
+def test_started_agent_is_shown_without_sender(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [{"type": "subAgentActivity", "id": "start", "kind": "started",
+                                             "agentThreadId": "agent-id", "agentPath": "/root/ind008"}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "🤖 started · ind008" in text and "→" not in text
     run(main())
