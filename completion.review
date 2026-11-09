@@ -25,3 +25,5 @@
 - Reviewed grouped thread activity and bounded rollout reads; removed unused call metadata, confirmed tool outputs are excluded, and stabilized the startup test.
 
 - Reviewed compact thread rendering: incoming agent messages use sender and recipient only, long tool calls remain separate, and collaboration message contents are never displayed.
+
+- Reviewed compact thread formatting and completion events; consolidated grouped marker rendering while preserving separate expandable blocks.

@@ -407,13 +407,18 @@ class Router:
                 agent_id = item.get("agentThreadId")
                 path = item.get("agentPath")
                 action, target = interactions.get(item.get("id"), (str(item.get("kind") or "interacted"), None))
+                if item.get("kind") == "completed":
+                    target = None
                 if target:
                     target_name = names.get(target) or target.rstrip("/").split("/")[-1]
                     if re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", target_name):
                         target_name = "неизвестный агент"
                 else:
                     target_name = names.get(agent_id) or (path.rstrip("/").split("/")[-1] if isinstance(path, str) and path else None) or "неизвестный агент"
-                text = f"{action} · {sender} → {target_name}"
+                if item.get("kind") == "completed":
+                    text = f"{target_name} завершил работу"
+                else:
+                    text = f"{action} · {sender} → {target_name}"
             elif kind in ("mcpToolCall", "dynamicToolCall"):
                 args = item.get("arguments")
                 if args is None:
@@ -458,9 +463,13 @@ class Router:
                 block = f"<b>{html.escape(label)}</b>\n<blockquote expandable>{body}</blockquote>"
             elif agent_interaction:
                 block = f"🤖 {body}"
-            elif kind == "reasoning" and len(parts) == 1:
-                block = f"<b>{html.escape(label)} {body}</b>"
-            elif kind not in ("userMessage", "agentMessage") and len(parts) == 1:
+            elif len(parts) > 1:
+                heading = "🧠 <b>reasoning</b>" if kind == "reasoning" else f"<b>{html.escape(label)}</b>"
+                bullets = "\n".join(f"◾️ {html.escape(part)}" for part in text.split("\n\n"))
+                block = f"{heading}\n{bullets}"
+            elif kind == "reasoning":
+                block = f"🧠 <b>reasoning</b> {body}"
+            elif kind not in ("userMessage", "agentMessage"):
                 block = f"<b>{html.escape(label)}</b> {body}"
             else:
                 block = f"<b>{html.escape(label)}</b>\n{body}"

@@ -259,8 +259,8 @@ def test_show_thread_groups_reasoning_and_shows_collaboration_input(conn, tmp_pa
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.count("🧠 reasoning") == 1
-            assert "First" in text and "Second" in text and "**" not in text
+            assert text.count("🧠 <b>reasoning</b>") == 1
+            assert "🧠 <b>reasoning</b>\n◾️ First\n◾️ Second" in text and "**" not in text
             assert "ind008" in text and "uuid-agent" not in text
             assert "🤖 send_message · Codex → ind008" in text
             assert "🔧 subAgentActivity" not in text
@@ -284,7 +284,7 @@ def test_long_tool_calls_remain_separate_expandable_blocks(conn):
             text = st.fake.live_messages(topic)[-1]["text"]
             assert text.count("<blockquote expandable>") == 2
             assert text.count("🔧 commandExecution") == 2
-            assert text.count("🧠 reasoning") == 1
+            assert text.count("🧠 <b>reasoning</b>") == 1
     run(main())
 
 
@@ -332,5 +332,20 @@ def test_single_reasoning_is_shown_on_one_line(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "<b>🧠 reasoning Aligning preflight</b>" in text
+            assert "🧠 <b>reasoning</b> Aligning preflight" in text
+    run(main())
+
+
+def test_completed_agent_is_shown_as_finished_not_as_message(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [{"type": "subAgentActivity", "id": "done", "kind": "completed",
+                                             "agentThreadId": "agent-id", "agentPath": "/root/tl_241_oracle_setup_preflight"}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "🤖 tl_241_oracle_setup_preflight завершил работу" in text
+            assert "completed" not in text and "→" not in text
     run(main())
