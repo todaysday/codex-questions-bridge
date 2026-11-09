@@ -86,14 +86,21 @@ class StatusPoster:
                         marker = lines[index].find(name)
                         lines[index] = lines[index][:marker] + f'<tg-button type="callback_data" data="{html.escape(button.callback_data or "", quote=True)}">👁️‍🗨️</tg-button>' + lines[index][marker:]
                     keyboard = tuple(buttons)
-                    if buttons:
+                    if buttons or "<blockquote expandable>🎯" in text:
                         parts = re.split(r"(<blockquote expandable>.*?</blockquote>)", "\n".join(lines), flags=re.DOTALL)
                         for i, part in enumerate(parts):
                             if '<tg-button ' in part and i:
                                 before, _, heading = parts[i - 1].rstrip("\n").rpartition("\n")
                                 parts[i - 1] = before
                                 content = part[len("<blockquote expandable>"):-len("</blockquote>")].strip("\n")
-                                parts[i] = f"<details><summary>{heading}</summary><p>{content}</p></details>"
+                                plain = html.unescape(re.sub(r"<[^>]+>", "", content))
+                                preview = html.escape(plain[:200]) + ("…" if len(plain) > 200 else "")
+                                parts[i] = f"<details><summary>{heading}\n{preview}</summary><p>{content}</p></details>"
+                            elif part.startswith("<blockquote expandable>🎯"):
+                                content = part[len("<blockquote expandable>🎯"):-len("</blockquote>")]
+                                plain = html.unescape(re.sub(r"<[^>]+>", "", content))
+                                preview = html.escape(plain[:200]) + ("…" if len(plain) > 200 else "")
+                                parts[i] = f"<details><summary>🎯 {preview}</summary><p>{content}</p></details>"
                         rich_text = "".join(
                             part.replace("\n", "<br>") if part.startswith("<details>")
                             else part.replace("\n", "<br>") if part.startswith("<blockquote expandable>")

@@ -6,7 +6,7 @@ import asyncio
 import pytest
 
 from cqb.domain.enums import ArchiveState, RunState as R
-from cqb.domain.status import StatusSummary
+from cqb.domain.status import GoalSummary, StatusSummary
 from cqb.telegram.fmt import TEXT_LIMIT
 from cqb.telegram.status_post import BUSY, UNAVAILABLE
 from test_tg_control import STRANGER
@@ -326,6 +326,7 @@ def test_status_agent_button_opens_agent_thread(conn, rich):
         async with make_stack(conn, thread("r1", name="Fox"), narrator=Says(), rich=rich) as st:
             st.status_source.threads["r1"] = snapshot("r1", name="Fox")
             st.status_source.children["r1"] = (snapshot("child1", R.WORKING, parent="r1", nickname="Inventory"),)
+            st.status_source.goals["r1"] = GoalSummary("Проверить задачу", "active", 0, None)
             st.agent_client.items["child1"] = [{"type": "agentMessage", "id": "m1", "text": "Agent work"}]
             topic = await consultant_topic(st)
             st.fake.push_message("/status", topic)
@@ -335,6 +336,7 @@ def test_status_agent_button_opens_agent_thread(conn, rich):
             if rich:
                 assert '<tg-button type="callback_data"' in card["rich"]
                 assert '<details><summary>🤖<b>Субагенты' in card["rich"]
+                assert '<details><summary>🎯 Проверить задачу</summary><p>Проверить задачу</p></details>' in card["rich"]
                 assert "Показать агентов" not in card["rich"]
                 assert "</summary><p><br>" not in card["rich"]
                 assert "<br></p></details>" not in card["rich"]
@@ -352,4 +354,41 @@ def test_status_agent_button_opens_agent_thread(conn, rich):
             else:
                 assert text.startswith("👁️‍🗨️ <b>Inventory</b>")
             assert "Agent work" in text
+    run(main())
+
+
+def test_collapsed_status_previews_goal_and_agents(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=Says(), rich=True) as st:
+            st.status_source.threads["r1"] = snapshot("r1", name="Fox")
+            goal = "a" * 210 + " & конец"
+            st.status_source.goals["r1"] = GoalSummary(goal, "active", 0, None)
+            st.status_source.children["r1"] = tuple(
+                snapshot(f"c{i}", R.WORKING, parent="r1", nickname=f"Agent {i}") for i in range(6)
+            )
+            topic = await consultant_topic(st)
+            st.fake.push_message("/status", topic)
+            await st.pump()
+            await st.status_done()
+            [(_, card)] = cards(st, topic)
+            rich = card["rich"]
+            assert "<summary>🎯 " + "a" * 200 + "…</summary>" in rich
+            assert "<p>" + "a" * 210 + " &amp; конец</p></details>" in rich
+            assert "<summary>🤖<b>Субагенты" in rich
+            assert "Agent 0" in rich.split("</summary>")[-2]
+            assert rich.count('<tg-button type="callback_data"') == 6
+    run(main())
+
+
+def test_goal_preview_without_agents(conn):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=Says(), rich=True) as st:
+            st.status_source.threads["r1"] = snapshot("r1", name="Fox")
+            st.status_source.goals["r1"] = GoalSummary("Goal & test", "active", 0, None)
+            topic = await consultant_topic(st)
+            st.fake.push_message("/status", topic)
+            await st.pump()
+            await st.status_done()
+            [(_, card)] = cards(st, topic)
+            assert "<summary>🎯 Goal &amp; test</summary>" in card["rich"]
     run(main())
