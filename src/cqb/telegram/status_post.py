@@ -9,9 +9,16 @@ one collect per root at a time.
 import asyncio
 import contextlib
 import logging
+import html
+import json
+import re
 
 from cqb.services.status import StatusService, StatusUnavailable
-from cqb.telegram.api import BotApi
+from cqb.telegram.api import BotApi, RichRejected
+from cqb.telegram.keys import ActionKeys
+from cqb.telegram.models import ActionSpec, Button
+from cqb.telegram.present import Presenter
+from cqb.telegram.status_view import TITLE_MAX, _e
 from cqb.telegram.status_view import render_status
 
 log = logging.getLogger(__name__)
@@ -25,7 +32,7 @@ BUSY = "статус уже собирается"
 class StatusPoster:
     def __init__(
         self, api: BotApi, service: StatusService, chat_id: int, source_id: str, *, typing_seconds: float = TYPING_SECONDS,
-        open_link: str = "",
+        open_link: str = "", keys: ActionKeys | None = None, presenter: Presenter | None = None,
     ) -> None:
         self._api = api
         self._service = service
@@ -33,6 +40,8 @@ class StatusPoster:
         self._source = source_id
         self._typing_seconds = typing_seconds
         self._open_link = open_link  # [status] open_link: the card's last line; "" = none
+        self._keys = keys
+        self._presenter = presenter
         self._running: dict[str, asyncio.Task[None]] = {}  # root -> its collect
 
     def request(self, root_thread_id: str, topic_id: int) -> bool:
@@ -53,9 +62,32 @@ class StatusPoster:
     async def _post(self, root_thread_id: str, topic_id: int) -> None:
         typing = asyncio.create_task(self._typing(topic_id), name="status-typing")
         parse_mode = None  # only the card is HTML; the fixed notices are plain text
+        keyboard = ()
+        rich_text = None
         try:
             try:
-                text = render_status(await self._service.snapshot(self._source, root_thread_id), self._open_link)
+                report = await self._service.snapshot(self._source, root_thread_id)
+                text = render_status(report, self._open_link)
+                if self._keys:
+                    lines = text.splitlines()
+                    buttons = []
+                    used_lines = set()
+                    for agent in report.agents:
+                        if not agent.thread_id:
+                            continue
+                        name = _e(agent.label or "—", TITLE_MAX)
+                        index = next((i for i, line in enumerate(lines) if i not in used_lines and re.match(r"^ (?:↳ )?[🟢🟡🔴⚪🟠💤❔]" + re.escape(name) + r"(?:<b> · </b>|$)", line)), None)
+                        if index is None:
+                            continue
+                        used_lines.add(index)
+                        payload = json.dumps({"thread": agent.thread_id, "title": agent.label or "Агент"}, ensure_ascii=False)
+                        button = self._keys.bind(((Button("👁️‍🗨️ " + (agent.label or "Агент"), action=ActionSpec("agent_thread", root_thread_id, payload)),),))[0][0]
+                        buttons.append((button,))
+                        marker = lines[index].find(name)
+                        lines[index] = lines[index][:marker] + f'<tg-button type="callback_data" data="{html.escape(button.callback_data or "", quote=True)}">👁️‍🗨️</tg-button>' + lines[index][marker:]
+                    keyboard = tuple(buttons)
+                    if buttons:
+                        rich_text = "<p>" + "<br>".join(lines).replace("<blockquote expandable>", "").replace("</blockquote>", "") + "</p>"
                 parse_mode = "HTML"
             except StatusUnavailable:
                 text = UNAVAILABLE
@@ -65,7 +97,13 @@ class StatusPoster:
         finally:
             typing.cancel()
         try:
-            await self._api.send_message(self._chat_id, text, thread_id=topic_id, parse_mode=parse_mode)
+            if rich_text and self._presenter and self._presenter.rich:
+                try:
+                    await self._api.send_rich_message(self._chat_id, rich_text, thread_id=topic_id)
+                    return
+                except RichRejected as exc:
+                    self._presenter.rejected(exc)
+            await self._api.send_message(self._chat_id, text, thread_id=topic_id, parse_mode=parse_mode, keyboard=keyboard)
         except Exception as exc:  # the Bot API client already retried; the snapshot is lost, the next /status works
             log.warning("could not post the status snapshot to topic %d: %s", topic_id, type(exc).__name__)
 

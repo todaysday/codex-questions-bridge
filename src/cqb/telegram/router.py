@@ -335,7 +335,7 @@ class Router:
         except TelegramError as exc:
             log.debug("answerCallbackQuery failed: %s", exc)
 
-    async def _show_thread(self, root: str, topic_id: int) -> None:
+    async def _show_thread(self, root: str, topic_id: int, title: str = "Главный тред") -> None:
         entries, older = await HistoryReader(self._thread_client).recent(root, 100)
         interaction_ids = {entry["item"]["id"] for entry in entries
                            if isinstance(entry.get("item"), dict) and entry["item"].get("type") == "subAgentActivity"
@@ -459,7 +459,7 @@ class Router:
             else:
                 groups.append((kind, [text], expandable))
         blocks = []
-        size = 0
+        size = len(f"👁️‍🗨️ {title}\n\n".encode("utf-16-le")) // 2
         for kind, parts, expandable in reversed(groups):
             text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
             agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
@@ -516,7 +516,7 @@ class Router:
             blocks.append(block)
             if size >= 3598:
                 break
-        text = "\n\n".join(reversed(blocks)) or "История пуста"
+        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n\n" + ("\n\n".join(reversed(blocks)) or "История пуста")
         await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:
@@ -549,6 +549,13 @@ class Router:
 
     async def _dispatch(self, a: TelegramAction) -> Reply:
         match a.action:
+            case "agent_thread":
+                consultant = self._consultants.get(a.root_thread_id or "")
+                if not consultant or consultant.state is not ConsultantState.OPEN or consultant.tg_topic_id is None:
+                    return Reply(STALE, alert=True)
+                data = json.loads(a.payload or "{}")
+                await self._show_thread(data["thread"], consultant.tg_topic_id, data["title"])
+                return Reply()
             case "create":
                 return await self._create(a.root_thread_id or "")
             case "page":

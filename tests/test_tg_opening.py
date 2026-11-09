@@ -533,7 +533,7 @@ def test_thread_view_has_no_heading_even_when_history_is_truncated(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.startswith("<b>🤖 Codex</b>")
+            assert text.startswith("👁️‍🗨️ <b>Главный тред</b>\n\n<b>🤖 Codex</b>")
             assert "Показана последняя часть треда" not in text and "Тред Codex" not in text
     run(main())
 

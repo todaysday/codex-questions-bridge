@@ -122,6 +122,7 @@ class AgentLine:
     depth: int | None = None  # 2 and deeper are drawn as nested
     compactions: int | None = None  # how many times its context was compacted; None = unknown
     cache_permille: int | None = None  # session-wide prompt-cache hit rate (see UsageSnapshot); None = unknown
+    thread_id: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

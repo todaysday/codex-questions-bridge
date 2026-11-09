@@ -252,6 +252,7 @@ class StatusService:
             context_percent=usage.fill_percent if usage else None,
             last_activity=self._last(t) or None, activity=activity, compactions=compactions,
             cache_permille=usage.cache_permille if usage else None,
+            thread_id=t.thread_id,
         )
 
     def _last(self, t: ThreadSnapshot) -> int:

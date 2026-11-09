@@ -185,7 +185,8 @@ class Stack:
         )
         self.status_service = StatusService(
             self.status_source, self.live, lambda path: None, "s1", narrator, self.clock, summary_timeout=summary_timeout)
-        self.status_cards = StatusPoster(self.api, self.status_service, CHAT_ID, "s1", typing_seconds=0.01, open_link=open_link)
+        self.keys = ActionKeys(ActionDao(conn), "s1", self.clock)
+        self.status_cards = StatusPoster(self.api, self.status_service, CHAT_ID, "s1", typing_seconds=0.01, open_link=open_link, keys=self.keys, presenter=self.present)
         self.inventory = Recorder()
         self.consultant_dao = ConsultantDao(conn)
         self.question_dao = QuestionDao(conn)
@@ -193,7 +194,6 @@ class Stack:
         self.agent_client = AgentClientStub()
         self.questions = QuestionService(self.client, self.question_dao, self.threads, "s1")
         self.agent = AgentQuestionService(self.agent_client, self.agent_dao, self.threads, "s1", clock=self.clock)
-        self.keys = ActionKeys(ActionDao(conn), "s1", self.clock)
         self.registry = RegistryQuery(self.threads, self.consultant_dao, self.question_dao, "s1", 30, self.clock, live=self.live,
                                        agent_questions=self.agent_dao)
         self.topics = ControlTopics(self.present, self.state, CHAT_ID, "📋 Треды Codex")

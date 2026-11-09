@@ -318,3 +318,28 @@ def test_no_link_line_by_default(conn):
             [(mid, card)] = cards(st, topic)
             assert "🔗" not in card["text"] and "<a " not in card["text"] and "📈" not in card["text"]
     run(main())
+
+
+@pytest.mark.parametrize("rich", [False, True])
+def test_status_agent_button_opens_agent_thread(conn, rich):
+    async def main():
+        async with make_stack(conn, thread("r1", name="Fox"), narrator=Says(), rich=rich) as st:
+            st.status_source.threads["r1"] = snapshot("r1", name="Fox")
+            st.status_source.children["r1"] = (snapshot("child1", R.WORKING, parent="r1", nickname="Inventory"),)
+            st.agent_client.items["child1"] = [{"type": "agentMessage", "id": "m1", "text": "Agent work"}]
+            topic = await consultant_topic(st)
+            st.fake.push_message("/status", topic)
+            await st.pump()
+            await st.status_done()
+            [(mid, card)] = cards(st, topic)
+            if rich:
+                assert '<tg-button type="callback_data"' in card["rich"]
+                label = "👁️‍🗨️"
+            else:
+                label = "Inventory"
+            st.fake.press(mid, label)
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.startswith("👁️‍🗨️ <b>Inventory</b>")
+            assert "Agent work" in text
+    run(main())
