@@ -87,7 +87,15 @@ class StatusPoster:
                         lines[index] = lines[index][:marker] + f'<tg-button type="callback_data" data="{html.escape(button.callback_data or "", quote=True)}">👁️‍🗨️</tg-button>' + lines[index][marker:]
                     keyboard = tuple(buttons)
                     if buttons:
-                        rich_text = "<p>" + "<br>".join(lines).replace("<blockquote expandable>", "").replace("</blockquote>", "") + "</p>"
+                        parts = re.split(r"(<blockquote expandable>.*?</blockquote>)", "\n".join(lines), flags=re.DOTALL)
+                        rich_text = "".join(
+                            ("<details><summary>Показать агентов</summary><p>"
+                             + part[len("<blockquote expandable>"):-len("</blockquote>")].strip("\n").replace("\n", "<br>")
+                             + "</p></details>") if '<tg-button ' in part
+                            else part.replace("\n", "<br>") if part.startswith("<blockquote expandable>")
+                            else "<p>" + part.replace("\n", "<br>") + "</p>"
+                            for part in parts if part
+                        )
                 parse_mode = "HTML"
             except StatusUnavailable:
                 text = UNAVAILABLE

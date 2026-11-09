@@ -334,12 +334,18 @@ def test_status_agent_button_opens_agent_thread(conn, rich):
             [(mid, card)] = cards(st, topic)
             if rich:
                 assert '<tg-button type="callback_data"' in card["rich"]
+                assert '<details><summary>Показать агентов</summary>' in card["rich"]
                 label = "👁️‍🗨️"
             else:
+                assert '<blockquote expandable>' in card["text"]
                 label = "Inventory"
             st.fake.press(mid, label)
             await st.pump()
-            text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.startswith("👁️‍🗨️ <b>Inventory</b>")
+            message = st.fake.live_messages(topic)[-1]
+            text = message["text"]
+            if rich:
+                assert message["rich"].startswith("<h3>👁️‍🗨️ Inventory</h3>")
+            else:
+                assert text.startswith("👁️‍🗨️ <b>Inventory</b>")
             assert "Agent work" in text
     run(main())

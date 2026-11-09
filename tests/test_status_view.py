@@ -66,11 +66,13 @@ def test_full_card_layout():
         "<blockquote expandable>🎯Ship the profile page</blockquote>\n"
         "\n"
         "🤖<b>Субагенты 9</b><b> · </b>🟢1<b> · </b>🟡1<b> · </b>⚪2\n"
+        "<blockquote expandable>\n"
         " 🟢Oracle run lifecycle<b> · </b>luna 6 high<b> · </b>ctx 40%<b> · </b>выполняет: pytest -q\n"
         " 🟡Spec review<b> · </b>luna 6 high<b> · </b>ctx 12%<b> · </b>ждёт ответа\n"
         " ↳ ⚪Parser<b> · </b>luna 6.1 low<b> · </b>12м назад\n"
         " 💤Old one<b> · </b>mystery-1<b> · </b>ctx 7%<b> · </b>2ч назад\n"
         " … и ещё 5\n"
+        "</blockquote>\n"
         "\n"
         "🔛<b>:</b> Правит тесты статуса.\n"
         "\n"
@@ -325,7 +327,7 @@ def test_every_dynamic_string_is_escaped_and_the_card_still_parses():
 def test_the_card_bold_tags_are_exactly_the_fixed_ones():
     text = render_status(with_agents([agent()], summary=StatusSummary("а", "б")))
     assert text.count("<b> · </b>") == 7
-    assert text.count("<blockquote expandable>") == 1
+    assert text.count("<blockquote expandable>") == 2
 
 
 def test_clipping_happens_before_escaping_so_an_entity_is_never_cut():

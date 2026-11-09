@@ -22,7 +22,7 @@ from cqb.services.question_context import discussion_prefix
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
-from cqb.telegram.api import TelegramError
+from cqb.telegram.api import RichRejected, TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.consultant_view import OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD
 from cqb.telegram.cards import QuestionCards
@@ -516,7 +516,20 @@ class Router:
             blocks.append(block)
             if size >= 3598:
                 break
-        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n\n" + ("\n\n".join(reversed(blocks)) or "История пуста")
+        body = "\n\n".join(reversed(blocks)) or "История пуста"
+        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n\n" + body
+        if self._present.rich:
+            parts = re.split(r"(<blockquote expandable>.*?</blockquote>)", body, flags=re.DOTALL)
+            rich = f"<h3>👁️‍🗨️ {html.escape(title)}</h3>" + "".join(
+                part.replace("\n", "<br>") if part.startswith("<blockquote expandable>")
+                else "<p>" + part.replace("\n", "<br>") + "</p>"
+                for part in parts if part
+            )
+            try:
+                await self._api.send_rich_message(self._cfg.chat_id, rich, thread_id=topic_id)
+                return
+            except RichRejected as exc:
+                self._present.rejected(exc)
         await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:
