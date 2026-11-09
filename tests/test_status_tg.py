@@ -345,7 +345,11 @@ def test_status_agent_button_opens_agent_thread(conn, rich):
                 label = "Inventory"
             st.fake.press(mid, label)
             await st.pump()
-            text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.startswith("👁️‍🗨️ <b>Inventory</b>")
+            message = st.fake.live_messages(topic)[-1]
+            text = message["text"]
+            if rich:
+                assert message["rich"].startswith("<p>👁️‍🗨️ <b>Inventory</b></p><hr/>")
+            else:
+                assert text.startswith("👁️‍🗨️ <b>Inventory</b>")
             assert "Agent work" in text
     run(main())

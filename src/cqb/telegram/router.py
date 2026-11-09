@@ -22,7 +22,7 @@ from cqb.services.question_context import discussion_prefix
 from cqb.services.questions import QuestionService
 from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
-from cqb.telegram.api import TelegramError
+from cqb.telegram.api import RichRejected, TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
 from cqb.telegram.consultant_view import OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD
 from cqb.telegram.cards import QuestionCards
@@ -43,6 +43,7 @@ CONFIRMATION_DONE = ("send", "asend", "cancel", "acancel")  # presses that end t
 NO_QUESTIONS = "Нет неотвеченных вопросов"
 NOTICE_TASKS = 20  # pending "delete this notice" timers
 EXPANDABLE_LINES = 10
+TOOL_CALL_CHARS = 1500
 SECRET_REFUSAL = "Секретный ввод: Bridge не обсуждает и не принимает его, ответьте в Codex"
 
 
@@ -445,7 +446,11 @@ class Router:
             expandable = kind == "commandExecution" or (
                 kind not in ("userMessage", "questionReply", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) > 180
             )
-            if expandable:
+            if expandable and kind in ("commandExecution", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall"):
+                if len(text) > TOOL_CALL_CHARS:
+                    omitted = len(text) - TOOL_CALL_CHARS
+                    text = text[:TOOL_CALL_CHARS] + f"\n... {omitted} chars more"
+            elif expandable:
                 lines = text.splitlines()
                 if len(lines) > EXPANDABLE_LINES:
                     text = "\n".join(lines[:EXPANDABLE_LINES]) + f"\n... {len(lines) - EXPANDABLE_LINES} lines more"
@@ -459,7 +464,7 @@ class Router:
             else:
                 groups.append((kind, [text], expandable))
         blocks = []
-        size = len(f"👁️‍🗨️ {title}\n──────────\n\n".encode("utf-16-le")) // 2
+        size = len(f"👁️‍🗨️ {title}\n\n".encode("utf-16-le")) // 2
         for kind, parts, expandable in reversed(groups):
             text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
             agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
@@ -516,7 +521,20 @@ class Router:
             blocks.append(block)
             if size >= 3598:
                 break
-        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n──────────\n\n" + ("\n\n".join(reversed(blocks)) or "История пуста")
+        body = "\n\n".join(reversed(blocks)) or "История пуста"
+        text = f"👁️‍🗨️ <b>{html.escape(title)}</b>\n\n" + body
+        if self._present.rich:
+            parts = re.split(r"(<blockquote expandable>.*?</blockquote>)", body, flags=re.DOTALL)
+            rich = f"<p>👁️‍🗨️ <b>{html.escape(title)}</b></p><hr/>" + "".join(
+                part.replace("\n", "<br>") if part.startswith("<blockquote expandable>")
+                else "<p>" + part.strip("\n").replace("\n", "<br>") + "</p>"
+                for part in parts if part.strip("\n")
+            )
+            try:
+                await self._api.send_rich_message(self._cfg.chat_id, rich, thread_id=topic_id)
+                return
+            except RichRejected as exc:
+                self._present.rejected(exc)
         await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:
