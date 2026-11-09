@@ -114,7 +114,7 @@ def test_stage_then_answer_then_resolved(conn):
             assert lifecycle(dao, qid) is L.DECISION_STAGED and not dao.get(qid).delivered_to_codex
             await svc.answer(qid)
             await wait_until(lambda: resolved)
-            assert fake.answers == [{"answers": {"pick": {"answers": ["B"]}}}]
+            assert fake.answers == [{"answers": {"pick": {"answers": ["B и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]}}}]
             r = dao.get(qid)
             assert r.lifecycle is L.RESOLVED_OBSERVED and r.delivered_to_codex
             assert resolved[0].lifecycle is L.RESOLVED_OBSERVED
@@ -133,7 +133,7 @@ def test_answer_without_stage_and_not_resolved_until_observed(conn):
             await svc.answer(qid, {"pick": ["A"]})
             assert dao.get(qid).delivered_to_codex
             await wait_until(lambda: resolved)  # only after serverRequest/resolved
-            assert fake.answers[0]["answers"]["pick"]["answers"] == ["A"]
+            assert fake.answers[0]["answers"]["pick"]["answers"] == ["A и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]
     asyncio.run(main())
 
 
@@ -210,3 +210,26 @@ def test_bridge_never_sends_forbidden_methods(conn):
             assert set(fake.methods()) <= {"thread/list", "thread/read", "thread/loaded/list",
                                            "thread/resume", "thread/unsubscribe"}
     asyncio.run(main())
+
+
+def test_suffix_is_added_once_to_last_answer_without_changing_staged_choices(conn):
+    async def main():
+        async with stack(conn) as (svc, dao, fake, client, got, resolved):
+            questions = [Q[0], {**Q[0], "id": "second"}]
+            await fake.ask("t1", "u1", "item-multi", questions)
+            await wait_until(lambda: got)
+            qid = got[0].question_id
+            await svc.answer(qid, {"pick": ["A"], "second": ["B"]})
+            await wait_until(lambda: bool(fake.answers))
+            assert fake.answers[0] == {"answers": {
+                "pick": {"answers": ["A"]}, "second": {"answers": ["B и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]},
+            }}
+            assert dao.get(qid).staged == {"pick": ("A",), "second": ("B",)}
+    asyncio.run(main())
+
+
+def test_answer_suffix_is_not_duplicated():
+    from cqb.services.questions import with_answer_suffix
+    assert with_answer_suffix("Да и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool.") == "Да и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."
+    assert with_answer_suffix("Да") == "Да и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."
+    assert with_answer_suffix("Да и не трьінди") == "Да и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."

@@ -48,7 +48,7 @@ def test_agent_question_end_to_end(tmp_path, caplog):
         [start] = [p for m, p in app.calls if m == "turn/start"]
         assert set(start) == {"threadId", "input", "clientUserMessageId", "turnTrigger"} and start["threadId"] == "t1"
         text = start["input"][0]["text"]
-        assert text.startswith("<send_user_message_question_reply>\n[{") and '"answer":"B"' in text
+        assert text.startswith("<send_user_message_question_reply>\n[{") and '"answer":"B и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."' in text
         await wait_until(lambda: "✅ Доставлено" in tg.messages[card]["text"], 8)  # seen as a userMessage item
         await wait_until(lambda: "❓" not in registry()["text"])
         assert "thread/resume" in app.methods() and app.conns[0].subscribed == set()  # unsubscribed again

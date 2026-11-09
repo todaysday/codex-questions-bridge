@@ -260,7 +260,7 @@ def test_show_thread_groups_reasoning_and_shows_collaboration_input(conn, tmp_pa
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
             assert text.count("🧠 <b>reasoning</b>") == 1
-            assert "🧠 <b>reasoning</b>\n▪️ First\n▪️ Second" in text and "**" not in text
+            assert "🧠 <b>reasoning</b>\n▪️ First (5 ch)\n▪️ Second (6 ch)" in text and "**" not in text
             assert "ind008" in text and "uuid-agent" not in text
             assert "🤖 <b>send_message</b> · Codex → ind008" in text
             assert "🔧 subAgentActivity" not in text
@@ -283,7 +283,7 @@ def test_long_tool_calls_remain_separate_expandable_blocks(conn):
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
             assert text.count("<blockquote expandable>") == 2
-            assert text.count("🔧 commandExecution") == 2
+            assert text.count("🔧 commandExecution") == 1
             assert text.count("🧠 <b>reasoning</b>") == 1
     run(main())
 
@@ -332,7 +332,7 @@ def test_single_reasoning_is_shown_on_one_line(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "🧠 <b>reasoning</b> Aligning preflight" in text
+            assert "🧠 <b>reasoning</b> Aligning preflight (18 ch)" in text
     run(main())
 
 
@@ -397,7 +397,211 @@ def test_short_commands_are_separate_expandable_blocks(conn):
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
             assert "<b>🔧 commandExecution</b>\n<blockquote expandable>$ pwd</blockquote>" in text
-            assert "<b>🔧 commandExecution</b>\n<blockquote expandable>$ git status</blockquote>" in text
+            assert "<blockquote expandable>$ git status</blockquote>" in text
+            assert text.count("🔧 commandExecution") == 1
             assert text.count("<blockquote expandable>") == 2
             assert "<b>🔧 mcpToolCall</b> test/read" in text
+    run(main())
+
+
+def test_adjacent_short_mcp_calls_share_a_heading_but_long_calls_remain_separate(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "mcpToolCall", "id": "a", "server": "server", "tool": "read_a", "arguments": {"path": "a" * 100}},
+                {"type": "mcpToolCall", "id": "b", "server": "server", "tool": "read_b", "arguments": {"path": "b" * 100}},
+                {"type": "mcpToolCall", "id": "c", "server": "server", "tool": "read_long", "arguments": {"path": "c" * 220}},
+                {"type": "mcpToolCall", "id": "d", "server": "server", "tool": "read_d", "arguments": {"path": "d" * 100}},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.count("🔧 mcpToolCall") == 3
+            assert "▪️ server/read_a" in text and "▪️ server/read_b" in text
+            assert "<blockquote expandable>server/read_long" in text
+            assert "<b>🔧 mcpToolCall</b> server/read_d" in text
+    run(main())
+
+
+def test_adjacent_commands_keep_internal_blank_lines_in_their_own_blocks(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "commandExecution", "id": "a", "command": "echo one\n\necho two"},
+                {"type": "commandExecution", "id": "b", "command": "pwd"},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.count("🔧 commandExecution") == 1
+            assert text.count("<blockquote expandable>") == 2
+            assert "<blockquote expandable>$ echo one\n\necho two</blockquote>" in text
+            assert "<blockquote expandable>$ pwd</blockquote>" in text
+    run(main())
+
+
+def test_expandable_blocks_keep_ten_lines_and_report_omitted_lines(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            command = "\n".join(f"command-line-{i}" for i in range(12))
+            tool = "\n".join(f"tool-line-{i}-" + "x" * 30 for i in range(13))
+            st.agent_client.items["r1"] = [
+                {"type": "commandExecution", "id": "a", "command": command},
+                {"type": "mcpToolCall", "id": "b", "server": "server", "tool": "call", "arguments": tool},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "command-line-9\n... 2 lines more</blockquote>" in text
+            assert "command-line-10" not in text and "command-line-11" not in text
+            assert "tool-line-9-" in text and "... 3 lines more</blockquote>" in text
+            assert "tool-line-10" not in text and "tool-line-12" not in text
+    run(main())
+
+
+def test_expandable_line_counter_survives_the_telegram_length_limit(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            command = "\n".join(f"line-{i}-" + "x" * 700 for i in range(15))
+            st.agent_client.items["r1"] = [{"type": "commandExecution", "id": "a", "command": command}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "... 10 lines more</blockquote>" in text
+            assert "line-5-" not in text and "line-14-" not in text
+    run(main())
+
+
+def test_shortened_expandable_call_stays_separate_from_short_calls(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            long_call = "\n".join("x" * 10 for _ in range(20))
+            st.agent_client.items["r1"] = [
+                {"type": "mcpToolCall", "id": "a", "server": "s", "tool": "one", "arguments": {"x": 1}},
+                {"type": "mcpToolCall", "id": "b", "server": "s", "tool": "long", "arguments": long_call},
+                {"type": "mcpToolCall", "id": "c", "server": "s", "tool": "two", "arguments": {"x": 2}},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.count("🔧 mcpToolCall") == 3
+            assert "<blockquote expandable>s/long " in text
+            assert "... 10 lines more</blockquote>" in text
+    run(main())
+
+
+def test_question_reply_shows_answers_without_question_or_wire_format(conn):
+    from cqb.codex.agent_reply import build_reply
+
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            reply = build_reply("call_1", 0, "A private question?", "Да, <GCP> & API")
+            st.agent_client.items["r1"] = [
+                {"type": "userMessage", "id": "a", "content": [{"type": "text", "text": reply}]},
+                {"type": "userMessage", "id": "b", "content": [{"type": "text", "text": "A normal message"}]},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "<b>👤 Вы</b> answer\nДа, &lt;GCP&gt; &amp; API" in text
+            assert "<b>👤 Вы</b>\nA normal message" in text
+            assert "A private question?" not in text and "questionItemId" not in text
+            assert "send_user_message_question_reply" not in text
+    run(main())
+
+
+def test_thread_view_has_no_heading_even_when_history_is_truncated(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "agentMessage", "id": str(i), "text": f"entry {i}"} for i in range(101)
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.startswith("<b>🤖 Codex</b>")
+            assert "Показана последняя часть треда" not in text and "Тред Codex" not in text
+    run(main())
+
+
+def test_reasoning_character_counts_exclude_markdown_and_survive_truncation(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            summary = "**" + "я" * 1500 + "**"
+            st.agent_client.items["r1"] = [{"type": "reasoning", "id": "a", "summary": [summary]}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "(1.5k ch)</blockquote>" in text and "**" not in text
+
+            # The source count remains visible when the single message must cut a huge summary.
+            st.agent_client.items["r1"] = [{"type": "reasoning", "id": "b", "summary": ["x" * 5000]}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "… (5k ch)</blockquote>" in text
+    run(main())
+
+
+def test_reasoning_character_count_uses_full_summary_before_line_truncation(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            summary = "\n".join("x" * 200 for _ in range(15))
+            st.agent_client.items["r1"] = [{"type": "reasoning", "id": "a", "summary": [summary]}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert " (3k ch)\n... 5 lines more</blockquote>" in text
+    run(main())
+
+
+def test_reasoning_character_count_and_omitted_lines_survive_message_limit(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            summary = "\n".join("x" * 700 for _ in range(15))
+            st.agent_client.items["r1"] = [{"type": "reasoning", "id": "a", "summary": [summary]}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert " (10.5k ch)\n... 9 lines more</blockquote>" in text
+    run(main())
+
+
+def test_repeated_empty_wait_calls_are_one_line_without_collab_header(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                *[{"type": "collabAgentToolCall", "id": f"w{i}", "tool": "wait", "receiverThreadIds": []} for i in range(20)],
+                {"type": "reasoning", "id": "r", "summary": ["Doing work"]},
+                *[{"type": "collabAgentToolCall", "id": f"x{i}", "tool": "wait", "receiverThreadIds": []} for i in range(4)],
+                {"type": "collabAgentToolCall", "id": "target", "tool": "wait", "receiverThreadIds": ["agent-id"]},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.count("💤 <b>wait</b> -&gt;") == 2
+            assert "▪️ wait -&gt;" not in text
+            assert "<b>🔧 collabAgentToolCall</b> wait -&gt; agent-id" in text
     run(main())

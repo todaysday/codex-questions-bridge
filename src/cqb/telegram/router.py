@@ -10,6 +10,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Any, Protocol
 
+from cqb.codex.agent_reply import reply_answers
 from cqb.codex.history import HistoryReader, event_from_entry
 from cqb.codex.interactions import read_interactions
 from cqb.domain.enums import ConsultantState
@@ -31,6 +32,7 @@ from cqb.telegram.models import CallbackQuery, Doc, Message, Para, Reply, Update
 from cqb.telegram.present import Presenter
 from cqb.telegram.registry_view import thread_name
 from cqb.telegram.status_post import BUSY as STATUS_BUSY, StatusPoster
+from cqb.telegram.status_view import tokens as format_count
 
 log = logging.getLogger(__name__)
 
@@ -41,6 +43,7 @@ STALE_NOTE = "⌛ устарело"
 CONFIRMATION_DONE = ("send", "asend", "cancel", "acancel")  # presses that end the confirmation of a typed answer
 NO_QUESTIONS = "Нет неотвеченных вопросов"
 NOTICE_TASKS = 20  # pending "delete this notice" timers
+EXPANDABLE_LINES = 10
 SECRET_REFUSAL = "Секретный ввод: Bridge не обсуждает и не принимает его, ответьте в Codex"
 
 
@@ -395,7 +398,15 @@ class Router:
             if event is None or not event.text:
                 continue
             text = event.text
+            reasoning_count = None
+            if kind == "userMessage":
+                answers = reply_answers(text)
+                if answers is not None:
+                    kind = "questionReply"
+                    text = "\n".join(answers)
             if kind == "reasoning":
+                summary = " ".join(str(part) for part in item.get("summary") or []).replace("**", "")
+                reasoning_count = f" ({format_count(len(summary))} ch)"
                 text = text.replace("**", "")
             if kind == "incomingAgentMessage":
                 author = item["author"].rstrip("/").split("/")[-1]
@@ -430,40 +441,85 @@ class Router:
                 text = f"{name}{item.get('tool')} {args}"
             elif kind == "commandExecution":
                 text = "$ " + str(item.get("command") or "")
-            can_group = kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage", "commandExecution") and len(text) <= 180
-            if (can_group and groups and groups[-1][0] == kind
-                    and len("\n\n".join(groups[-1][1])) + 2 + len(text) <= 180):
+            elif kind == "collabAgentToolCall" and item.get("tool") == "wait" and not item.get("receiverThreadIds"):
+                kind = "agentWait"
+                text = "wait ->"
+                if groups and groups[-1][0] == kind:
+                    continue
+            expandable = kind == "commandExecution" or (
+                kind not in ("userMessage", "questionReply", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) > 180
+            )
+            if expandable:
+                lines = text.splitlines()
+                if len(lines) > EXPANDABLE_LINES:
+                    visible = lines[:EXPANDABLE_LINES]
+                    if reasoning_count:
+                        visible[-1] += reasoning_count
+                        reasoning_count = None
+                    text = "\n".join(visible) + f"\n... {len(lines) - EXPANDABLE_LINES} lines more"
+            if reasoning_count:
+                text += reasoning_count
+            can_group = kind == "commandExecution" or (
+                not expandable and kind not in ("userMessage", "questionReply", "agentMessage", "subAgentActivity", "incomingAgentMessage")
+            )
+            if can_group and groups and groups[-1][0] == kind and (
+                kind == "commandExecution" or not groups[-1][2]
+            ):
                 groups[-1][1].append(text)
             else:
-                groups.append((kind, [text]))
-            older = older or event.text_truncated
+                groups.append((kind, [text], expandable))
         blocks = []
         size = 0
-        for kind, parts in reversed(groups):
-            text = "\n\n".join(parts)
+        for kind, parts, expandable in reversed(groups):
+            text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
             agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
-            label = {"userMessage": "👤 Вы", "agentMessage": "🤖 Codex"}.get(kind, "🔧 " + str(kind))
+            label = {"userMessage": "👤 Вы", "questionReply": "👤 Вы answer", "agentMessage": "🤖 Codex"}.get(kind, "🔧 " + str(kind))
             if agent_interaction:
                 label = "🤖"
+            elif kind == "agentWait":
+                label = "💤"
             elif kind == "reasoning":
                 label = "🧠 reasoning"
             remaining = 3600 - size - len(label) - 4
             if len(text.encode("utf-16-le")) // 2 > remaining:
-                if remaining <= 1:
-                    older = True
+                if remaining <= 1 or kind == "agentWait":
                     break
                 encoded = text.encode("utf-16-le")
-                if kind in ("userMessage", "agentMessage") or len(parts) > 1:
+                more_lines = re.search(r"\n\.\.\. (\d+) lines more$", text) if expandable and len(parts) == 1 else None
+                if more_lines:
+                    if remaining <= 50:
+                        break
+                    visible = text[:more_lines.start()]
+                    visible_lines = len(visible.splitlines())
+                    count = re.search(r" \([0-9.]+[kMBT]? ch\)$", visible) if kind == "reasoning" else None
+                    suffix = count.group(0) if count else ""
+                    if count:
+                        visible = visible[:count.start()]
+                    available = max(0, remaining - 50 - len(suffix))
+                    prefix = visible.encode("utf-16-le")[:2 * available].decode("utf-16-le", errors="ignore").rstrip("\n")
+                    omitted = int(more_lines.group(1)) + visible_lines - len(prefix.splitlines())
+                    text = prefix + "…" + suffix + f"\n... {omitted} lines more"
+                elif kind == "reasoning" and len(parts) == 1:
+                    count = re.search(r" \([0-9.]+[kMBT]? ch\)$", text)
+                    suffix = count.group(0) if count else ""
+                    if remaining <= len(suffix) + 1:
+                        break
+                    prefix = text[:-len(suffix)] if suffix else text
+                    available = remaining - len(suffix) - 1
+                    text = prefix.encode("utf-16-le")[:2 * available].decode("utf-16-le", errors="ignore") + "…" + suffix
+                elif kind in ("userMessage", "questionReply", "agentMessage") or len(parts) > 1:
                     text = "…" + encoded[-2 * (remaining - 1):].decode("utf-16-le", errors="ignore")
                 else:
                     text = encoded[:2 * (remaining - 1)].decode("utf-16-le", errors="ignore") + "…"
-                older = True
             size += len(label) + len(text.encode("utf-16-le")) // 2 + 4
             body = html.escape(text)
-            if kind == "commandExecution" or (
-                kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) > 180
-            ):
+            if kind == "commandExecution":
+                quotes = "\n".join(f"<blockquote expandable>{html.escape(part)}</blockquote>" for part in text.split("\0"))
+                block = f"<b>{html.escape(label)}</b>\n{quotes}"
+            elif expandable:
                 block = f"<b>{html.escape(label)}</b>\n<blockquote expandable>{body}</blockquote>"
+            elif kind == "agentWait":
+                block = "💤 <b>wait</b> -&gt;"
             elif agent_interaction:
                 action, separator, rest = text.partition(" · ")
                 block = f"🤖 <b>{html.escape(action)}</b>{separator}{html.escape(rest)}"
@@ -473,6 +529,8 @@ class Router:
                 block = f"{heading}\n{bullets}"
             elif kind == "reasoning":
                 block = f"🧠 <b>reasoning</b> {body}"
+            elif kind == "questionReply":
+                block = f"<b>👤 Вы</b> answer\n{body}"
             elif kind not in ("userMessage", "agentMessage"):
                 block = f"<b>{html.escape(label)}</b> {body}"
             else:
@@ -480,9 +538,7 @@ class Router:
             blocks.append(block)
             if size >= 3598:
                 break
-        text = "<b>Тред Codex</b>\n\n" + ("\n\n".join(reversed(blocks)) or "История пуста")
-        if older:
-            text = "<b>Показана последняя часть треда</b>\n\n" + text
+        text = "\n\n".join(reversed(blocks)) or "История пуста"
         await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:

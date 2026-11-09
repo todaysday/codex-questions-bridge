@@ -55,8 +55,8 @@ def test_normal_question_stage_confirm_answer_then_resolved_card(conn):
 
             press(st, qid, "Отправить в Codex")
             await st.pump()
-            assert st.client.responses == [("1", {"answers": {"pick": {"answers": ["Separate table"]}}})] \
-                or st.client.responses == [(1, {"answers": {"pick": {"answers": ["Separate table"]}}})]
+            assert st.client.responses == [("1", {"answers": {"pick": {"answers": ["Separate table и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]}}})] \
+                or st.client.responses == [(1, {"answers": {"pick": {"answers": ["Separate table и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]}}})]
             sent = card_text(st, qid)
             assert "ждём подтверждения" in sent and "Доставлено" not in sent
             assert not [b for b in fake.buttons(card) if "Отправить" in b["text"]]
@@ -170,7 +170,7 @@ def test_text_answer_needs_the_button_then_the_reply_is_the_answer(conn):
             press(st, qid, "Отправить в Codex")
             await st.pump()
             (rid, result), = st.client.responses
-            assert result == {"answers": {"name": {"answers": ["my own option"]}}}
+            assert result == {"answers": {"name": {"answers": ["my own option и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]}}}
             # armed state is used up: a second reply is a discussion again
             st.fake.push_message("and one more thing", topic, reply_to=card)
             await st.pump()

@@ -31,3 +31,5 @@
 - Reviewed uniform agent activity labels and single-entry truncation; simplified activity handling and verified grouped markers.
 
 - Reviewed status evidence preprocessing and command formatting: encoded fragments are removed before truncation, command blocks stay separate, and interaction types retain bold formatting.
+
+- Reviewed answer suffixes and thread snapshots; simplified suffix checks and verified compact replies, grouped calls, line caps, reasoning character counts, and collapsed waits.

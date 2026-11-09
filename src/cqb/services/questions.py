@@ -24,6 +24,17 @@ log = logging.getLogger(__name__)
 
 Hook = Callable[[Question], Awaitable[None]]
 Answers = Mapping[str, Sequence[str]]
+ANSWER_SUFFIX = "и не трьінди"
+WAIT_SUFFIX = "After delegation, wait for the agent’s result using notifications or a wait tool."
+
+
+def with_answer_suffix(text: str) -> str:
+    stripped = text.rstrip()
+    if stripped.endswith(f"{ANSWER_SUFFIX} {WAIT_SUFFIX}"):
+        return text
+    if stripped.endswith(ANSWER_SUFFIX):
+        return f"{text} {WAIT_SUFFIX}"
+    return f"{text} {ANSWER_SUFFIX} {WAIT_SUFFIX}"
 
 
 class QuestionError(Exception):
@@ -138,8 +149,11 @@ class QuestionService:
             raise QuestionError("request is not live on the current connection")
         chosen = _validate(q, answers if answers is not None else (q.staged or {}))
         self._questions.stage(question_id, chosen, self._now())
+        wire_answers = {k: list(v) for k, v in chosen.items()}
+        last = next(reversed(wire_answers))
+        wire_answers[last][-1] = with_answer_suffix(wire_answers[last][-1])
         await self._client.respond(
-            request_id, {"answers": {k: {"answers": list(v)} for k, v in chosen.items()}}
+            request_id, {"answers": {k: {"answers": v} for k, v in wire_answers.items()}}
         )
         self._questions.mark_delivered(question_id, self._now())
 

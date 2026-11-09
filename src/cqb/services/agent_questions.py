@@ -45,7 +45,7 @@ from cqb.dao.agent_questions import AgentQuestionDao
 from cqb.dao.threads import ThreadDao
 from cqb.domain.enums import AgentQuestionState
 from cqb.domain.models import AgentQuestion, AgentQuestionItem
-from cqb.services.questions import QuestionError
+from cqb.services.questions import QuestionError, with_answer_suffix
 
 log = logging.getLogger(__name__)
 
@@ -339,7 +339,7 @@ class AgentQuestionService:
         q = self._editable(agent_question_id)  # raises when the scan found it answered elsewhere
         assert q.staged is not None
         try:
-            await self._client.send_user_message(q.thread_id, build_reply(q.item_id, q.index, q.title, q.staged))
+            await self._client.send_user_message(q.thread_id, build_reply(q.item_id, q.index, q.title, with_answer_suffix(q.staged)))
         except TimeoutError:
             raise QuestionError("Codex не ответил: проверьте тред, прежде чем повторять") from None
         except (NotConnected, RpcError, ValueError):

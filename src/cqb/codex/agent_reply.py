@@ -26,6 +26,26 @@ def build_reply(item_id: str, index: int, title: str, answer: str) -> str:
     return f"<{TAG}>\n{_compact([entry])}\n</{TAG}>\n"
 
 
+def reply_answers(user_message_text: str) -> list[str] | None:
+    """Extract only answers from a standalone question-reply message."""
+    blocks = _BLOCK.findall(user_message_text)
+    if not blocks or _BLOCK.sub("", user_message_text).strip():
+        return None
+    answers = []
+    try:
+        for block in blocks:
+            entries = json.loads(block)
+            if not isinstance(entries, list) or not entries:
+                return None
+            for entry in entries:
+                if not isinstance(entry, dict) or not isinstance(entry.get("answer"), str):
+                    return None
+                answers.append(entry["answer"])
+    except (ValueError, TypeError):
+        return None
+    return answers
+
+
 def answered_questions(user_message_text: str) -> set[tuple[str, int]] | None:
     """(agentMessage item id, question index) pairs a user message answers; None when it names none.
 

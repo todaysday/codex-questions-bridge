@@ -251,7 +251,7 @@ def test_rich_question_card_layout_and_flow_to_a_delivered_answer(conn):
             assert sum("Q1" in m["text"] for m in fake.messages.values() if m["thread_id"] == st.consultant_dao.get("s1", "r1").tg_topic_id) == 1
 
             await press(st, msg, "Отправить")
-            assert st.client.responses[0][1] == {"answers": {"pick": {"answers": ["Separate <table>"]}}}
+            assert st.client.responses[0][1] == {"answers": {"pick": {"answers": ["Separate <table> и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]}}}
             assert "ждём подтверждения" in fake.messages[msg]["text"] and fake.buttons(msg) == []
 
             await st.resolve("r1")

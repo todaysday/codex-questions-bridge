@@ -93,7 +93,7 @@ def test_single_question_stage_confirm_send_and_delivered_only_after_the_user_me
 
             press(st, aqid, "Отправить в Codex")
             await st.pump()
-            assert st.agent_client.sent == [("r1", reply_text("call_1", 0, Q1[0]["title"], "Separate table"))]
+            assert st.agent_client.sent == [("r1", reply_text("call_1", 0, Q1[0]["title"], "Separate table и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."))]
             sent = text_of(st, aqid)
             assert "ждём подтверждения" in sent and "Доставлено" not in sent
             assert fake.buttons(card) == [] and q_of(st, aqid).sent_at is not None
@@ -129,14 +129,14 @@ def test_a_message_with_several_questions_gives_separate_cards_and_separate_answ
             assert "Выбрано: No" in text_of(st, ids[0]) and "Выбрано" not in text_of(st, ids[2])
             press(st, ids[0], "Отправить в Codex")
             await st.pump()
-            assert st.agent_client.sent == [("r1", reply_text("call_1", 0, "First?", "No"))]
+            assert st.agent_client.sent == [("r1", reply_text("call_1", 0, "First?", "No и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."))]
             assert q_of(st, ids[1]).staged is None and q_of(st, ids[2]).staged is None
 
             press(st, ids[2], "C")
             await st.pump()
             press(st, ids[2], "Отправить в Codex")
             await st.pump()
-            assert st.agent_client.sent[1] == ("r1", reply_text("call_1", 2, "Third?", "Blue"))  # its own message
+            assert st.agent_client.sent[1] == ("r1", reply_text("call_1", 2, "Third?", "Blue и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."))  # its own message
             assert len(st.agent_client.sent) == 2
 
             # the app's reply naming Q1 answers exactly that question; the others keep waiting
@@ -173,7 +173,7 @@ def test_free_text_answer_needs_the_button_and_goes_out_as_that_questions_own_me
             assert "Выбрано: my own answer, with «quotes»" in text_of(st, ids[1])
             press(st, ids[1], "Отправить в Codex")
             await st.pump()
-            assert st.agent_client.sent == [("r1", reply_text("call_1", 1, "Second?", "my own answer, with «quotes»"))]
+            assert st.agent_client.sent == [("r1", reply_text("call_1", 1, "Second?", "my own answer, with «quotes» и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."))]
             assert len(st.relay.got) == 1  # only the unarmed reply went to the consultant
     run(main())
 
@@ -274,7 +274,7 @@ def test_nothing_is_cut_a_very_long_option_continues_in_more_messages_with_the_k
             assert all(len(st.fake.messages[m]["text"]) <= 4096 for m in ids2)
             press(st, aqid, "Отправить в Codex")
             await st.pump()
-            assert st.agent_client.sent[0][1] == reply_text("call_1", 0, long_title, LONG_OPTION)  # the exact answer
+            assert st.agent_client.sent[0][1] == reply_text("call_1", 0, long_title, LONG_OPTION + " и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool.")  # the exact answer
             # answered: the keyboard is gone everywhere and the header says so on the first message
             st.agent_client.items["r1"].append(user_item("um1", reply_text("call_1", 0, long_title, LONG_OPTION)))
             await st.agent.scan_thread("r1")

@@ -474,3 +474,14 @@ def test_migration_6_splits_the_table_into_one_row_per_question(tmp_path):
     assert dao.find_by_card_message(77).agent_question_id == "a_one"
     assert {r[1] for r in c.execute("PRAGMA index_list(agent_questions)")} >= {"idx_agent_question_root", "idx_agent_question_card"}
     assert db.migrate(c) == len(db.MIGRATIONS)
+
+
+def test_reply_answers_extracts_only_standalone_well_formed_replies():
+    from cqb.codex.agent_reply import reply_answers
+
+    a = build_reply("m1", 0, "Question 1", "Answer 1")
+    b = build_reply("m2", 1, "Question 2", "Answer 2")
+    assert reply_answers(a + b) == ["Answer 1", "Answer 2"]
+    assert reply_answers("prefix " + a) is None
+    assert reply_answers("<send_user_message_question_reply>invalid</send_user_message_question_reply>") is None
+    assert reply_answers('<send_user_message_question_reply>[{"question":"Q"}]</send_user_message_question_reply>') is None

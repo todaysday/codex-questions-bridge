@@ -127,7 +127,7 @@ def test_send_from_the_confirmation_delivers_once_deletes_it_and_the_key_is_used
             assert f.delivered() == 1 and toasts(st)[-1] == "Отправлено в Codex; ждём подтверждения"
             assert not live(st, conf) and st.fake.buttons(f.card) == []  # confirmation gone, card has no buttons left
             if kind == "plain":
-                assert st.client.responses[0][1] == {"answers": {"name": {"answers": ["typed answer"]}}}
+                assert st.client.responses[0][1] == {"answers": {"name": {"answers": ["typed answer и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]}}}
             else:
                 assert "typed answer" in st.agent_client.sent[0][1]
             assert len(st.fake.methods("sendMessage")) == before  # nothing else was posted

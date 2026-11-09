@@ -58,7 +58,7 @@ def test_run_end_to_end_with_graceful_stop(tmp_path):
         tg.push_callback(tg.button(card_id, "B")["callback_data"], card_id)
         await wait_until(lambda: "Выбрано: B" in tg.messages[card_id]["text"])
         tg.push_callback(tg.button(card_id, "Отправить")["callback_data"], card_id)
-        await wait_until(lambda: app.answers == [{"answers": {"pick": {"answers": ["B"]}}}])
+        await wait_until(lambda: app.answers == [{"answers": {"pick": {"answers": ["B и не трьінди After delegation, wait for the agent’s result using notifications or a wait tool."]}}}])
         await wait_until(lambda: "✅ Доставлено" in tg.messages[card_id]["text"])
         await wait_until(lambda: "❓" not in registry()["text"])  # resolved: the marker is gone
         assert len(tg.live_messages(control())) == 1  # one registry message, nothing else, all along
