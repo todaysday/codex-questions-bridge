@@ -259,9 +259,78 @@ def test_show_thread_groups_reasoning_and_shows_collaboration_input(conn, tmp_pa
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.count("🔧 reasoning") == 1
+            assert text.count("🧠 reasoning") == 1
             assert "First" in text and "Second" in text and "**" not in text
             assert "ind008" in text and "uuid-agent" not in text
-            assert "<blockquote expandable>" in text and "Check the tests" in text
+            assert "🤖 send_message · Codex → ind008" in text
+            assert "🔧 subAgentActivity" not in text
+            assert "Check the tests" not in text and "MUST_NOT_APPEAR" not in text
+    run(main())
+
+
+def test_long_tool_calls_remain_separate_expandable_blocks(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "commandExecution", "id": "a", "command": "a" * 220},
+                {"type": "commandExecution", "id": "b", "command": "b" * 220},
+                {"type": "reasoning", "id": "c", "summary": ["first"]},
+                {"type": "reasoning", "id": "d", "summary": ["second"]},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.count("<blockquote expandable>") == 2
+            assert text.count("🔧 commandExecution") == 2
+            assert text.count("🧠 reasoning") == 1
+    run(main())
+
+
+def test_incoming_agent_message_is_placed_in_order_without_content(conn, tmp_path):
+    import json
+
+    async def main():
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        rollout = sessions / "rollout.jsonl"
+        rollout.write_text(json.dumps({"timestamp": "2026-11-09T16:43:25.896Z", "type": "response_item", "payload": {
+            "type": "agent_message", "author": "/root/ind008", "recipient": "/root",
+            "content": [{"type": "input_text", "text": "MUST_NOT_APPEAR"}],
+        }}) + "\n")
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.router._codex_home = str(tmp_path)
+
+            async def call(method, params=None):
+                if method == "thread/read":
+                    return {"thread": {"path": str(rollout), "source": "cli"}}
+                return {"data": [
+                    {"turnId": "t", "startedAtMs": 1794242606000, "item": {"type": "agentMessage", "id": "b", "text": "after"}},
+                    {"turnId": "t", "startedAtMs": 1794242605000, "item": {"type": "agentMessage", "id": "a", "text": "before"}},
+                ]}
+
+            st.agent_client.call = call
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "🤖 сообщение · ind008 → Codex" in text
+            assert "🔧 incomingAgentMessage" not in text
+            assert text.index("before") < text.index("ind008") < text.index("after")
             assert "MUST_NOT_APPEAR" not in text
+    run(main())
+
+
+def test_single_reasoning_is_shown_on_one_line(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [{"type": "reasoning", "id": "a", "summary": ["Aligning preflight"]}]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "<b>🧠 reasoning Aligning preflight</b>" in text
     run(main())

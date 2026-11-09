@@ -340,14 +340,33 @@ class Router:
                            and isinstance(entry["item"].get("id"), str)}
         interactions = {}
         names = {}
+        sender = "Codex"
+        try:
+            thread = (await self._thread_client.call("thread/read", {"threadId": root, "includeTurns": False})).get("thread", {})
+            source = thread.get("source")
+            subagent = source.get("subAgent") if isinstance(source, dict) else None
+            spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
+            spawn = spawn if isinstance(spawn, dict) else {}
+            sender_path = spawn.get("agent_path")
+            if isinstance(sender_path, str) and sender_path:
+                sender = sender_path.rstrip("/").split("/")[-1]
+            elif isinstance(thread.get("agentNickname"), str) and thread["agentNickname"]:
+                sender = thread["agentNickname"]
+            path = thread.get("path")
+            if isinstance(path, str):
+                interactions, incoming = await asyncio.to_thread(read_interactions, path, self._codex_home, interaction_ids)
+                first_at = min((e.get("startedAtMs") for e in entries if isinstance(e.get("startedAtMs"), int)), default=0)
+                for at, author, recipient in incoming:
+                    if older and at < first_at:
+                        continue
+                    entries.append({"turnId": "incoming", "startedAtMs": at, "item": {
+                        "id": f"incoming-{at}-{len(entries)}", "type": "incomingAgentMessage",
+                        "author": author, "recipient": recipient,
+                    }})
+                entries.sort(key=lambda e: e.get("startedAtMs") or e.get("completedAtMs") or 0)
+        except Exception:
+            log.debug("cannot read collaboration inputs", exc_info=True)
         if interaction_ids:
-            try:
-                thread = (await self._thread_client.call("thread/read", {"threadId": root, "includeTurns": False})).get("thread", {})
-                path = thread.get("path")
-                if isinstance(path, str):
-                    interactions = await asyncio.to_thread(read_interactions, path, self._codex_home, interaction_ids)
-            except Exception:
-                log.debug("cannot read collaboration inputs", exc_info=True)
             ids = {entry["item"].get("agentThreadId") for entry in entries
                    if isinstance(entry.get("item"), dict) and entry["item"].get("type") == "subAgentActivity"}
             async def resolve_name(agent_id: str) -> tuple[str, str | None]:
@@ -378,26 +397,23 @@ class Router:
             text = event.text
             if kind == "reasoning":
                 text = text.replace("**", "")
-            if kind == "subAgentActivity":
+            if kind == "incomingAgentMessage":
+                author = item["author"].rstrip("/").split("/")[-1]
+                recipient = item["recipient"].rstrip("/").split("/")[-1]
+                author = "Codex" if author == "root" else author
+                recipient = "Codex" if recipient == "root" else recipient
+                text = f"сообщение · {author} → {recipient}"
+            elif kind == "subAgentActivity":
                 agent_id = item.get("agentThreadId")
                 path = item.get("agentPath")
-                name = names.get(agent_id) or (path.rstrip("/").split("/")[-1] if isinstance(path, str) and path else None) or "неизвестный агент"
-                text = f"{item.get('kind') or 'interacted'} · {name}"
-                args = interactions.get(item.get("id"))
-                if args:
-                    details = args.get("message") or args.get("task") or args.get("prompt")
-                    target = args.get("target")
-                    if isinstance(target, str):
-                        target_name = names.get(target) or target.rstrip("/").split("/")[-1]
-                        if re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", target_name):
-                            target_name = "агент"
-                        text += f" → {target_name}"
-                    if isinstance(details, str) and details:
-                        text += "\n" + details
-                    else:
-                        text += "\nСодержание взаимодействия недоступно"
+                action, target = interactions.get(item.get("id"), (str(item.get("kind") or "interacted"), None))
+                if target:
+                    target_name = names.get(target) or target.rstrip("/").split("/")[-1]
+                    if re.fullmatch(r"[0-9a-fA-F]{8}-(?:[0-9a-fA-F]{4}-){3}[0-9a-fA-F]{12}", target_name):
+                        target_name = "неизвестный агент"
                 else:
-                    text += "\nСодержание взаимодействия недоступно"
+                    target_name = names.get(agent_id) or (path.rstrip("/").split("/")[-1] if isinstance(path, str) and path else None) or "неизвестный агент"
+                text = f"{action} · {sender} → {target_name}"
             elif kind in ("mcpToolCall", "dynamicToolCall"):
                 args = item.get("arguments")
                 if args is None:
@@ -408,7 +424,9 @@ class Router:
                 text = f"{name}{item.get('tool')} {args}"
             elif kind == "commandExecution":
                 text = "$ " + str(item.get("command") or "")
-            if groups and groups[-1][0] == kind and kind not in ("userMessage", "agentMessage"):
+            can_group = kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) <= 180
+            if (can_group and groups and groups[-1][0] == kind
+                    and len("\n\n".join(groups[-1][1])) + 2 + len(text) <= 180):
                 groups[-1][1].append(text)
             else:
                 groups.append((kind, [text]))
@@ -417,7 +435,12 @@ class Router:
         size = 0
         for kind, parts in reversed(groups):
             text = "\n\n".join(parts)
+            agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
             label = {"userMessage": "👤 Вы", "agentMessage": "🤖 Codex"}.get(kind, "🔧 " + str(kind))
+            if agent_interaction:
+                label = "🤖"
+            elif kind == "reasoning":
+                label = "🧠 reasoning"
             remaining = 3600 - size - len(label) - 4
             if len(text.encode("utf-16-le")) // 2 > remaining:
                 if remaining <= 1:
@@ -431,8 +454,14 @@ class Router:
                 older = True
             size += len(label) + len(text.encode("utf-16-le")) // 2 + 4
             body = html.escape(text)
-            if kind == "subAgentActivity" or (kind not in ("userMessage", "agentMessage") and len(text) > 180):
+            if kind not in ("userMessage", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) > 180:
                 block = f"<b>{html.escape(label)}</b>\n<blockquote expandable>{body}</blockquote>"
+            elif agent_interaction:
+                block = f"🤖 {body}"
+            elif kind == "reasoning" and len(parts) == 1:
+                block = f"<b>{html.escape(label)} {body}</b>"
+            elif kind not in ("userMessage", "agentMessage") and len(parts) == 1:
+                block = f"<b>{html.escape(label)}</b> {body}"
             else:
                 block = f"<b>{html.escape(label)}</b>\n{body}"
             blocks.append(block)
