@@ -156,7 +156,7 @@ def test_summary_that_does_not_arrive_in_time_gives_the_card_without_it(conn, mo
             await st.pump()
             await asyncio.wait_for(st.status_done(), 5)
             [(_, card)] = cards(st, topic)
-            assert "📝резюме недоступно" in card["text"] and "В процессе" not in card["text"]
+            assert "📝ошибка резюме: агент статуса не ответил вовремя" in card["text"] and "В процессе" not in card["text"]
             assert " <b>ctx</b> —" in card["text"] and "📈" not in card["text"]  # numbers are all there
     run(main())
 
@@ -174,7 +174,7 @@ def test_failing_or_missing_narrator_gives_the_card_with_the_unavailable_line(co
             await st.pump()
             await st.status_done()
             [(_, card)] = cards(st, topic)
-            assert card["text"].count("резюме недоступно") == 1 and "boom" not in card["text"]
+            assert card["text"].count("ошибка резюме") == 1 and "boom" not in card["text"]
     run(main())
 
 

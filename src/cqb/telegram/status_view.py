@@ -20,7 +20,7 @@ from urllib.parse import quote
 from cqb.domain.enums import ItemKind, RunState
 from cqb.domain.status import (
     AGENT_LINES, NEXT_MAX, PROGRESS_MAX, Activity, AgentLine, GoalSummary, ItemBrief, RateLimits, StatusReport,
-    StatusSummary, UsageSnapshot,
+    StatusSummary, StatusSummaryError, UsageSnapshot,
 )
 from cqb.telegram.api import strip_html
 from cqb.telegram.fmt import TEXT_LIMIT, clip
@@ -236,10 +236,12 @@ def _agent_line(a: AgentLine, now: int, now_max: int, cache: bool = True) -> str
     return f" {nested}{ICON[a.state]}" + SEP.join(parts)
 
 
-def _summary(s: StatusSummary | None, plan: Plan) -> list[str]:
+def _summary(s: StatusSummary | StatusSummaryError | None, plan: Plan) -> list[str]:
     """`В процессе`, then (after an empty line) `Дальше` when the reports say what comes next."""
     if s is None:
         return [SUMMARY_UNAVAILABLE]
+    if isinstance(s, StatusSummaryError):
+        return ["📝ошибка резюме: " + html.escape(clip(s.reason, plan.progress_max))]
     lines = ["🔛<b>:</b> " + html.escape(clip(s.progress, plan.progress_max))]
     if s.next_steps:
         lines += ["", "🔜<b>:</b> " + html.escape(clip(s.next_steps, plan.next_max))]

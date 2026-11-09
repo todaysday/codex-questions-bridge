@@ -133,6 +133,11 @@ class StatusSummary:
 
 
 @dataclass(frozen=True, slots=True)
+class StatusSummaryError:
+    reason: str
+
+
+@dataclass(frozen=True, slots=True)
 class StatusReport:
     now: int
     title: str | None
@@ -152,7 +157,7 @@ class StatusReport:
     agents: tuple[AgentLine, ...]  # already capped for display
     limits: RateLimits | None
     activity: Activity | None = None  # the root's own 'now'
-    summary: StatusSummary | None = None  # None = the Status Agent was unavailable
+    summary: StatusSummary | StatusSummaryError | None = None
     cwd: str | None = None  # the root's working directory
     compactions: int | None = None  # how many times the root's context was compacted; None = unknown
     thread_id: str | None = None  # the root thread (the only thing that goes into the open link)

@@ -17,7 +17,7 @@ from typing import Protocol
 from cqb.domain.enums import RunState
 from cqb.domain.status import (
     AGENT_LINES, Activity, AgentLine, Descendants, GoalSummary, RateLimits, StatusReport, StatusSummary, ThreadSnapshot,
-    UsageSnapshot,
+    UsageSnapshot, StatusSummaryError,
 )
 from cqb.security import redact
 from cqb.services.live_state import LiveState
@@ -54,7 +54,7 @@ class StatusSource(Protocol):
 class StatusNarrator(Protocol):
     """A short summary from a separate Status Agent; None when it is unavailable or ran out of time."""
 
-    async def summarize(self, source_id: str, root_id: str, timeout: float) -> StatusSummary | None: ...
+    async def summarize(self, source_id: str, root_id: str, timeout: float) -> StatusSummary | StatusSummaryError | None: ...
 
 
 class NoNarrator:
@@ -109,17 +109,17 @@ class StatusService:
         except TimeoutError:
             raise StatusUnavailable("timeout") from None
 
-    async def _summarize(self, root_id: str) -> StatusSummary | None:
+    async def _summarize(self, root_id: str) -> StatusSummary | StatusSummaryError:
         try:
             async with asyncio.timeout(self._summary_timeout + SUMMARY_GRACE):
                 text = await self._narrator.summarize(self._source_id, root_id, self._summary_timeout)
         except TimeoutError:
             log.warning("status summary timed out")
-            return None
+            return StatusSummaryError("агент статуса не ответил вовремя")
         except Exception as exc:
             log.warning("status narrator failed: %s", type(exc).__name__)  # never the message: it may quote text
-            return None
-        return text or None
+            return StatusSummaryError(f"ошибка агента статуса: {type(exc).__name__}")
+        return text or StatusSummaryError("агент статуса не настроен или не вернул ответ")
 
     async def _collect(self, root_id: str) -> StatusReport:
         root = await self._source.thread(root_id)

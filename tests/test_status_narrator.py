@@ -4,7 +4,7 @@ import asyncio
 
 import pytest
 
-from cqb.domain.status import NEXT_MAX, PROGRESS_MAX, StatusSummary
+from cqb.domain.status import NEXT_MAX, PROGRESS_MAX, StatusSummary, StatusSummaryError
 from cqb.pico.status_narrator import STATUS_PROMPT, PicoStatusNarrator, SlotPool, parse_summary, slot_names
 from cqb.services.relay import DialogResult, Outcome
 from cqb.services.scope import SessionScopes
@@ -103,7 +103,7 @@ def test_exhausted_pool_gives_up_at_the_deadline_without_asking():
         narrator, dialog, _ = make(slots=1, hold=hold)
         busy = asyncio.create_task(narrator.summarize("s1", "r1", 30))
         await asyncio.sleep(0.01)
-        assert await narrator.summarize("s1", "r2", 0.05) is None  # no slot before its deadline
+        assert isinstance(await narrator.summarize("s1", "r2", 0.05), StatusSummaryError)  # no slot before its deadline
         assert len(dialog.asked) == 1
         hold.set()
         await busy
@@ -115,9 +115,9 @@ def test_exhausted_pool_gives_up_at_the_deadline_without_asking():
 def test_a_failed_turn_is_no_summary_and_frees_slot_and_scope(outcome):
     async def main():
         narrator, dialog, scopes = make(slots=1, outcome=outcome)
-        assert await narrator.summarize("s1", "r1", 30) is None
+        assert isinstance(await narrator.summarize("s1", "r1", 30), StatusSummaryError)
         assert scopes.lookup("cqb-status-1") is None
-        assert await narrator.summarize("s1", "r2", 30) is None and len(dialog.asked) == 2  # the slot was released
+        assert isinstance(await narrator.summarize("s1", "r2", 30), StatusSummaryError) and len(dialog.asked) == 2  # the slot was released
     run(main())
 
 
@@ -225,7 +225,7 @@ def test_the_reply_is_redacted_before_it_can_enter_the_card():
 def test_empty_reply_is_no_summary():
     async def main():
         narrator, *_ = make(reply="   ")
-        assert await narrator.summarize("s1", "r1", 30) is None
+        assert isinstance(await narrator.summarize("s1", "r1", 30), StatusSummaryError)
     run(main())
 
 
