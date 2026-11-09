@@ -260,7 +260,7 @@ def test_show_thread_groups_reasoning_and_shows_collaboration_input(conn, tmp_pa
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
             assert text.count("🧠 <b>reasoning</b>") == 1
-            assert "🧠 <b>reasoning</b>\n▪️ First (5 ch)\n▪️ Second (6 ch)" in text and "**" not in text
+            assert "🧠 <b>reasoning</b>\n▪️ First\n▪️ Second" in text and "**" not in text
             assert "ind008" in text and "uuid-agent" not in text
             assert "🤖 <b>send_message</b> · Codex → ind008" in text
             assert "🔧 subAgentActivity" not in text
@@ -332,7 +332,7 @@ def test_single_reasoning_is_shown_on_one_line(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "🧠 <b>reasoning</b> Aligning preflight (18 ch)" in text
+            assert "🧠 <b>reasoning</b> Aligning preflight" in text
     run(main())
 
 
@@ -538,7 +538,7 @@ def test_thread_view_has_no_heading_even_when_history_is_truncated(conn):
     run(main())
 
 
-def test_reasoning_character_counts_exclude_markdown_and_survive_truncation(conn):
+def test_reasoning_excludes_markdown_and_survives_truncation(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
             topic = await st.open_consultant("r1")
@@ -548,18 +548,18 @@ def test_reasoning_character_counts_exclude_markdown_and_survive_truncation(conn
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "(1.5k ch)</blockquote>" in text and "**" not in text
+            assert "я" * 1500 + "</blockquote>" in text and "**" not in text
 
-            # The source count remains visible when the single message must cut a huge summary.
+            # A huge summary is truncated to the message limit.
             st.agent_client.items["r1"] = [{"type": "reasoning", "id": "b", "summary": ["x" * 5000]}]
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "… (5k ch)</blockquote>" in text
+            assert "…</blockquote>" in text
     run(main())
 
 
-def test_reasoning_character_count_uses_full_summary_before_line_truncation(conn):
+def test_reasoning_truncates_after_ten_lines(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
             topic = await st.open_consultant("r1")
@@ -569,11 +569,11 @@ def test_reasoning_character_count_uses_full_summary_before_line_truncation(conn
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert " (3k ch)\n... 5 lines more</blockquote>" in text
+            assert "\n... 5 lines more</blockquote>" in text
     run(main())
 
 
-def test_reasoning_character_count_and_omitted_lines_survive_message_limit(conn):
+def test_reasoning_omitted_lines_survive_message_limit(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
             topic = await st.open_consultant("r1")
@@ -583,7 +583,7 @@ def test_reasoning_character_count_and_omitted_lines_survive_message_limit(conn)
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert " (10.5k ch)\n... 9 lines more</blockquote>" in text
+            assert "\n... 9 lines more</blockquote>" in text
     run(main())
 
 

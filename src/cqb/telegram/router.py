@@ -32,7 +32,6 @@ from cqb.telegram.models import CallbackQuery, Doc, Message, Para, Reply, Update
 from cqb.telegram.present import Presenter
 from cqb.telegram.registry_view import thread_name
 from cqb.telegram.status_post import BUSY as STATUS_BUSY, StatusPoster
-from cqb.telegram.status_view import tokens as format_count
 
 log = logging.getLogger(__name__)
 
@@ -398,15 +397,12 @@ class Router:
             if event is None or not event.text:
                 continue
             text = event.text
-            reasoning_count = None
             if kind == "userMessage":
                 answers = reply_answers(text)
                 if answers is not None:
                     kind = "questionReply"
                     text = "\n".join(answers)
             if kind == "reasoning":
-                summary = " ".join(str(part) for part in item.get("summary") or []).replace("**", "")
-                reasoning_count = f" ({format_count(len(summary))} ch)"
                 text = text.replace("**", "")
             if kind == "incomingAgentMessage":
                 author = item["author"].rstrip("/").split("/")[-1]
@@ -452,13 +448,7 @@ class Router:
             if expandable:
                 lines = text.splitlines()
                 if len(lines) > EXPANDABLE_LINES:
-                    visible = lines[:EXPANDABLE_LINES]
-                    if reasoning_count:
-                        visible[-1] += reasoning_count
-                        reasoning_count = None
-                    text = "\n".join(visible) + f"\n... {len(lines) - EXPANDABLE_LINES} lines more"
-            if reasoning_count:
-                text += reasoning_count
+                    text = "\n".join(lines[:EXPANDABLE_LINES]) + f"\n... {len(lines) - EXPANDABLE_LINES} lines more"
             can_group = kind == "commandExecution" or (
                 not expandable and kind not in ("userMessage", "questionReply", "agentMessage", "subAgentActivity", "incomingAgentMessage")
             )
@@ -491,22 +481,10 @@ class Router:
                         break
                     visible = text[:more_lines.start()]
                     visible_lines = len(visible.splitlines())
-                    count = re.search(r" \([0-9.]+[kMBT]? ch\)$", visible) if kind == "reasoning" else None
-                    suffix = count.group(0) if count else ""
-                    if count:
-                        visible = visible[:count.start()]
-                    available = max(0, remaining - 50 - len(suffix))
+                    available = max(0, remaining - 50)
                     prefix = visible.encode("utf-16-le")[:2 * available].decode("utf-16-le", errors="ignore").rstrip("\n")
                     omitted = int(more_lines.group(1)) + visible_lines - len(prefix.splitlines())
-                    text = prefix + "…" + suffix + f"\n... {omitted} lines more"
-                elif kind == "reasoning" and len(parts) == 1:
-                    count = re.search(r" \([0-9.]+[kMBT]? ch\)$", text)
-                    suffix = count.group(0) if count else ""
-                    if remaining <= len(suffix) + 1:
-                        break
-                    prefix = text[:-len(suffix)] if suffix else text
-                    available = remaining - len(suffix) - 1
-                    text = prefix.encode("utf-16-le")[:2 * available].decode("utf-16-le", errors="ignore") + "…" + suffix
+                    text = prefix + "…" + f"\n... {omitted} lines more"
                 elif kind in ("userMessage", "questionReply", "agentMessage") or len(parts) > 1:
                     text = "…" + encoded[-2 * (remaining - 1):].decode("utf-16-le", errors="ignore")
                 else:
