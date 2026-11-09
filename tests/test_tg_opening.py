@@ -222,3 +222,46 @@ def test_show_thread_includes_calls_without_outputs(conn):
             assert "x" * 300 in text and "<blockquote expandable>" in text
             assert "SECRET_OUTPUT" not in text
     run(main())
+
+
+def test_show_thread_groups_reasoning_and_shows_collaboration_input(conn, tmp_path):
+    import json
+
+    async def main():
+        sessions = tmp_path / "sessions"
+        sessions.mkdir()
+        rollout = sessions / "rollout.jsonl"
+        rollout.write_text(json.dumps({"type": "response_item", "payload": {
+            "type": "function_call", "namespace": "collaboration", "name": "send_message",
+            "call_id": "call1", "arguments": json.dumps({"target": "/root/ind008", "message": "Check the tests"}),
+        }}) + "\n" + json.dumps({"type": "response_item", "payload": {
+            "type": "function_call_output", "call_id": "call1", "output": "MUST_NOT_APPEAR",
+        }}) + "\n")
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.router._codex_home = str(tmp_path)
+            original_call = st.agent_client.call
+
+            async def call(method, params=None):
+                if method == "thread/read":
+                    if params["threadId"] == "r1":
+                        return {"thread": {"path": str(rollout)}}
+                    return {"thread": {"source": {"subAgent": {"thread_spawn": {"agent_path": "/root/ind008"}}}}}
+                return await original_call(method, params)
+
+            st.agent_client.call = call
+            st.agent_client.items["r1"] = [
+                {"type": "reasoning", "id": "a", "summary": ["**First**"]},
+                {"type": "reasoning", "id": "b", "summary": ["**Second**"]},
+                {"type": "subAgentActivity", "id": "call1", "kind": "interacted", "agentThreadId": "uuid-agent"},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert text.count("🔧 reasoning") == 1
+            assert "First" in text and "Second" in text and "**" not in text
+            assert "ind008" in text and "uuid-agent" not in text
+            assert "<blockquote expandable>" in text and "Check the tests" in text
+            assert "MUST_NOT_APPEAR" not in text
+    run(main())

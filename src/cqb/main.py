@@ -226,7 +226,7 @@ async def run(
             present, keys, topics, publisher, cards, agent_cards, consultants, registry, questions,
             agent_questions,
             ConsultantRelay(gateway, tg_topics, context=focus, on_usage=update_opening_usage),
-            focus, status, source_id, inventory.poke, client,
+            focus, status, source_id, inventory.poke, client, home,
         )
         closers.append(router.close)
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)

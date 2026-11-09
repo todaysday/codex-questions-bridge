@@ -21,3 +21,5 @@
 - The registry shows only an available weekly Codex limit, with a cached read and a bounded timeout; startup remains available before the daemon connects.
 
 - Reviewed direct Telegram replies and recent thread snapshots; made the Codex client mandatory and simplified tool argument formatting. Existing opening messages receive the new button at startup.
+
+- Reviewed grouped thread activity and bounded rollout reads; removed unused call metadata, confirmed tool outputs are excluded, and stabilized the startup test.

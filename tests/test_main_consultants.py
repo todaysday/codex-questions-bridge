@@ -222,6 +222,16 @@ def test_restart_adds_thread_button_to_existing_opening(tmp_path):
             topic = await create_consultant(tg, "FoxProfile")
             await wait_until(lambda: any("ctx" in m["text"] for m in tg.live_messages(topic)))
             opening = next(i for i, m in tg.messages.items() if m["thread_id"] == topic and "ctx" in m["text"])
+
+            def consultant_open():
+                conn = db.connect(str(tmp_path / "c.db"))
+                try:
+                    row = conn.execute("SELECT state FROM consultants WHERE root_thread_id='t1'").fetchone()
+                    return row is not None and row[0] == "open"
+                finally:
+                    conn.close()
+
+            await wait_until(consultant_open)
             stop.set()
             await asyncio.wait_for(task, 5)
             original = tg.messages[opening]["text"]
