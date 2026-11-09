@@ -217,7 +217,7 @@ class Stack:
         self.router = Router(
             RouterConfig(CHAT_ID, frozenset({OWNER}), "cqb_test_bot"), self.present, self.keys, self.topics,
             self.publisher, self.cards, self.agent_cards, self.consultants, self.registry,
-            self.questions, self.agent, self.relay, self.focus, self.status_cards, "s1", self.inventory.poke, self.clock, notice_seconds=0.05,
+            self.questions, self.agent, self.relay, self.focus, self.status_cards, "s1", self.inventory.poke, self.agent_client, self.clock, notice_seconds=0.05,
         )
         self.poller = Poller(self.api, self.state, self.router.handle, poll_timeout=0)
         self.questions.subscribe(on_question=self.cards.on_question, on_resolved=self.cards.on_resolved)

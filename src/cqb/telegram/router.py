@@ -1,11 +1,15 @@
 """Authorizes and dispatches Telegram updates. Nothing unauthorized reaches a service."""
 
 import asyncio
+import html
+import json
 import logging
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
+from typing import Any, Protocol
 
+from cqb.codex.history import HistoryReader, event_from_entry
 from cqb.domain.enums import ConsultantState
 from cqb.domain.models import Consultant, Question, TelegramAction
 from cqb.services.agent_questions import AgentQuestionService
@@ -17,7 +21,7 @@ from cqb.services.registry import RegistryQuery
 from cqb.services.relay import ConsultantRelay
 from cqb.telegram.api import TelegramError
 from cqb.telegram.agent_cards import AgentQuestionCards
-from cqb.telegram.consultant_view import OPENING_QUESTIONS, OPENING_STATUS
+from cqb.telegram.consultant_view import OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.control import ControlTopics, RegistryPublisher
 from cqb.telegram.keys import ActionKeys
@@ -36,6 +40,12 @@ CONFIRMATION_DONE = ("send", "asend", "cancel", "acancel")  # presses that end t
 NO_QUESTIONS = "Нет неотвеченных вопросов"
 NOTICE_TASKS = 20  # pending "delete this notice" timers
 SECRET_REFUSAL = "Секретный ввод: Bridge не обсуждает и не принимает его, ответьте в Codex"
+
+
+class ThreadClient(Protocol):
+    async def call(self, method: str, params: dict[str, Any] | None = None) -> dict[str, Any]: ...
+
+    async def send_user_message(self, thread_id: str, text: str) -> str: ...
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +74,7 @@ class Router:
         status: StatusPoster,
         source_id: str,
         request_poll: Callable[[], None],
+        thread_client: ThreadClient,
         clock: Callable[[], float] = time.time,
         notice_seconds: float = 10.0,
     ) -> None:
@@ -86,6 +97,7 @@ class Router:
         self._request_poll = request_poll
         self._clock = clock
         self._notice_seconds = notice_seconds
+        self._thread_client = thread_client
         self._notices: set[asyncio.Task[None]] = set()
         self.rejected = 0
 
@@ -191,7 +203,9 @@ class Router:
         consultant = self._consultants.by_topic(m.thread_id)
         if consultant is None or consultant.state is not ConsultantState.OPEN:
             return  # unknown, unbound or closed topic
-        if command == "questions":
+        if m.reply_to_message_id == consultant.opening_message_id and m.reply_to_message_id is not None:
+            await self._send_to_thread(consultant, m)
+        elif command == "questions":
             await self._questions_command(consultant.root_thread_id, m.thread_id, m.message_id)
         elif command == "status":
             if not self._status.request(consultant.root_thread_id, m.thread_id):
@@ -229,6 +243,15 @@ class Router:
             self._focus.note_mentions(root, text)
             await self._relay.relay(consultant, text, lead=discussion_prefix(card))
 
+    async def _send_to_thread(self, consultant: Consultant, m: Message) -> None:
+        try:
+            await self._thread_client.send_user_message(consultant.root_thread_id, m.text or "")
+        except Exception:
+            log.exception("sending message to Codex thread failed")
+            await self._say(m, "Не удалось подтвердить отправку в тред Codex")
+            return
+        await self._say(m, "✅ Отправлено в тред Codex")
+
     def _command(self, text: str) -> str | None:
         """Command name; None for plain text; "" for a command aimed at another bot."""
         token = text.split(None, 1)[0] if text.strip() else ""
@@ -249,7 +272,7 @@ class Router:
             self.rejected += 1
             return  # no answer: do not confirm anything to a stranger
         assert cb.data is not None and cb.message_id is not None
-        if cb.data in (OPENING_QUESTIONS, OPENING_STATUS):
+        if cb.data in (OPENING_QUESTIONS, OPENING_STATUS, OPENING_THREAD):
             await self._opening_callback(cb)
             return
         action = self._keys.resolve(cb.data)
@@ -288,6 +311,9 @@ class Router:
             elif cb.data == OPENING_QUESTIONS:
                 await self._questions_command(consultant.root_thread_id, consultant.tg_topic_id)
                 reply = Reply()
+            elif cb.data == OPENING_THREAD:
+                await self._show_thread(consultant.root_thread_id, consultant.tg_topic_id)
+                reply = Reply()
             elif not self._status.request(consultant.root_thread_id, consultant.tg_topic_id):
                 reply = Reply(STATUS_BUSY)
             else:
@@ -302,6 +328,58 @@ class Router:
             await self._api.answer_callback_query(cb.query_id, reply.text, reply.alert)
         except TelegramError as exc:
             log.debug("answerCallbackQuery failed: %s", exc)
+
+    async def _show_thread(self, root: str, topic_id: int) -> None:
+        entries, older = await HistoryReader(self._thread_client).recent(root, 100)
+        blocks = []
+        size = 0
+        for entry in reversed(entries):
+            kind = entry.get("item", {}).get("type")
+            if kind in ("functionCallOutput", "hookPrompt"):
+                continue
+            event = event_from_entry(root, entry, max_chars=1_000_000)
+            if event is None or not event.text:
+                continue
+            if event.text_truncated:
+                older = True
+            if kind in ("mcpToolCall", "dynamicToolCall"):
+                item = entry["item"]
+                args = item.get("arguments")
+                if args is None:
+                    args = ""
+                elif not isinstance(args, str):
+                    args = json.dumps(args, ensure_ascii=False)
+                name = f"{item.get('server')}/" if kind == "mcpToolCall" else ""
+                text = f"{name}{item.get('tool')} {args}"
+            elif kind == "commandExecution":
+                text = "$ " + str(entry["item"].get("command") or "")
+            else:
+                text = event.text
+            label = {"userMessage": "👤 Вы", "agentMessage": "🤖 Codex"}.get(kind, "🔧 " + str(kind))
+            remaining = 3600 - size - len(label) - 4
+            if len(text.encode("utf-16-le")) // 2 > remaining:
+                if remaining <= 1:
+                    older = True
+                    break
+                encoded = text.encode("utf-16-le")
+                if kind in ("userMessage", "agentMessage"):
+                    text = "…" + encoded[-2 * (remaining - 1):].decode("utf-16-le", errors="ignore")
+                else:
+                    text = encoded[:2 * (remaining - 1)].decode("utf-16-le", errors="ignore") + "…"
+                older = True
+            size += len(label) + len(text.encode("utf-16-le")) // 2 + 4
+            body = html.escape(text)
+            if kind not in ("userMessage", "agentMessage") and len(text) > 180:
+                block = f"<b>{html.escape(label)}</b>\n<blockquote expandable>{body}</blockquote>"
+            else:
+                block = f"<b>{html.escape(label)}</b>\n{body}"
+            blocks.append(block)
+            if size >= 3598:
+                break
+        text = "<b>Тред Codex</b>\n\n" + ("\n\n".join(reversed(blocks)) or "История пуста")
+        if older:
+            text = "<b>Показана последняя часть треда</b>\n\n" + text
+        await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:
         return (self._questions.by_card_message(message_id) is not None

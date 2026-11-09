@@ -46,7 +46,7 @@ def test_opening_message_goes_first_and_is_pinned_then_cards_follow(conn):
             assert st.fake.pinned[1:] == [opening] and card not in st.fake.pinned  # [0] is the registry message
             first = st.fake.messages[opening]["text"]
             assert first.startswith("ctx — · 🗜️—\n🤖 Fox") and "/status" in first
-            assert [b["text"] for b in st.fake.buttons(opening)] == ["❓ Вопросы", "📊 Статус"]
+            assert [b["text"] for b in st.fake.buttons(opening)] == ["❓ Вопросы", "📊 Статус", "📜 Показать тред"]
     run(main())
 
 
@@ -190,4 +190,35 @@ def test_the_pin_uses_the_opening_message_id_even_with_other_messages_in_flight(
             first = {t: min(i for i, m in st.fake.messages.items() if m["thread_id"] == t) for t in (t1, t2)}
             assert st.fake.pinned[1:] == [first[t1], first[t2]]
             assert st.card_of(st.qid_of("j1")) not in st.fake.pinned
+    run(main())
+
+
+def test_opening_reply_goes_to_root_and_not_consultant(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.fake.push_message("hello", topic, reply_to=opening)
+            await st.pump()
+            assert st.agent_client.sent == [("r1", "hello")]
+            assert st.relay.got == []
+    run(main())
+
+
+def test_show_thread_includes_calls_without_outputs(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "userMessage", "id": "u", "content": [{"type": "text", "text": "Hello"}]},
+                {"type": "mcpToolCall", "id": "t", "server": "srv", "tool": "read", "arguments": {"path": "x" * 300}, "result": "SECRET_OUTPUT"},
+                {"type": "agentMessage", "id": "a", "text": "Done"},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "Hello" in text and "Done" in text and "srv/read" in text
+            assert "x" * 300 in text and "<blockquote expandable>" in text
+            assert "SECRET_OUTPUT" not in text
     run(main())

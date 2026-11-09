@@ -88,7 +88,7 @@ def test_run_with_consultant_chat_replies_in_topic_and_serves_mcp(tmp_path, monk
             await wait_until(lambda: any(m["text"] == "echo:why option A?" for m in tg.live_messages(topic)))
             await wait_until(lambda: any("ctx 123.3k/475k (26%) · 🗜️2" in m["text"] for m in tg.live_messages(topic)))
             opening = next(i for i, m in tg.messages.items() if m.get("thread_id") == topic and "ctx 123.3k" in m["text"])
-            assert [b["text"] for b in tg.buttons(opening)] == ["❓ Вопросы", "📊 Статус"]
+            assert [b["text"] for b in tg.buttons(opening)] == ["❓ Вопросы", "📊 Статус", "📜 Показать тред"]
             tg.push_message("/clear", topic)  # escaped on the way to PicoClaw
             await wait_until(lambda: any(m["text"] == "echo:User says: /clear" for m in tg.live_messages(topic)))
             key = next(iter(pico.sockets))
@@ -206,3 +206,33 @@ def test_main_fails_fast_on_missing_consultant_tokens(tmp_path, monkeypatch, cap
     cfg.write_text('[codex]\nsocket="s"\n[db]\npath="x"\n[telegram]\nchat_id=-100\nallowed_user_ids=[1]\n')
     monkeypatch.setattr(cqb_main.asyncio, "run", lambda coro: coro.close())
     assert cqb_main.main(["--config", str(cfg)]) == 0
+
+
+def test_restart_adds_thread_button_to_existing_opening(tmp_path):
+    async def main():
+        app, tg = FakeAppServer(), FakeTelegram()
+        await app.start()
+        await tg.start()
+        app.add_thread("t1", 2_000_000_000, name="FoxProfile")
+        seed(str(tmp_path / "c.db"))
+        cfg = make_config(tmp_path, app.path)
+        stop = asyncio.Event()
+        task = asyncio.create_task(cqb_main.run(cfg, stop, token=TOKEN, telegram_base_url=tg.base_url))
+        try:
+            topic = await create_consultant(tg, "FoxProfile")
+            await wait_until(lambda: any("ctx" in m["text"] for m in tg.live_messages(topic)))
+            opening = next(i for i, m in tg.messages.items() if m["thread_id"] == topic and "ctx" in m["text"])
+            stop.set()
+            await asyncio.wait_for(task, 5)
+            original = tg.messages[opening]["text"]
+            tg.messages[opening]["markup"]["inline_keyboard"][0].pop()
+            stop = asyncio.Event()
+            task = asyncio.create_task(cqb_main.run(cfg, stop, token=TOKEN, telegram_base_url=tg.base_url))
+            await wait_until(lambda: any("Показать тред" in b["text"] for b in tg.buttons(opening)))
+            assert tg.messages[opening]["text"] == original
+        finally:
+            stop.set()
+            await asyncio.gather(task, return_exceptions=True)
+            await tg.stop()
+            await app.stop()
+    asyncio.run(main())

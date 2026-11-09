@@ -239,6 +239,15 @@ class FakeTelegram:
         m["edits"] = m.get("edits", 0) + 1
         return True
 
+    async def m_editMessageReplyMarkup(self, p: dict[str, Any]) -> bool:
+        message = self.messages.get(p["message_id"])
+        if message is None or message.get("deleted"):
+            raise _Fail(400, "Bad Request: message to edit not found")
+        if message["markup"] == p.get("reply_markup"):
+            raise _Fail(400, "Bad Request: message is not modified")
+        message["markup"] = p.get("reply_markup")
+        return True
+
     async def m_sendChatAction(self, p: dict[str, Any]) -> bool:
         return True
 

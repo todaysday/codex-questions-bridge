@@ -167,6 +167,11 @@ class BotApi:
         }
         await self._call("editMessageText", params)
 
+    async def edit_message_keyboard(self, chat_id: int, message_id: int, keyboard: tuple[tuple[Button, ...], ...]) -> None:
+        await self._call("editMessageReplyMarkup", {
+            "chat_id": chat_id, "message_id": message_id, "reply_markup": _markup(keyboard),
+        })
+
     async def send_rich_message(
         self, chat_id: int, html: str, *, thread_id: int | None = None,
         keyboard: tuple[tuple[Button, ...], ...] | None = None,

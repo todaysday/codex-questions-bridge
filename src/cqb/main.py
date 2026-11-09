@@ -26,6 +26,7 @@ from cqb.dao.bot_state import BotStateDao
 from cqb.dao.consultants import ConsultantDao
 from cqb.dao.questions import QuestionDao
 from cqb.dao.threads import SourceDao, ThreadDao
+from cqb.domain.enums import ConsultantState
 from cqb.domain.models import AgentQuestion, Consultant, Question, Source
 from cqb.domain.status import RateLimits
 from cqb.mcp.server import McpServer
@@ -48,7 +49,7 @@ from cqb.services.relay import ConsultantRelay
 from cqb.services.scope import SessionScopes
 from cqb.services.status import StatusNarrator, StatusService
 from cqb.telegram.agent_cards import AgentQuestionCards
-from cqb.telegram.api import API_BASE, BadRequest, BotApi
+from cqb.telegram.api import API_BASE, BadRequest, BotApi, TelegramError
 from cqb.telegram.present import Presenter
 from cqb.telegram.cards import QuestionCards
 from cqb.telegram.consultant_view import opening_keyboard, render_opening
@@ -225,7 +226,7 @@ async def run(
             present, keys, topics, publisher, cards, agent_cards, consultants, registry, questions,
             agent_questions,
             ConsultantRelay(gateway, tg_topics, context=focus, on_usage=update_opening_usage),
-            focus, status, source_id, inventory.poke,
+            focus, status, source_id, inventory.poke, client,
         )
         closers.append(router.close)
         questions.subscribe(on_question=_log_question, on_resolved=_log_resolved)
@@ -238,6 +239,15 @@ async def run(
             closers.append(mcp.stop)
         await topics.ensure()
         consultants.recover()
+        for consultant in consultant_dao.list_by_states(
+            source_id, [ConsultantState.OPEN], limit=consultant_dao.count_open(source_id)
+        ):
+            if consultant.opening_message_id is not None:
+                try:
+                    await api.edit_message_keyboard(tg.chat_id, consultant.opening_message_id, opening_keyboard())
+                except TelegramError as exc:
+                    if not isinstance(exc, BadRequest) or not exc.not_modified:
+                        log.warning("could not update opening keyboard: %s", type(exc).__name__)
         keys.purge_expired()
         await publisher.refresh(force=True)
         gc.collect()
