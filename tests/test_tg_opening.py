@@ -359,7 +359,7 @@ def test_truncated_reasoning_group_with_one_visible_entry_uses_inline_format(con
             st.agent_client.items["r1"] = [
                 {"type": "reasoning", "id": "a", "summary": ["first " * 10]},
                 {"type": "reasoning", "id": "b", "summary": ["last " * 12]},
-                {"type": "userMessage", "id": "c", "content": [{"type": "text", "text": "x" * 3540}]},
+                {"type": "userMessage", "id": "c", "content": [{"type": "text", "text": "x" * 3520}]},
             ]
             st.fake.press(opening, "Показать тред")
             await st.pump()
@@ -463,7 +463,7 @@ def test_expandable_tool_calls_keep_all_lines_within_character_limit(conn):
     run(main())
 
 
-def test_expandable_tool_call_is_cut_after_1500_characters(conn):
+def test_expandable_tool_call_is_cut_after_1000_characters(conn):
     async def main():
         async with make_stack(conn, thread("r1")) as st:
             topic = await st.open_consultant("r1")
@@ -473,8 +473,8 @@ def test_expandable_tool_call_is_cut_after_1500_characters(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert f"... {len('$ ' + command) - 1500} chars more</blockquote>" in text
-            assert "$ " + command[:1498] in text
+            assert f"... {len(('$ ' + command)[1000:].splitlines())} lines more</blockquote>" in text
+            assert "$ " + command[:998] in text
             assert "line-5-" not in text and "line-14-" not in text
     run(main())
 
@@ -532,7 +532,7 @@ def test_thread_view_has_no_heading_even_when_history_is_truncated(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.startswith("<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>Главный тред</b>\n<blockquote>\u00a0</blockquote>\n\n<b>🤖 Codex</b>")
+            assert text.startswith("<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>Главный тред </b>🧠—<b> · ctx</b> —\n<blockquote>\u00a0</blockquote>\n\n<b>🤖 Codex</b>")
             assert "Показана последняя часть треда" not in text and "Тред Codex" not in text
     run(main())
 
@@ -582,7 +582,7 @@ def test_reasoning_omitted_lines_survive_message_limit(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "\n... 9 lines more</blockquote>" in text
+            assert "\n... 10 lines more</blockquote>" in text
     run(main())
 
 
@@ -615,7 +615,7 @@ def test_thread_uses_classic_html_and_keeps_command_collapsible(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             message = st.fake.live_messages(topic)[-1]
-            assert message["text"].startswith("<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>Главный тред</b>\n<blockquote>\u00a0</blockquote>")
+            assert message["text"].startswith("<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>Главный тред </b>🧠—<b> · ctx</b> —\n<blockquote>\u00a0</blockquote>")
             assert "<blockquote expandable>$ pwd</blockquote>" in message["text"]
             assert message["parse_mode"] == "HTML"
     run(main())
@@ -630,7 +630,7 @@ def test_long_mcp_tool_call_has_character_limit(conn):
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert "s/t " + "x" * 1496 + "\n... 504 chars more</blockquote>" in text
+            assert "s/t " + "x" * 996 + "\n... 1 lines more</blockquote>" in text
     run(main())
 
 
@@ -718,4 +718,48 @@ def test_pinned_agent_list_shows_eight_and_counts_the_rest(conn):
             assert message["rich"].count('<tg-button type="callback_data"') == 8
             assert "… и ещё 2" in message["text"]
             await manager.close()
+    run(main())
+
+
+def test_grouped_commands_keep_complete_beginnings_when_message_is_full(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "commandExecution", "id": str(i), "command": f"start-{i}-" + "x" * 1400}
+                for i in range(6)
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "<blockquote expandable>$ start-5-" in text
+            assert "<blockquote expandable>…" not in text
+            assert "... 1 lines more</blockquote>" in text
+    run(main())
+
+
+def test_thread_header_includes_model_effort_and_context(conn, monkeypatch):
+    from cqb.domain.status import UsageSnapshot
+    import cqb.telegram.router as router_module
+
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            original = st.agent_client.call
+            async def call(method, params=None):
+                if method == "thread/read":
+                    return {"thread": {"id": params["threadId"], "model": "gpt-6.1-sol", "reasoningEffort": "low", "path": "/test"}}
+                return await original(method, params)
+            st.agent_client.call = call
+            monkeypatch.setattr(router_module, "read_usage", lambda path, home: UsageSnapshot(138300, 475000, 0, 0))
+            monkeypatch.setattr(router_module, "read_interactions", lambda *args: ({}, []))
+            async def compactions(path):
+                return 13
+            st.router._compactions = compactions
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "👁️‍🗨️ <b>Главный тред </b>🧠sol 6.1 low<b> · ctx</b> 138.3k/475k(29%) · 🗜️13" in text
     run(main())

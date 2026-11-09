@@ -13,6 +13,8 @@ from typing import Any, Protocol
 from cqb.codex.agent_reply import reply_answers
 from cqb.codex.history import HistoryReader, event_from_entry
 from cqb.codex.interactions import read_interactions
+from cqb.codex.rollout_count import CompactionCounter
+from cqb.codex.rollout_tail import read_usage
 from cqb.domain.enums import ConsultantState
 from cqb.domain.models import Consultant, Question, TelegramAction
 from cqb.services.agent_questions import AgentQuestionService
@@ -32,6 +34,7 @@ from cqb.telegram.models import CallbackQuery, Doc, Message, Para, Reply, Update
 from cqb.telegram.present import Presenter
 from cqb.telegram.registry_view import thread_name
 from cqb.telegram.status_post import BUSY as STATUS_BUSY, StatusPoster
+from cqb.telegram.status_view import _model, tokens
 
 log = logging.getLogger(__name__)
 
@@ -43,7 +46,7 @@ CONFIRMATION_DONE = ("send", "asend", "cancel", "acancel")  # presses that end t
 NO_QUESTIONS = "Нет неотвеченных вопросов"
 NOTICE_TASKS = 20  # pending "delete this notice" timers
 EXPANDABLE_LINES = 10
-TOOL_CALL_CHARS = 1500
+TOOL_CALL_CHARS = 1000
 SECRET_REFUSAL = "Секретный ввод: Bridge не обсуждает и не принимает его, ответьте в Codex"
 
 
@@ -105,6 +108,7 @@ class Router:
         self._notice_seconds = notice_seconds
         self._thread_client = thread_client
         self._codex_home = codex_home
+        self._compactions = CompactionCounter(codex_home)
         self._notices: set[asyncio.Task[None]] = set()
         self.opening_agents = None
         self.rejected = 0
@@ -351,8 +355,12 @@ class Router:
         interactions = {}
         names = {}
         sender = "Codex"
+        model = None
+        usage = None
+        compactions = None
         try:
             thread = (await self._thread_client.call("thread/read", {"threadId": root, "includeTurns": False})).get("thread", {})
+            model = _model(thread.get("model"), thread.get("reasoningEffort"))
             source = thread.get("source")
             subagent = source.get("subAgent") if isinstance(source, dict) else None
             spawn = subagent.get("thread_spawn") if isinstance(subagent, dict) else None
@@ -364,6 +372,8 @@ class Router:
                 sender = thread["agentNickname"]
             path = thread.get("path")
             if isinstance(path, str):
+                usage = await asyncio.to_thread(read_usage, path, self._codex_home)
+                compactions = await self._compactions(path)
                 interactions, incoming = await asyncio.to_thread(read_interactions, path, self._codex_home, interaction_ids)
                 first_at = min((e.get("startedAtMs") for e in entries if isinstance(e.get("startedAtMs"), int)), default=0)
                 for at, author, recipient in incoming:
@@ -455,8 +465,8 @@ class Router:
             )
             if expandable and kind in ("commandExecution", "mcpToolCall", "dynamicToolCall", "collabAgentToolCall"):
                 if len(text) > TOOL_CALL_CHARS:
-                    omitted = len(text) - TOOL_CALL_CHARS
-                    text = text[:TOOL_CALL_CHARS] + f"\n... {omitted} chars more"
+                    omitted = len(text[TOOL_CALL_CHARS:].splitlines())
+                    text = text[:TOOL_CALL_CHARS] + f"\n... {omitted} lines more"
             elif expandable:
                 lines = text.splitlines()
                 if len(lines) > EXPANDABLE_LINES:
@@ -471,7 +481,14 @@ class Router:
             else:
                 groups.append((kind, [text], expandable))
         blocks = []
-        size = len(f"\u00a0\n👁️‍🗨️ {title}\n\u00a0\n\n".encode("utf-16-le")) // 2
+        context = "—"
+        if usage:
+            window = tokens(usage.context_window) if usage.context_window else "—"
+            fill = f"({usage.fill_percent}%)" if usage.fill_percent is not None else ""
+            context = f"{tokens(usage.context_tokens)}/{window}{fill}"
+        compact = f" · 🗜️{compactions}" if compactions else ""
+        header = f"👁️‍🗨️ <b>{html.escape(title)} </b>🧠{html.escape(model or '—')}<b> · ctx</b> {context}{compact}"
+        size = len(f"\u00a0\n👁️‍🗨️ {title} 🧠{model or '—'} · ctx {context}{compact}\n\u00a0\n\n".encode("utf-16-le")) // 2
         for kind, parts, expandable in reversed(groups):
             text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
             agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
@@ -486,9 +503,20 @@ class Router:
             if len(text.encode("utf-16-le")) // 2 > remaining:
                 if remaining <= 1 or kind == "agentWait":
                     break
+                if kind == "commandExecution" and len(parts) > 1:
+                    selected = []
+                    for part in reversed(parts):
+                        candidate = "\0".join([part, *selected])
+                        if len(candidate.encode("utf-16-le")) // 2 > remaining:
+                            break
+                        selected.insert(0, part)
+                    parts = selected or parts[-1:]
+                    text = "\0".join(parts)
                 encoded = text.encode("utf-16-le")
                 more_lines = re.search(r"\n\.\.\. (\d+) lines more$", text) if expandable and len(parts) == 1 else None
-                if more_lines:
+                if len(encoded) // 2 <= remaining:
+                    pass
+                elif more_lines:
                     if remaining <= 50:
                         break
                     visible = text[:more_lines.start()]
@@ -529,7 +557,7 @@ class Router:
             if size >= 3598:
                 break
         body = "\n\n".join(reversed(blocks)) or "История пуста"
-        text = f"<blockquote>\u00a0</blockquote>\n👁️‍🗨️ <b>{html.escape(title)}</b>\n<blockquote>\u00a0</blockquote>\n\n" + body
+        text = f"<blockquote>\u00a0</blockquote>\n{header}\n<blockquote>\u00a0</blockquote>\n\n" + body
         await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
 
     def _is_card(self, message_id: int) -> bool:
