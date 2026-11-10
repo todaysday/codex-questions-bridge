@@ -412,9 +412,9 @@ class Router:
             if kind in ("functionCallOutput", "hookPrompt"):
                 continue
             event = event_from_entry(root, entry, max_chars=1_000_000)
-            if event is None or not event.text:
+            if event is None or (not event.text and kind != "reasoning"):
                 continue
-            text = event.text
+            text = event.text or "—"
             if kind == "userMessage":
                 answers = reply_answers(text)
                 if answers is not None:
@@ -458,8 +458,6 @@ class Router:
             elif kind == "collabAgentToolCall" and item.get("tool") == "wait" and not item.get("receiverThreadIds"):
                 kind = "agentWait"
                 text = "wait ->"
-                if groups and groups[-1][0] == kind:
-                    continue
             expandable = kind == "commandExecution" or (
                 kind not in ("userMessage", "questionReply", "agentMessage", "subAgentActivity", "incomingAgentMessage") and len(text) > 180
             )
@@ -491,6 +489,8 @@ class Router:
         size = len(f"\u00a0\n👁️‍🗨️ {title} 🧠{model or '—'} · ctx {context}{compact}\n\u00a0\n\n".encode("utf-16-le")) // 2
         for kind, parts, expandable in reversed(groups):
             text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
+            if kind == "agentWait":
+                text = f"wait({len(parts)}) ->"
             agent_interaction = kind in ("subAgentActivity", "incomingAgentMessage")
             label = {"userMessage": "👤 Вы", "questionReply": "👤 Вы answer", "agentMessage": "🤖 Codex"}.get(kind, "🔧 " + str(kind))
             if agent_interaction:
@@ -537,7 +537,7 @@ class Router:
             elif expandable:
                 block = f"<b>{html.escape(label)}</b>\n<blockquote expandable>{body}</blockquote>"
             elif kind == "agentWait":
-                block = "💤 <b>wait</b> -&gt;"
+                block = f"💤 <b>wait({len(parts)})</b> -&gt;"
             elif agent_interaction:
                 action, separator, rest = text.partition(" · ")
                 block = f"🤖 <b>{html.escape(action)}</b>{separator}{html.escape(rest)}"

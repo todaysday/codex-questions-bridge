@@ -596,11 +596,14 @@ def test_repeated_empty_wait_calls_are_one_line_without_collab_header(conn):
                 {"type": "reasoning", "id": "r", "summary": ["Doing work"]},
                 *[{"type": "collabAgentToolCall", "id": f"x{i}", "tool": "wait", "receiverThreadIds": []} for i in range(4)],
                 {"type": "collabAgentToolCall", "id": "target", "tool": "wait", "receiverThreadIds": ["agent-id"]},
+                {"type": "collabAgentToolCall", "id": "single", "tool": "wait", "receiverThreadIds": []},
             ]
             st.fake.press(opening, "Показать тред")
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
-            assert text.count("💤 <b>wait</b> -&gt;") == 2
+            assert "💤 <b>wait(20)</b> -&gt;" in text
+            assert "💤 <b>wait(4)</b> -&gt;" in text
+            assert "💤 <b>wait(1)</b> -&gt;" in text
             assert "▪️ wait -&gt;" not in text
             assert "<b>🔧 collabAgentToolCall</b> wait -&gt; agent-id" in text
     run(main())
@@ -762,4 +765,21 @@ def test_thread_header_includes_model_effort_and_context(conn, monkeypatch):
             await st.pump()
             text = st.fake.live_messages(topic)[-1]["text"]
             assert "👁️‍🗨️ <b>Главный тред </b>🧠sol 6.1 low<b> · ctx</b> 138.3k/475k(29%) · 🗜️13" in text
+    run(main())
+
+
+def test_empty_reasoning_is_shown_and_grouped(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "reasoning", "id": "a", "summary": []},
+                {"type": "reasoning", "id": "b", "summary": ["Doing work"]},
+                {"type": "reasoning", "id": "c", "summary": []},
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "🧠 <b>reasoning</b>\n▪️ —\n▪️ Doing work\n▪️ —" in text
     run(main())
