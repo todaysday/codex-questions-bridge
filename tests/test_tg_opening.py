@@ -783,3 +783,36 @@ def test_empty_reasoning_is_shown_and_grouped(conn):
             text = st.fake.live_messages(topic)[-1]["text"]
             assert "🧠 <b>reasoning</b>\n▪️ —\n▪️ Doing work\n▪️ —" in text
     run(main())
+
+
+def test_thread_loads_older_pages_when_waits_collapse(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "agentMessage", "id": "older", "text": "Older action"},
+                *[{"type": "collabAgentToolCall", "id": f"w{i}", "tool": "wait", "receiverThreadIds": []} for i in range(240)],
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            text = st.fake.live_messages(topic)[-1]["text"]
+            assert "Older action" in text
+            assert "💤 <b>wait(240)</b> -&gt;" in text
+            assert st.agent_client.calls.count("thread/items/list") == 3
+    run(main())
+
+
+def test_thread_stops_loading_when_message_is_full(conn):
+    async def main():
+        async with make_stack(conn, thread("r1")) as st:
+            topic = await st.open_consultant("r1")
+            opening = st.consultant_dao.get("s1", "r1").opening_message_id
+            st.agent_client.items["r1"] = [
+                {"type": "agentMessage", "id": str(i), "text": "x" * 500} for i in range(300)
+            ]
+            st.fake.press(opening, "Показать тред")
+            await st.pump()
+            assert st.agent_client.calls.count("thread/items/list") == 1
+            assert st.fake.live_messages(topic)[-1]["text"].count("🤖 Codex") >= 1
+    run(main())

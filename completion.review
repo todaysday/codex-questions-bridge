@@ -35,3 +35,5 @@
 - Reviewed answer suffixes and thread snapshots; simplified suffix checks and verified compact replies, grouped calls, line caps, reasoning character counts, and collapsed waits.
 
 - Reviewed pinned agent updates and the eight-agent limit; corrected rollout-fact test expectations for the increased limit.
+
+- Reviewed paginated thread history and corrected a CI race by waiting for the fake Pico server to receive the stop message.

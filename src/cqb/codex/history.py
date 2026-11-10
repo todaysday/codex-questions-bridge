@@ -47,6 +47,15 @@ class HistoryReader:
         entries.reverse()
         return entries, bool(result.get("nextCursor"))
 
+    async def page(self, thread_id: str, limit: int, cursor: str | None = None) -> tuple[list[dict[str, Any]], str | None]:
+        params = {"threadId": thread_id, "limit": limit, "sortDirection": "desc"}
+        if cursor:
+            params["cursor"] = cursor
+        result = await self._call("thread/items/list", params)
+        entries = [e for e in result.get("data") or [] if isinstance(e, dict)]
+        entries.reverse()
+        return entries, result.get("nextCursor") or None
+
     async def find(self, thread_id: str, turn_id: str, item_id: str) -> dict[str, Any] | None:
         cursor: str | None = None
         for _ in range(FIND_PAGES):

@@ -289,7 +289,8 @@ def test_optional_turn_timeout_abandons_the_turn_and_sends_stop():
             inbox = Inbox()
             gw.submit(SID, "never", inbox)
             (r,) = await inbox.wait(1, 5)
-            assert r.outcome is Outcome.TIMEOUT and fake.texts(SID)[-1] == "/stop"
+            assert r.outcome is Outcome.TIMEOUT
+            await wait_until(lambda: fake.texts(SID)[-1:] == ["/stop"])
             await wait_until(lambda: gw.open_sockets == 0)  # the socket was closed with the turn
     arun(main())
 

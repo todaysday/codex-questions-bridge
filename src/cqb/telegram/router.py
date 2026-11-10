@@ -348,7 +348,22 @@ class Router:
             log.debug("answerCallbackQuery failed: %s", exc)
 
     async def _show_thread(self, root: str, topic_id: int, title: str = "Главный тред") -> None:
-        entries, older = await HistoryReader(self._thread_client).recent(root, 100)
+        reader = HistoryReader(self._thread_client)
+        entries = []
+        cursor = None
+        seen = set()
+        while True:
+            page, next_cursor = await reader.page(root, 100, cursor)
+            entries = page + entries
+            text, full = await self._render_thread(root, entries, bool(next_cursor), title)
+            if full or not next_cursor or next_cursor in seen:
+                break
+            seen.add(next_cursor)
+            cursor = next_cursor
+        await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
+
+    async def _render_thread(self, root: str, entries: list, older: bool, title: str) -> tuple[str, bool]:
+        entries = list(entries)
         interaction_ids = {entry["item"]["id"] for entry in entries
                            if isinstance(entry.get("item"), dict) and entry["item"].get("type") == "subAgentActivity"
                            and isinstance(entry["item"].get("id"), str)}
@@ -487,6 +502,7 @@ class Router:
         compact = f" · 🗜️{compactions}" if compactions else ""
         header = f"👁️‍🗨️ <b>{html.escape(title)} </b>🧠{html.escape(model or '—')}<b> · ctx</b> {context}{compact}"
         size = len(f"\u00a0\n👁️‍🗨️ {title} 🧠{model or '—'} · ctx {context}{compact}\n\u00a0\n\n".encode("utf-16-le")) // 2
+        full = False
         for kind, parts, expandable in reversed(groups):
             text = ("\0" if kind == "commandExecution" else "\n\n").join(parts)
             if kind == "agentWait":
@@ -501,6 +517,7 @@ class Router:
                 label = "🧠 reasoning"
             remaining = 3600 - size - len(label) - 4
             if len(text.encode("utf-16-le")) // 2 > remaining:
+                full = True
                 if remaining <= 1 or kind == "agentWait":
                     break
                 if kind == "commandExecution" and len(parts) > 1:
@@ -555,10 +572,11 @@ class Router:
                 block = f"<b>{html.escape(label)}</b>\n{body}"
             blocks.append(block)
             if size >= 3598:
+                full = True
                 break
         body = "\n\n".join(reversed(blocks)) or "История пуста"
         text = f"<blockquote>\u00a0</blockquote>\n{header}\n<blockquote>\u00a0</blockquote>\n\n" + body
-        await self._api.send_message(self._cfg.chat_id, text, thread_id=topic_id, parse_mode="HTML")
+        return text, full
 
     def _is_card(self, message_id: int) -> bool:
         return (self._questions.by_card_message(message_id) is not None
